@@ -1,0 +1,12 @@
+# TrueNAS Custom App (Docker Compose) — migraine-tracker
+# Deploy: place the app source (this directory) on the NAS, then paste this
+# compose into a Custom App with the correct build context path.
+services:
+  migraine-tracker:
+    build: .
+    container_name: migraine-tracker
+    restart: unless-stopped
+    ports:
+      - "8097:3000"
+    volumes:
+      - /mnt/fast_pool/app_data/migraine-tracker/data:/data

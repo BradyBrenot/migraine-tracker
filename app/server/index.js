@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase } from './db.js';
 import { buildApp } from './app.js';
 import { dumpBackup } from './backup.js';
-import { resolveReminderConfig } from './reminder-config.js';
+import { attackViewUrl, resolveAttackConfig, resolveReminderConfig } from './reminder-config.js';
 import { createNtfyTransport } from './ntfy.js';
 import { createReminderEngine } from './reminders.js';
 import { startReminderScheduler } from './scheduler.js';
@@ -34,7 +34,72 @@ const PORT = Number(process.env.PORT ?? 3000);
 const DIST_DIR = resolve(__dirname, '..', 'dist');
 
 const db = openDatabase(DATA_DIR);
-const app = await buildApp({ db, distDir: DIST_DIR, logger: true });
+
+// ── ntfy reminders + attack alerts (environment-only, cleanly disabled) ──
+// NTFY_URL/NTFY_TOKEN/NTFY_ATTACK_URL/NTFY_ATTACK_TOKEN/PUBLIC_APP_URL are
+// never persisted or logged: only enabled state and fixed reasons are printed.
+// One engine and one scheduler serve both topics; a missing topic passes a
+// null transport (attack-only or personal-only engine).
+const reminderConfig = resolveReminderConfig(process.env);
+const attackConfig = resolveAttackConfig(process.env);
+
+if (reminderConfig.enabled) {
+  console.log('ntfy reminders enabled');
+} else {
+  console.log(`ntfy reminders disabled: ${reminderConfig.reason}`);
+}
+if (attackConfig.enabled) {
+  console.log('ntfy attack alerts enabled');
+} else {
+  console.log(`ntfy attack alerts disabled: ${attackConfig.reason}`);
+}
+// A shared topic still works, but the user should know both streams land in
+// the same place. Fixed text, no values; printed once at startup.
+if (reminderConfig.enabled && attackConfig.enabled
+  && reminderConfig.ntfyUrl === attackConfig.ntfyUrl) {
+  console.warn('ntfy attack topic matches the reminder topic');
+}
+
+let reminderScheduler = null;
+let reminderEngine = null;
+if (reminderConfig.enabled || attackConfig.enabled) {
+  reminderEngine = createReminderEngine({
+    db,
+    transport: reminderConfig.enabled
+      ? createNtfyTransport({
+        ntfyUrl: reminderConfig.ntfyUrl,
+        ntfyToken: reminderConfig.ntfyToken,
+        publicAppUrl: reminderConfig.publicAppUrl,
+      })
+      : null,
+    attackTransport: attackConfig.enabled
+      ? createNtfyTransport({
+        ntfyUrl: attackConfig.ntfyUrl,
+        ntfyToken: attackConfig.ntfyToken,
+        // Attack alerts always link to the partner read-only view, never the
+        // writer UI. A malformed PUBLIC_APP_URL only disables the click link.
+        publicAppUrl: attackViewUrl(attackConfig.publicAppUrl),
+      })
+      : null,
+    now: () => Date.now(),
+    log: console.warn,
+  });
+  reminderScheduler = startReminderScheduler({ engine: reminderEngine, log: console.log });
+}
+
+// Attack writes record the event synchronously, then trigger a single-flight
+// scheduler tick for near-immediate delivery (the minute interval is the
+// fallback). Never awaited: the API write is never delayed or failed by ntfy.
+const onAttackChange = reminderEngine && attackConfig.enabled
+  ? (event) => {
+    reminderEngine.noteAttackWrite(event);
+    void reminderScheduler?.tick();
+  }
+  : undefined;
+
+const app = await buildApp({
+  db, distDir: DIST_DIR, logger: true, onAttackChange,
+});
 
 // ── nightly JSON backup dump ─────────────────────────────────────────
 // Writes a full export to <DATA_DIR>/backups/migraine-YYYY-MM-DD.json once
@@ -45,29 +110,6 @@ const runBackup = () => dumpBackup({ db, backupDir: BACKUP_DIR });
 
 runBackup(); // on startup if today's dump doesn't exist yet
 setInterval(runBackup, 3600_000).unref(); // then check hourly
-
-// ── ntfy reminders (environment-only; cleanly disabled when unset) ───
-// NTFY_URL/NTFY_TOKEN/PUBLIC_APP_URL are never persisted or logged. The
-// scheduler uses a minute interval and built-in fetch with a timeout; pure
-// rules and delivery transitions live in reminders.js/shared/reminders.ts.
-const reminderConfig = resolveReminderConfig(process.env);
-let reminderScheduler = null;
-if (reminderConfig.enabled) {
-  const engine = createReminderEngine({
-    db,
-    transport: createNtfyTransport({
-      ntfyUrl: reminderConfig.ntfyUrl,
-      ntfyToken: reminderConfig.ntfyToken,
-      publicAppUrl: reminderConfig.publicAppUrl,
-    }),
-    now: () => Date.now(),
-    log: console.warn,
-  });
-  reminderScheduler = startReminderScheduler({ engine, log: console.log });
-  console.log('ntfy reminders enabled');
-} else {
-  console.log(`ntfy reminders disabled: ${reminderConfig.reason}`);
-}
 
 // ── static frontend registration + listen ────────────────────────────
 app.listen({ port: PORT, host: '0.0.0.0' }).then(() => {

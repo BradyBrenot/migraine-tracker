@@ -214,7 +214,9 @@ export function baselineErrors(b, { partial = false } = {}) {
 const SETTINGS_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 const RESERVED_SETTINGS_PATTERNS = [
   /^ntfyurl$/, /^ntfytoken$/, /^publicappurl$/,
+  /^ntfyattackurl$/, /^ntfyattacktoken$/,
   /ntfyurl/, /ntfytoken/, /publicappurl/,
+  /ntfyattackurl/, /ntfyattacktoken/,
   /token/, /secret/, /password/, /passwd/, /apikey/, /authorization/,
   /bearer/, /credential/,
 ];

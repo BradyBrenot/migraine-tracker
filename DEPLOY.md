@@ -27,28 +27,35 @@ or `server/data`).
 
 (e.g. via SMB share, or `scp -r app/ truenas:/mnt/fast_pool/app_data/migraine-tracker/app`)
 
-## 3. Configure reminder delivery (optional)
+## 3. Configure reminder delivery and attack alerts (optional)
 
-Reminders are **environment-only**. Never put these values in the app settings,
-the database, an export, or this repository. Leave `NTFY_URL` unset/empty to
-run with reminders disabled.
+Reminders and attack alerts are **environment-only**. Never put these values in
+the app settings, the database, an export, or this repository. Leave `NTFY_URL`
+unset/empty to run with reminders disabled and `NTFY_ATTACK_URL` unset/empty to
+run with attack alerts disabled.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `NTFY_URL` | for reminders | Full ntfy **topic publish URL**, e.g. `https://ntfy.example.net/migraine`. Must be `http(s)`, must not contain credentials in the URL or query string. |
-| `NTFY_TOKEN` | no | Bearer token for a protected topic. Sent only in the `Authorization` header. |
-| `PUBLIC_APP_URL` | no | Public HTTPS app URL used for the notification click link, e.g. `https://migraine.example.net`. A malformed value only disables click links. |
+| `NTFY_TOKEN` | no | Bearer token for a protected reminder topic. Sent only in the `Authorization` header. |
+| `NTFY_ATTACK_URL` | for attack alerts | Full ntfy **topic publish URL** for attack start/end alerts, e.g. `https://ntfy.example.net/migraine-attacks`. Same validation as `NTFY_URL`. Use a **separate topic** from reminders. |
+| `NTFY_ATTACK_TOKEN` | no | Bearer token for a protected attack-alert topic. Never shared with or derived from `NTFY_TOKEN`. |
+| `PUBLIC_APP_URL` | no | Public HTTPS app URL used for the notification click link, e.g. `https://migraine.example.net`. A malformed value only disables click links. Attack alerts link to `<PUBLIC_APP_URL>/view` (the partner read-only view), never the writer UI. |
 
 The checked-in `compose.yaml` passes empty `${NTFY_URL:-}` /
-`${NTFY_TOKEN:-}` / `${PUBLIC_APP_URL:-}` placeholders. Set the real values in
-the TrueNAS Compose UI, an operator-managed env file, or the shell environment
-used to start Compose. Do not commit an env file containing credentials.
+`${NTFY_TOKEN:-}` / `${NTFY_ATTACK_URL:-}` / `${NTFY_ATTACK_TOKEN:-}` /
+`${PUBLIC_APP_URL:-}` placeholders. Set the real values in the TrueNAS Compose
+UI, an operator-managed env file, or the shell environment used to start
+Compose. Do not commit an env file containing credentials.
 
 Behavior to expect:
 
 - With `NTFY_URL` absent or invalid, startup logs `ntfy reminders disabled: ...`
-  and creates no scheduler or timer. No notification traffic is attempted.
-- With a valid `NTFY_URL`, one scheduler runs in this one container on a
+  and `NTFY_ATTACK_URL` absent/invalid logs `ntfy attack alerts disabled: ...`.
+  Only the configuration reason is logged; values are never printed. If both
+  are disabled, no scheduler or timer is created and no notification traffic is
+  attempted.
+- With either topic valid, **one** scheduler runs in this one container on a
   minute interval. **Do not run multiple replicas of the container**: the
   scheduler is designed for one process, not a horizontally scaled service.
 - Reminders are sent only during the configured waking hours (initially
@@ -63,6 +70,54 @@ Behavior to expect:
 - A 2xx response from ntfy only means ntfy accepted the publish request. It is
   **not** proof the phone displayed the notification (Do Not Disturb, battery
   optimization, revoked topic permissions, and client sync delays all matter).
+
+### Attack start/end alerts
+
+Subscribe a second device (or the partner's phone) to the `NTFY_ATTACK_URL`
+topic only. These alerts are separate from personal reminders: they do not
+appear on the reminder topic and are not controlled by app reminder settings.
+
+- A **new attack start** and an attack **ending** (the first non-null end time)
+  are delivered on a **best-effort near-immediate** basis, not with a delivery
+  guarantee. The attack write triggers a scheduler tick, but that tick joins an
+  already-running tick/retry batch instead of interrupting it, so a new alert
+  can be delayed by whatever that batch is doing. The one-minute interval
+  (which also picks up the pending alert) is the fallback.
+- Retries are bounded: an alert still undelivered 24 hours after the event
+  instant is dropped (skipped as expired) instead of being retried forever.
+  Delivery stays at-least-once inside that window.
+- A delayed alert whose event fell on an earlier local day (settings timezone)
+  includes that date in the message, e.g. `Attack started at 6:00 PM on Apr 10,
+  2026.`, so it cannot be mistaken for a current event.
+- The end message includes a duration when both timestamps parse and the end is
+  not before the start. Messages contain **only** the start/end time (plus the
+  date when the alert is delayed) and duration - never pain, medications, notes,
+  symptoms, triggers, or aura.
+- Attack alerts ignore the personal reminder master switch, per-type toggles,
+  and waking hours, because the event is time-critical.
+- **Freshness/baseline policy:** alerts are event-driven only, never generated
+  from history. An event timestamp must be within 60 minutes in the past to 5
+  minutes in the future when the write arrives. Older/historical records,
+  backfills, and bulk imports never alert; a newly enabled topic therefore
+  cannot flood with past attacks. Delayed client retries and small clock skew
+  are tolerated inside that window. The flip side: a client clock running
+  significantly fast (event more than ~5 minutes ahead of the server) or a
+  write arriving late/offline (event more than ~60 minutes past) is suppressed
+  and will **not** alert.
+- Editing pain/details never resends a start alert, and correcting an existing
+  end time does not send a second end alert. A deleted or changed attack is
+  re-checked at send time so a stale or contradictory alert is never sent.
+- Delivery is at-least-once around a crash: if the process dies after ntfy
+  accepts an alert but before the success record is written, startup recovery
+  can send that alert again. A 2xx response is not proof the phone showed it;
+  Do Not Disturb, battery optimization, and ntfy client sync delays still
+  apply.
+- Privacy: the payload contains only the event time and duration, but the ntfy
+  server (hosted or self-hosted) still sees topic/timing metadata and the
+  bearer token. Delivery bookkeeping is internal and excluded from
+  `/api/export` and nightly backups; credentials are never persisted, exported,
+  or logged.
+- Deleting an attack or using `/api/import` never raises an alert.
 
 ### One controlled notification test (performed by the user)
 
@@ -79,6 +134,19 @@ curl -fsS -H "Title: migraine tracker test" \
 curl -fsS -H "Title: migraine tracker test" \
   -H "Authorization: Bearer $NTFY_TOKEN" \
   -d "Manual reminder delivery test" "$NTFY_URL"
+```
+
+For the attack topic, repeat once against `$NTFY_ATTACK_URL` (and
+`$NTFY_ATTACK_TOKEN` if that topic is protected):
+
+```bash
+curl -fsS -H "Title: migraine tracker test" \
+  -d "Manual attack alert test" "$NTFY_ATTACK_URL"
+
+# Protected attack topic:
+curl -fsS -H "Title: migraine tracker test" \
+  -H "Authorization: Bearer $NTFY_ATTACK_TOKEN" \
+  -d "Manual attack alert test" "$NTFY_ATTACK_URL"
 ```
 
 Then check the phone. A `200` from ntfy with no phone banner still means the
@@ -170,6 +238,8 @@ services:
     environment:
       NTFY_URL: ${NTFY_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      NTFY_ATTACK_URL: ${NTFY_ATTACK_URL:-}
+      NTFY_ATTACK_TOKEN: ${NTFY_ATTACK_TOKEN:-}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
 ```
 
@@ -271,5 +341,10 @@ and sync all need connectivity to the Tailscale host.
 - Reminders (schema v4) are server-side ntfy delivery for preventive doses,
   low stock, the daily check-in, and behind-goal exercise. Delivery
   bookkeeping is internal and is deliberately not user backup content.
+- Attack start/end alerts are a separate environment-only topic
+  (`NTFY_ATTACK_URL`) using the same internal occurrence bookkeeping (no schema
+  change). They are event-driven from attack API writes, bypass personal
+  reminder settings and waking hours, and carry only event time plus optional
+  duration.
 - No deployment, production data migration, or real notification is performed
   by this checkout. Treat all values above as placeholders.

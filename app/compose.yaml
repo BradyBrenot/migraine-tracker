@@ -16,4 +16,7 @@ services:
       # NTFY_URL is the FULL topic publish URL (e.g. https://ntfy.example/topic).
       NTFY_URL: ${NTFY_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # Separate attack start/end alert topic (independent of reminders).
+      NTFY_ATTACK_URL: ${NTFY_ATTACK_URL:-}
+      NTFY_ATTACK_TOKEN: ${NTFY_ATTACK_TOKEN:-}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}

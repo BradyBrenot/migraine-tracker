@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createNtfyTransport, DeliveryError } from '../ntfy.js';
-import { resolveReminderConfig } from '../reminder-config.js';
+import { attackViewUrl, resolveAttackConfig, resolveReminderConfig } from '../reminder-config.js';
 import { startReminderScheduler } from '../scheduler.js';
 import { createReminderEngine } from '../reminders.js';
 import { dumpBackup } from '../backup.js';
@@ -21,6 +21,7 @@ import { makeApp } from './helpers.js';
 
 const NY = 'America/New_York';
 const FAKE_URL = 'https://ntfy.example.invalid/secret-topic';
+const FAKE_ATTACK_URL = 'https://ntfy.example.invalid/secret-attack-topic';
 const FAKE_TOKEN = 'tk_fake_secret_abc123';
 
 const VALID_REMINDERS = {
@@ -60,12 +61,14 @@ test('settings: environment secret keys are rejected while normal keys succeed',
     'NTFY_URL', 'ntfyUrl', 'ntfy_token', 'NTFY_TOKEN', 'PUBLIC_APP_URL',
     'public-app-url', 'publicAppUrl', 'authToken', 'ntfy-token', 'apiKey',
     'bearerToken', 'secretValue', 'password', 'clientSecret',
+    'NTFY-ATTACK-URL', 'ntfyAttackUrl', 'ntfy_attack_url', 'ntfyAttackToken',
   ];
   for (const key of reserved) {
-    const res = await putJson(h, encodeURIComponent(key), FAKE_URL);
+    const payload = /attack/i.test(key) ? FAKE_ATTACK_URL : FAKE_URL;
+    const res = await putJson(h, encodeURIComponent(key), payload);
     assert.equal(res.statusCode, 400, `reserved key ${key} must be rejected`);
     assert.match(res.json().error, /invalid settings key/);
-    assert.equal(res.body.includes(FAKE_URL), false);
+    assert.equal(res.body.includes(payload), false);
   }
   assert.deepEqual(await getSettings(h), {});
 
@@ -134,6 +137,7 @@ test('settings: legacy secret rows are filtered from settings/export/backup; cor
   rawSetting(db, 'NTFY_URL', JSON.stringify(FAKE_URL));
   rawSetting(db, 'ntfyToken', JSON.stringify(FAKE_TOKEN));
   rawSetting(db, 'PUBLIC_APP_URL', JSON.stringify('https://secret-app.example.invalid/'));
+  rawSetting(db, 'ntfy-attack-url', JSON.stringify(FAKE_ATTACK_URL));
   rawSetting(db, 'reminders', JSON.stringify({
     ...VALID_REMINDERS,
     ntfyUrl: FAKE_URL,
@@ -162,8 +166,11 @@ test('settings: legacy secret rows are filtered from settings/export/backup; cor
     ['settings', JSON.stringify(settings)], ['export', exportText], ['backup', backupText],
   ]) {
     assert.equal(text.includes(FAKE_URL), false, `${label} must not contain the ntfy URL`);
+    assert.equal(text.includes(FAKE_ATTACK_URL), false, `${label} must not contain the attack ntfy URL`);
     assert.equal(text.includes(FAKE_TOKEN), false, `${label} must not contain the token`);
     assert.equal(text.includes('secret-app.example.invalid'), false);
+    assert.equal(text.includes('secret-attack-topic'), false);
+    assert.equal(text.includes('ntfy-attack-url'), false);
     assert.equal(text.includes('ntfyUrl'), false);
     assert.equal(text.includes('NTFY_URL'), false);
     assert.equal(text.includes('ntfyToken'), false);
@@ -467,6 +474,86 @@ test('config: tokens with whitespace or control characters disable delivery', ()
     assert.equal(out.ntfyToken, null);
     assert.equal(out.reason.includes(token), false);
   }
+});
+
+const ATTACK_URL = 'https://ntfy.example.invalid/attack-secret-topic';
+const ATTACK_TOKEN = 'tk_fake_attack_secret_xyz789';
+
+test('config: attack topic validation mirrors the personal rules with fixed reasons', () => {
+  const cases = [
+    [{}, 'NTFY_ATTACK_URL is not set'],
+    [{ NTFY_ATTACK_URL: '   ' }, 'NTFY_ATTACK_URL is not set'],
+    [{ NTFY_ATTACK_URL: 'not a url' }, 'NTFY_ATTACK_URL is not a valid URL'],
+    [{ NTFY_ATTACK_URL: 'https://' }, 'NTFY_ATTACK_URL is not a valid URL'],
+    [{ NTFY_ATTACK_URL: 'ftp://ntfy.example.invalid/attack' }, 'NTFY_ATTACK_URL must use http or https'],
+    [{ NTFY_ATTACK_URL: 'https://user:pass@ntfy.example.invalid/attack' }, 'NTFY_ATTACK_URL must not contain credentials'],
+    [{ NTFY_ATTACK_URL: 'https://ntfy.example.invalid/attack?token=abc' }, 'NTFY_ATTACK_URL must not contain credentials in query parameters'],
+    [{ NTFY_ATTACK_URL: 'https://ntfy.example.invalid/attack?auth=abc' }, 'NTFY_ATTACK_URL must not contain credentials in query parameters'],
+    [{ NTFY_ATTACK_URL: 'https://ntfy.example.invalid/attack?api_key=abc' }, 'NTFY_ATTACK_URL must not contain credentials in query parameters'],
+  ];
+  for (const [env, reason] of cases) {
+    const out = resolveAttackConfig(env);
+    assert.equal(out.enabled, false, JSON.stringify(env));
+    assert.equal(out.reason, reason);
+    assert.equal(out.ntfyUrl, null);
+    assert.equal(out.ntfyToken, null);
+    assert.equal(out.reason.includes('ntfy.example.invalid'), false); // no env values echoed
+    assert.equal(out.reason.includes('abc'), false);
+  }
+
+  for (const token of ['has space', 'tab\there', 'line\nbreak', 'nul\u0000char', 'del\u007fchar']) {
+    const out = resolveAttackConfig({ NTFY_ATTACK_URL: ATTACK_URL, NTFY_ATTACK_TOKEN: token });
+    assert.equal(out.enabled, false);
+    assert.equal(out.reason, 'NTFY_ATTACK_TOKEN contains invalid characters');
+    assert.equal(out.ntfyUrl, null);
+    assert.equal(out.ntfyToken, null);
+    assert.equal(out.reason.includes(token), false);
+  }
+});
+
+test('config: attack topic is independent from the personal topic and never echoes env values', () => {
+  const out = resolveAttackConfig({
+    NTFY_ATTACK_URL: ATTACK_URL,
+    NTFY_ATTACK_TOKEN: ATTACK_TOKEN,
+    PUBLIC_APP_URL: 'https://migraine.example.com',
+  });
+  assert.deepEqual(Object.keys(out).sort(), [
+    'enabled', 'ntfyToken', 'ntfyUrl', 'publicAppUrl', 'reason',
+  ]);
+  assert.equal(out.enabled, true);
+  assert.equal(out.reason, null);
+  assert.equal(out.ntfyUrl, ATTACK_URL);
+  assert.equal(out.ntfyToken, ATTACK_TOKEN);
+  assert.equal(out.publicAppUrl, 'https://migraine.example.com/');
+  assert.equal(JSON.stringify(out.reason), 'null');
+
+  // A malformed PUBLIC_APP_URL only disables click links (delivery still works).
+  const noClick = resolveAttackConfig({
+    NTFY_ATTACK_URL: ATTACK_URL, PUBLIC_APP_URL: 'not a url',
+  });
+  assert.equal(noClick.enabled, true);
+  assert.equal(noClick.publicAppUrl, null);
+  assert.equal(attackViewUrl(noClick.publicAppUrl), null);
+
+  // The two topics never fall back to each other.
+  assert.equal(resolveAttackConfig({ NTFY_URL: ATTACK_URL }).enabled, false);
+  assert.equal(resolveReminderConfig({ NTFY_ATTACK_URL: ATTACK_URL }).enabled, false);
+  assert.equal(resolveAttackConfig({ NTFY_TOKEN: ATTACK_TOKEN }).enabled, false);
+});
+
+test('config: attackViewUrl always targets /view and tolerates trailing slashes', () => {
+  assert.equal(attackViewUrl(null), null);
+  assert.equal(attackViewUrl(undefined), null);
+  assert.equal(attackViewUrl(''), null);
+  assert.equal(attackViewUrl('not a url'), null);
+  assert.equal(attackViewUrl('https://migraine.example.com'), 'https://migraine.example.com/view');
+  assert.equal(attackViewUrl('https://migraine.example.com/'), 'https://migraine.example.com/view');
+  assert.equal(attackViewUrl('https://migraine.example.com///'), 'https://migraine.example.com/view');
+  assert.equal(attackViewUrl('https://migraine.example.com/base'), 'https://migraine.example.com/base/view');
+  // Query strings and hashes never leak into the click target.
+  assert.equal(attackViewUrl('https://migraine.example.com/?utm=x'), 'https://migraine.example.com/view');
+  assert.equal(attackViewUrl('https://migraine.example.com/#section'), 'https://migraine.example.com/view');
+  assert.equal(attackViewUrl('https://migraine.example.com/base/?x=1#s'), 'https://migraine.example.com/base/view');
 });
 
 test('config: resolved secrets are never written to the database or export', async (t) => {

@@ -29,10 +29,23 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 // fields are absent.
 const bodyObject = (req) => (isPlainObject(req.body) ? req.body : {});
 
-export async function buildApp({ db, distDir, logger = false } = {}) {
+export async function buildApp({
+  db, distDir, logger = false, onAttackChange,
+} = {}) {
   const app = Fastify({ logger });
 
   // ── attacks ────────────────────────────────────────────────────────
+  // onAttackChange is an optional synchronous notification hook (startup
+  // wiring records attack alerts). It is never awaited and never allowed to
+  // affect the status code or body; DELETE and bulk import never call it.
+  function notifyAttackChange(event) {
+    try {
+      onAttackChange?.(event);
+    } catch {
+      // never fail the write
+    }
+  }
+
   app.get('/api/attacks', () =>
     db.prepare('SELECT * FROM attacks ORDER BY start').all().map(attackFromRow));
 
@@ -43,8 +56,10 @@ export async function buildApp({ db, distDir, logger = false } = {}) {
     const row = attackToRow({ ...body, id: body.id || uid() });
     db.prepare(`INSERT INTO attacks (id,start,"end",pain_log,peak_pain,symptoms,triggers,aura,notes,source)
       VALUES (@id,@start,@end,@pain_log,@peak_pain,@symptoms,@triggers,@aura,@notes,@source)`).run(row);
+    const attack = attackFromRow(row);
+    notifyAttackChange({ before: null, after: attack });
     reply.code(201);
-    return attackFromRow(row);
+    return attack;
   });
 
   app.patch('/api/attacks/:id', (req, reply) => {
@@ -62,7 +77,9 @@ export async function buildApp({ db, distDir, logger = false } = {}) {
     const row = attackToRow(merged);
     db.prepare(`UPDATE attacks SET start=@start,"end"=@end,pain_log=@pain_log,peak_pain=@peak_pain,
       symptoms=@symptoms,triggers=@triggers,aura=@aura,notes=@notes,source=@source WHERE id=@id`).run(row);
-    return attackFromRow(row);
+    const attack = attackFromRow(row);
+    notifyAttackChange({ before: attackFromRow(existing), after: attack });
+    return attack;
   });
 
   app.delete('/api/attacks/:id', (req, reply) => {

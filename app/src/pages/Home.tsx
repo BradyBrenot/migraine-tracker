@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon, Zap } from 'lucide-react';
+import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { usageDaysInWindow } from '@/lib/usage';
 import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
@@ -125,14 +125,14 @@ export default function Home() {
   }
 
   function handlePain(level: number) {
-    if (activeAttack) {
-      store.logPain(activeAttack.id, level);
-      toast.success(`Pain logged: ${level}/10`);
-    } else {
-      const a = store.startAttack();
-      store.logPain(a.id, level);
-      toast.success(`Attack started at ${level}/10`);
+    // The dialog is only reachable from the active-attack UI or the start CTA,
+    // so there is always a real attack to log against.
+    if (!activeAttack) {
+      setPainOpen(false);
+      return;
     }
+    store.logPain(activeAttack.id, level);
+    toast.success(`Pain logged: ${level}/10`);
     setPainOpen(false);
   }
 
@@ -323,7 +323,7 @@ export default function Home() {
       )}
 
       {/* ── Secondary actions ───────────────────────────────────── */}
-      <section className="grid grid-cols-3 gap-2">
+      <section className="grid grid-cols-2 gap-2">
         <Button variant="outline" className="h-12 gap-1.5 px-2" onClick={() => setNewOpen(true)}>
           <HistoryIcon className="h-4 w-4 shrink-0" />
           <span className="text-xs sm:text-sm">Past attack</span>
@@ -331,14 +331,6 @@ export default function Home() {
         <Button variant="outline" className="h-12 gap-1.5 px-2" onClick={() => setPastMedOpen(true)}>
           <Pill className="h-4 w-4 shrink-0" />
           <span className="text-xs sm:text-sm">Past med</span>
-        </Button>
-        <Button
-          variant="outline"
-          className="h-12 gap-1.5 px-2"
-          onClick={() => (activeAttack ? setEditOpen(true) : setPainOpen(true))}
-        >
-          <Zap className="h-4 w-4 shrink-0" />
-          <span className="text-xs sm:text-sm">{activeAttack ? 'Edit details' : 'Log pain'}</span>
         </Button>
       </section>
 
@@ -382,9 +374,7 @@ export default function Home() {
             </button>
           </div>
           <p className="text-center text-xs text-slate-400">
-            {activeAttack
-              ? 'Logged against your current attack'
-              : 'No active attack — this will start one'}
+            Logged against your current attack
           </p>
           <p className="text-center text-xs text-slate-400">
             0 = no pain, but still an attack.

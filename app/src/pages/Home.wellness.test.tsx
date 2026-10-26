@@ -679,13 +679,20 @@ describe('Home wellness logging', () => {
     expect(screen.queryByRole('button', { name: 'Another attack started' })).toBeNull();
   });
 
-  it('clicking 0 without an active attack starts a real 0-pain attack, not an Off day', async () => {
+  it('clicking the main Attack started CTA then 0 logs a real 0-pain attack, not an Off day', async () => {
     mountHome();
     await waitForSync();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Log pain' }));
+    // The redundant bottom pain/edit secondary action is gone: while idle there
+    // is no "Log pain" button at all, and "Edit details" only exists while an
+    // attack is active (the attack card has its lowercase "details" link).
+    expect(screen.queryByRole('button', { name: 'Log pain' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
 
-    // Intensity 0 is a real pain level, so the dialog always offers it.
+    fireEvent.click(screen.getByRole('button', { name: 'Attack started' }));
+
+    // The CTA starts the attack and opens the pain dialog for it.
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(1));
     expect(screen.getByText('How bad is the pain right now?')).toBeTruthy();
     expect(screen.getByText('0 = no pain, but still an attack.')).toBeTruthy();
     for (let n = 0; n <= 10; n += 1) {
@@ -694,24 +701,30 @@ describe('Home wellness logging', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '0' }));
 
-    await waitFor(() => expect(captured!.state.attacks).toHaveLength(1));
+    await waitFor(() => expect(captured!.state.attacks[0].peakPain).toBe(0));
+    expect(captured!.state.attacks).toHaveLength(1);
     const attack = captured!.state.attacks[0];
     expect(attack.end).toBeNull();
     expect(attack.peakPain).toBe(0);
     expect(attack.painLog.some((entry) => entry.level === 0)).toBe(true);
+    // Only the CTA creates the attack; logging pain patches it instead.
     expect(api.addAttack).toHaveBeenCalledTimes(1);
 
-    // The new attack drives the banner and hides the wellness card.
+    // The new attack drives the banner, hides the wellness card, and leaves the
+    // attack card as the single "Log pain" affordance.
     await waitFor(() => expect(screen.getByText('Attack in progress')).toBeTruthy());
     expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Strength/ })).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Log pain' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
 
     // It is an attack, never a day-state record (i.e. not an Off day).
     await waitFor(() => expect(readPersisted().attacks).toHaveLength(1));
     expect(readPersisted().dayStates).toHaveLength(0);
     expect(api.putDayState).not.toHaveBeenCalled();
 
-    expect(sonner.toast.success).toHaveBeenCalledWith('Attack started at 0/10');
+    expect(sonner.toast.success).toHaveBeenCalledWith('Attack started — hang in there 💜', expect.anything());
+    expect(sonner.toast.success).toHaveBeenCalledWith('Pain logged: 0/10');
   });
 
   it('still offers pain level 0 while an attack is active', async () => {
@@ -719,6 +732,11 @@ describe('Home wellness logging', () => {
 
     mountHome();
     await waitForSync();
+
+    // Only the attack card offers "Log pain"; the removed bottom secondary
+    // action (and its active-state "Edit details" label) is gone.
+    expect(screen.getAllByRole('button', { name: 'Log pain' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Log pain' }));
 

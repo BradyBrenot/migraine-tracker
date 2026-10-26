@@ -17,6 +17,7 @@ import {
   stockOccurrenceKey,
   transientWindow,
 } from './reminders.ts';
+import type { DayKey } from './datetime.ts';
 
 const NY = 'America/New_York';
 
@@ -292,13 +293,15 @@ describe('assessExercise', () => {
     workouts?: ReturnType<typeof workout>[];
     dayStates?: ReturnType<typeof dayState>[];
     attacks?: ReturnType<typeof attack>[];
+    day?: DayKey;
+    now?: number;
   }) {
     return assessExercise({
       workouts: input.workouts ?? [],
       dayStates: input.dayStates ?? [],
       attacks: input.attacks ?? [],
-      day: DAY,
-      now: NOW,
+      day: input.day ?? DAY,
+      now: input.now ?? NOW,
       timeZone: NY,
     });
   }
@@ -412,6 +415,124 @@ describe('assessExercise', () => {
       dayStates: [dayState(DAY, 'off')],
       attacks: [attack('2026-06-10T10:00:00.000Z', '2026-06-10T15:00:00.000Z')],
     })).toMatchObject({ suppressed: null, state: 'off' });
+  });
+
+  it('suppresses an explicitly well day when an attack is still active now', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: 'attack', state: 'well' });
+  });
+
+  it('suppresses an explicitly off day when an attack is still active now', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'off')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: 'attack', state: 'off' });
+  });
+
+  it('treats a recorded end later than now as active over an explicit off day', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'off')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', '2026-06-10T21:00:00.000Z')],
+    })).toMatchObject({ suppressed: 'attack', state: 'off' });
+  });
+
+  it('does not treat an end exactly at now as active', () => {
+    // NOW is 20:00Z; an end of exactly now means the attack has ended.
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', '2026-06-10T20:00:00.000Z')],
+    })).toMatchObject({ suppressed: null, state: 'well' });
+  });
+
+  it('does not treat a future-start attack as active now', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T21:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: null, state: 'well' });
+  });
+
+  it('does not suppress a future assessed day for an ongoing attack', () => {
+    // The 2026-06-11 NY day starts at 2026-06-11T04:00Z, after NOW; an open end
+    // is only known to reach up to now, so it cannot overlap that day.
+    expect(assess({
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+      day: '2026-06-11',
+    })).toMatchObject({ suppressed: null, state: 'unknown' });
+
+    expect(assess({
+      dayStates: [dayState('2026-06-11', 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+      day: '2026-06-11',
+    })).toMatchObject({ suppressed: null, state: 'well' });
+  });
+
+  it('treats a start exactly at now as active', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T20:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: 'attack', state: 'well' });
+  });
+
+  it('keeps ended-attack recovery for well/off records, even with goals met', () => {
+    const ended = attack('2026-06-10T10:00:00.000Z', '2026-06-10T15:00:00.000Z');
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [ended],
+    })).toMatchObject({ suppressed: null, state: 'well' });
+    expect(assess({
+      dayStates: [dayState(DAY, 'off')],
+      attacks: [ended],
+    })).toMatchObject({ suppressed: null, state: 'off' });
+    expect(assess({
+      workouts: goalsMet,
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [ended],
+    })).toMatchObject({ suppressed: 'goals-met', state: 'well' });
+  });
+
+  it('infers an active attack from an ongoing attack when no day state exists', () => {
+    expect(assess({
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: 'attack', state: 'attack' });
+  });
+
+  it('never throws on unparseable timestamps and never suppresses via them', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('garbage', null)],
+    })).toMatchObject({ suppressed: null, state: 'well' });
+
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', 'garbage')],
+    })).toMatchObject({ suppressed: null, state: 'well' });
+
+    expect(assess({
+      attacks: [attack('garbage', null)],
+    })).toMatchObject({ suppressed: null, state: 'unknown' });
+  });
+
+  it('treats an empty-string end as still ongoing', () => {
+    expect(assess({
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', '')],
+    })).toMatchObject({ suppressed: 'attack', state: 'well' });
+  });
+
+  it('lets an active attack win over met goals while an ended one does not', () => {
+    expect(assess({
+      workouts: goalsMet,
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T18:00:00.000Z', null)],
+    })).toMatchObject({ suppressed: 'attack', state: 'well' });
+
+    expect(assess({
+      workouts: goalsMet,
+      dayStates: [dayState(DAY, 'well')],
+      attacks: [attack('2026-06-10T10:00:00.000Z', '2026-06-10T15:00:00.000Z')],
+    })).toMatchObject({ suppressed: 'goals-met', state: 'well' });
   });
 
   it('leaves an empty week behind with no suppression', () => {

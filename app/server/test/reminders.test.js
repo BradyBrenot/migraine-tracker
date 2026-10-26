@@ -530,6 +530,87 @@ test('exercise: explicit and attack-inferred Attack days suppress the prompt', a
   assert.equal(occurrence(inferred.db, 'exercise:2026-04-10').status, 'skipped');
 });
 
+test('exercise: an attack active at now suppresses the prompt despite an earlier Well/Off record', async (t) => {
+  // (a) explicit Off recorded earlier that day, attack still ongoing at 18:30 EDT
+  {
+    const { db } = makeDb(t, 'exercise-active-off');
+    seedSettings(db, { reminders: EXERCISE_ONLY });
+    db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
+      VALUES ('2026-04-10','off','','2026-04-10T14:00:00.000Z')`).run();
+    db.prepare(`INSERT INTO attacks (id,start,"end")
+      VALUES ('a1','2026-04-10T21:00:00.000Z',NULL)`).run();
+    const clock = makeClock('2026-04-10T22:30:00.000Z'); // 18:30 EDT Fri
+    const { transport, calls } = recorder();
+    const engine = engineFor(db, clock, transport);
+
+    assert.equal((await engine.tick()).sent, 0);
+    assert.equal(calls.length, 0);
+    const row = occurrence(db, 'exercise:2026-04-10');
+    assert.equal(row.status, 'skipped');
+    assert.equal(row.last_error_category, 'condition_gone');
+  }
+
+  // (b) explicit Well recorded earlier that day, attack has a recorded end later than now
+  {
+    const { db } = makeDb(t, 'exercise-active-well');
+    seedSettings(db, { reminders: EXERCISE_ONLY });
+    db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
+      VALUES ('2026-04-10','well','','2026-04-10T14:00:00.000Z')`).run();
+    db.prepare(`INSERT INTO attacks (id,start,"end")
+      VALUES ('a1','2026-04-10T21:00:00.000Z','2026-04-11T01:00:00.000Z')`).run();
+    const clock = makeClock('2026-04-10T22:30:00.000Z');
+    const { transport, calls } = recorder();
+    const engine = engineFor(db, clock, transport);
+
+    assert.equal((await engine.tick()).sent, 0);
+    assert.equal(calls.length, 0);
+    const row = occurrence(db, 'exercise:2026-04-10');
+    assert.equal(row.status, 'skipped');
+    assert.equal(row.last_error_category, 'condition_gone');
+  }
+
+  // (c) a pending prompt is dropped when an attack becomes active before the retry
+  {
+    const { db } = makeDb(t, 'exercise-active-pending');
+    seedSettings(db, { reminders: EXERCISE_ONLY });
+    const clock = makeClock('2026-04-10T22:30:00.000Z');
+    const { transport, calls } = recorder(() => {
+      throw new DeliveryError('fetch');
+    });
+    const engine = engineFor(db, clock, transport);
+
+    assert.equal((await engine.tick()).failed, 1);
+    assert.equal(calls.length, 1);
+    db.prepare(`INSERT INTO attacks (id,start,"end")
+      VALUES ('a1','2026-04-10T21:00:00.000Z',NULL)`).run();
+    clock.set('2026-04-10T22:31:00.000Z');
+    const retry = await engine.tick();
+    assert.equal(retry.sent, 0);
+    assert.equal(retry.failed, 0);
+    assert.equal(calls.length, 1);
+    const row = occurrence(db, 'exercise:2026-04-10');
+    assert.equal(row.status, 'skipped');
+    assert.equal(row.last_error_category, 'condition_gone');
+  }
+
+  // (d) an attack that already ended keeps the explicit Off gentle-wording behavior
+  {
+    const { db } = makeDb(t, 'exercise-ended-off');
+    seedSettings(db, { reminders: EXERCISE_ONLY });
+    db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
+      VALUES ('2026-04-10','off','','2026-04-10T14:00:00.000Z')`).run();
+    db.prepare(`INSERT INTO attacks (id,start,"end")
+      VALUES ('a1','2026-04-10T18:00:00.000Z','2026-04-10T21:00:00.000Z')`).run();
+    const clock = makeClock('2026-04-10T22:30:00.000Z');
+    const { transport, calls } = recorder();
+    const engine = engineFor(db, clock, transport);
+
+    assert.equal((await engine.tick()).sent, 1);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].title, 'Gentle movement option');
+  }
+});
+
 test('exercise: an explicit Off day sends gentle wording; Off plus met goals suppresses', async (t) => {
   const off = makeDb(t, 'exercise-off');
   seedSettings(off.db, { reminders: EXERCISE_ONLY });

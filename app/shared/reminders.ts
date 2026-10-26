@@ -289,10 +289,31 @@ export interface ExerciseAssessment {
 /**
  * Exercise reminder condition for one local day.
  *
- * - Attack (explicit OR inferred from an overlapping attack) suppresses the
- *   reminder entirely; goals met suppresses it too.
- * - Off does NOT suppress: the server uses gentler light-option wording.
+ * - An explicit Attack day record suppresses the reminder entirely.
+ * - When no explicit record exists, an Attack inferred from an attack
+ *   overlapping the assessed local day also suppresses it.
+ * - INDEPENDENTLY of the day-state record, an attack that is active at `now`
+ *   suppresses the reminder even beside an explicit Well/Off record. Active
+ *   means: a valid start at or before `now` (a future-start attack is not
+ *   active), overlapping the assessed local day, and either no end yet
+ *   (null/undefined/empty, as the server treats `end: ''` as ongoing) or a
+ *   valid end strictly later than `now`. Ended attacks (end <= now) and
+ *   future-start attacks never trigger this override, so an ended attack keeps
+ *   the existing explicit-record recovery semantics. An open end is known to
+ *   reach only up to `now` (the same cap `hasAttackThatDay` uses), so a future
+ *   assessed local day is never suppressed by it.
+ * - Off alone does NOT suppress the reminder: the server uses gentler
+ *   light-option wording instead.
+ * - Goals met suppresses the reminder; the attack override still wins over
+ *   goals-met, matching the explicit-attack precedence.
  * - Mobility is tracked but never satisfies strength/cardio (shared counts).
+ *
+ * `state` always prefers an explicit record (display/wording), falling back to
+ * an inferred attack day, and is not itself changed by the active-at-now rule.
+ * Recovery after an attack ends is assessment-level (state/wording) only: an
+ * exercise occurrence already skipped as `condition_gone` is terminal and is
+ * never resurrected later that same local day; only future local days assess
+ * fresh.
  */
 export function assessExercise({
   workouts, dayStates, attacks, day, now, timeZone,
@@ -305,6 +326,18 @@ export function assessExercise({
     const end = attack.end ? Date.parse(attack.end) : now;
     return Number.isFinite(end) && start < dayEnd && end > dayStart;
   });
+  const attackActiveNow = attacks.some((attack) => {
+    const start = Date.parse(attack.start);
+    if (!Number.isFinite(start) || start > now || start >= dayEnd) return false;
+    if (!attack.end) {
+      // No end yet: still ongoing, but an open end is only known to reach up to
+      // `now` (same cap hasAttackThatDay uses), so the assessed local day must
+      // already have started; a future assessed day is never suppressed.
+      return now > dayStart;
+    }
+    const end = Date.parse(attack.end);
+    return Number.isFinite(end) && end > now && end > dayStart;
+  });
   const record = dayStates.find((d) => d.day === day) ?? null;
   const state: DayStateStatus | 'unknown' = record
     ? record.status
@@ -312,7 +345,7 @@ export function assessExercise({
 
   const counts = countWorkoutsInWeek(workouts, day, timeZone);
   const goals = weekGoalStatus(counts);
-  const suppressed = state === 'attack'
+  const suppressed = attackActiveNow || state === 'attack'
     ? 'attack'
     : goals.strengthMet && goals.cardioMet ? 'goals-met' : null;
 

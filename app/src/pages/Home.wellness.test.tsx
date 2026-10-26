@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, TrackerState, Workout, WorkoutKind } from '@/types';
 import { localDayKey } from '../../shared/datetime.ts';
@@ -1173,5 +1173,211 @@ describe("Home today's meds", () => {
     expect(screen.queryByRole('heading', { name: 'Today' })).toBeNull();
     // The invalid record is still in state — hydration does not drop data.
     expect(captured!.state.meds).toHaveLength(1);
+  });
+});
+
+describe('Home recent-dose surfacing', () => {
+  const MINUTE_MS = 60 * 1000;
+  const HOUR_MS = 60 * MINUTE_MS;
+  const TIME_OPTIONS = { hour: 'numeric', minute: '2-digit' } as const;
+
+  function quickButton(name: RegExp): HTMLButtonElement {
+    return screen.getByRole('button', { name }) as HTMLButtonElement;
+  }
+
+  function medToastOptions(message: string): {
+    description: string;
+    action: { label: string; onClick: () => void };
+  } {
+    const call = (sonner.toast.success as Mock).mock.calls.find(
+      ([toastMessage]) => toastMessage === message,
+    );
+    expect(call).toBeTruthy();
+    return call![1] as { description: string; action: { label: string; onClick: () => void } };
+  }
+
+  it('shows a recent last-dose hint on the same quick card and still logs in one tap', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'recent-tylenol', medId: 'tylenol', ts: new Date(now - 25 * MINUTE_MS).toISOString() })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const card = quickButton(/^Tylenol/);
+    expect(within(card).getByText('Last 25m ago')).toBeTruthy();
+
+    fireEvent.click(card);
+
+    await waitFor(() => expect(api.addMed).toHaveBeenCalledTimes(1));
+    expect(api.addMed).toHaveBeenCalledWith(expect.objectContaining({ medId: 'tylenol' }));
+    await waitFor(() => expect(captured!.state.meds).toHaveLength(2));
+  });
+
+  it('shows no hint when the latest same-med dose is older than the window', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'old-tylenol', medId: 'tylenol', ts: new Date(now - 3 * HOUR_MS).toISOString() })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getByRole('button', { name: /^Tylenol/ })).toBeTruthy();
+    expect(screen.queryByText(/^Last /)).toBeNull();
+  });
+
+  it('ignores unparseable and empty timestamps without crashing the page', async () => {
+    seedState({
+      timezone: 'UTC',
+      meds: [
+        makeMed({ id: 'bad-unparseable', medId: 'tylenol', ts: 'not-a-date' }),
+        makeMed({ id: 'bad-empty', medId: 'ibuprofen', ts: '' }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    // The rest of the page still renders and no hint is produced from junk.
+    expect(screen.getByRole('button', { name: 'Attack started' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Tylenol/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Ibuprofen/ })).toBeTruthy();
+    expect(screen.queryByText(/^Last /)).toBeNull();
+  });
+
+  it('hides a timestamp far in the future', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'future-tylenol', medId: 'tylenol', ts: new Date(now + 10 * MINUTE_MS).toISOString() })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.queryByText(/^Last /)).toBeNull();
+  });
+
+  it('tolerates a timestamp just inside the clock-skew window', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'skewed-tylenol', medId: 'tylenol', ts: new Date(now + 30 * 1000).toISOString() })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    // A fresh optimistic dose can trail the coarse clock by a few seconds; the
+    // clamped age still reads as the sub-minute label.
+    expect(screen.getByText('Last <1m ago')).toBeTruthy();
+  });
+
+  it('uses the latest same-med dose when several are in the window', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [
+        makeMed({ id: 'older-tylenol', medId: 'tylenol', ts: new Date(now - 90 * MINUTE_MS).toISOString() }),
+        makeMed({ id: 'newer-tylenol', medId: 'tylenol', ts: new Date(now - 25 * MINUTE_MS).toISOString() }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getAllByText(/^Last /)).toHaveLength(1);
+    expect(screen.getByText('Last 25m ago')).toBeTruthy();
+    expect(screen.queryByText('Last 1h 30m ago')).toBeNull();
+  });
+
+  it('never shows the hint on a preventive card', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'recent-emgality', medId: 'emgality', ts: new Date(now - 20 * MINUTE_MS).toISOString() })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(quickButton(/^Emgality/)).toBeTruthy();
+    expect(screen.queryByText(/^Last /)).toBeNull();
+  });
+
+  it('adds previous-dose context to the log toast while keeping dose, time, and Undo', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [
+        makeMed({
+          id: 'old-nurtec',
+          medId: 'nurtec',
+          dose: '75 mg',
+          ts: new Date(now - 25 * MINUTE_MS).toISOString(),
+        }),
+      ],
+      doses: { nurtec: '75 mg' },
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const timeBefore = new Date().toLocaleTimeString([], TIME_OPTIONS);
+    fireEvent.click(quickButton(/^Nurtec/));
+    const timeAfter = new Date().toLocaleTimeString([], TIME_OPTIONS);
+
+    const options = medToastOptions('Nurtec logged');
+    const description = options.description;
+    expect(description).toContain('75 mg');
+    // The localized log time is still present (between the dose and context).
+    const timePart = description.split(' · ')[1];
+    expect([timeBefore, timeAfter]).toContain(timePart);
+    // Context describes the OLD dose, not the entry just added.
+    expect(description).toContain('last dose 25m ago');
+    expect(description).not.toContain('last dose <1m');
+    expect(description).not.toContain('last dose 0m');
+    expect(options.action.label).toBe('Undo');
+
+    await waitFor(() => expect(captured!.state.meds).toHaveLength(2));
+    const added = captured!.state.meds.find((m) => m.id !== 'old-nurtec');
+    expect(added?.medId).toBe('nurtec');
+
+    act(() => options.action.onClick());
+
+    await waitFor(() => expect(captured!.state.meds).toHaveLength(1));
+    expect(api.deleteMed).toHaveBeenCalledWith(added!.id);
+    expect(captured!.state.meds[0].id).toBe('old-nurtec');
+  });
+
+  it('omits previous-dose context when the prior dose is older than the window', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      meds: [
+        makeMed({
+          id: 'old-nurtec',
+          medId: 'nurtec',
+          dose: '75 mg',
+          ts: new Date(now - 3 * HOUR_MS).toISOString(),
+        }),
+      ],
+      doses: { nurtec: '75 mg' },
+    });
+
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(quickButton(/^Nurtec/));
+
+    const { description } = medToastOptions('Nurtec logged');
+    expect(description).toContain('75 mg');
+    expect(description).toMatch(/\d{1,2}:\d{2}/);
+    expect(description).not.toContain('last dose');
+    await waitFor(() => expect(captured!.state.meds).toHaveLength(2));
   });
 });

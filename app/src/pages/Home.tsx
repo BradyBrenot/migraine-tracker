@@ -7,6 +7,7 @@ import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { MED_CATALOG, painColor, medColor, medName, textOn } from '@/lib/meds';
 import { fmtDuration, fmtTime, fmtDateFull } from '@/lib/format';
+import type { MedEvent } from '@/types';
 import AttackFormDialog from '@/components/AttackFormDialog';
 import MedFormDialog from '@/components/MedFormDialog';
 import DayCheckIn from '@/components/DayCheckIn';
@@ -51,6 +52,53 @@ function nurtecStockBadge(stock: NurtecInventory): {
   };
 }
 
+/**
+ * A same-med dose is "recent" for two hours. This is purely informational
+ * context on the quick-log grid — it never blocks, warns, or disables logging.
+ */
+const RECENT_DOSE_WINDOW_MS = 2 * 60 * 60 * 1000;
+/**
+ * The render clock (`useNow`) is deliberately coarse (~15s) and an optimistic
+ * `logMed` can land a few milliseconds after the last tick, so a freshly
+ * logged timestamp may look slightly "in the future". This tolerance absorbs
+ * that skew without ever showing a timestamp that is genuinely ahead.
+ */
+const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
+
+/** Latest parseable timestamp (epoch ms) for one med, or null. Invalid `ts`
+ * values (empty, malformed, unparseable) are ignored rather than compared. */
+function latestDoseMs(meds: MedEvent[], medId: string): number | null {
+  let latest: number | null = null;
+  for (const m of meds) {
+    if (m.medId !== medId) continue;
+    const ms = Date.parse(m.ts);
+    if (!Number.isFinite(ms)) continue;
+    if (latest === null || ms > latest) latest = ms;
+  }
+  return latest;
+}
+
+/**
+ * Age of the most recent same-med dose in ms, or null when it is not usable.
+ *
+ * Rule: the latest usable event for a medId wins (max parsed timestamp),
+ * regardless of attackId, notes, dose, or configured day. The result is only
+ * non-null when `ageMs <= RECENT_DOSE_WINDOW_MS` and
+ * `ageMs >= -CLOCK_SKEW_TOLERANCE_MS`; display age is clamped to >= 0.
+ */
+function recentDoseAgeMs(meds: MedEvent[], medId: string, now: number): number | null {
+  const latest = latestDoseMs(meds, medId);
+  if (latest === null) return null;
+  const ageMs = now - latest;
+  if (ageMs > RECENT_DOSE_WINDOW_MS || ageMs < -CLOCK_SKEW_TOLERANCE_MS) return null;
+  return Math.max(0, ageMs);
+}
+
+/** "25m" / "1h 5m" / "<1m" — the age part of a last-dose label. */
+function doseAgeText(ageMs: number): string {
+  return ageMs < 60_000 ? '<1m' : fmtDuration(ageMs);
+}
+
 export default function Home() {
   const store = useStore();
   const { activeAttack, state } = store;
@@ -77,6 +125,20 @@ export default function Home() {
   // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
   const nurtecStock = nurtecInventory(state, now);
   const nurtecBadge = nurtecStockBadge(nurtecStock);
+
+  // Informational "last dose" hints for the acute quick-log cards, keyed by
+  // medId. Recomputed on clock ticks and after optimistic log/undo so the hint
+  // appears/disappears without delaying the one-tap log. Preventive cards are
+  // excluded — this context belongs to the acute grid only.
+  const recentDoseHints = useMemo(() => {
+    const hints = new Map<string, string>();
+    for (const m of MED_CATALOG) {
+      if (m.kind === 'preventive') continue;
+      const ageMs = recentDoseAgeMs(state.meds, m.id, now);
+      if (ageMs !== null) hints.set(m.id, `Last ${doseAgeText(ageMs)} ago`);
+    }
+    return hints;
+  }, [state.meds, now]);
 
   // ── Today's wellness state ─────────────────────────────────
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
@@ -141,13 +203,24 @@ export default function Home() {
   }
 
   function handleMed(medId: string) {
+    // Capture one instant: the stored `ts` and the toast time must agree, and
+    // the previous-dose context must describe state BEFORE this new entry.
+    const when = new Date();
+    const previousAgeMs = recentDoseAgeMs(state.meds, medId, when.getTime());
     // New Nurtec doses are one tablet by default; other meds keep dose text only.
     const quantity = medId === 'nurtec' ? 1 : null;
     const entry = store.logMed(
-      medId, new Date(), activeAttack?.id ?? null, state.doses[medId] ?? '', '', quantity,
+      medId, when, activeAttack?.id ?? null, state.doses[medId] ?? '', '', quantity,
     );
+    // Previous-dose context is additive: the configured dose prefix and the
+    // logged time always stay, and the Undo action is unchanged.
+    const description = [
+      state.doses[medId] ?? '',
+      when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      previousAgeMs !== null ? `last dose ${doseAgeText(previousAgeMs)} ago` : '',
+    ].filter((part) => part !== '').join(' · ');
     toast.success(`${medName(medId)} logged`, {
-      description: `${state.doses[medId] ? state.doses[medId] + ' · ' : ''}${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
+      description,
       action: {
         label: 'Undo',
         onClick: () => store.deleteMed(entry.id),
@@ -263,6 +336,11 @@ export default function Home() {
               <div className="truncate text-[10px] text-slate-400 sm:text-[11px]" title={m.kindLabel}>
                 {m.kindLabel}
               </div>
+              {recentDoseHints.has(m.id) && (
+                <span className="block break-words text-[10px] leading-tight tabular-nums text-slate-400 sm:text-[11px]">
+                  {recentDoseHints.get(m.id)}
+                </span>
+              )}
               {m.id === 'nurtec' && (
                 <span className="mt-1 flex flex-wrap gap-1 sm:absolute sm:right-2 sm:top-2 sm:mt-0 sm:flex-col sm:items-end">
                   <span

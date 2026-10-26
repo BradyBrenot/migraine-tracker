@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type {
   Attack, DayState, MedEvent, Refill, StockBaseline, Workout,
 } from '@/types';
+import { fmtTime } from '@/lib/format';
 import { localDayKey } from '../../shared/datetime.ts';
 
 vi.mock('@/lib/api', () => ({
@@ -65,9 +66,9 @@ function Probe() {
   return null;
 }
 
-function mountHome(): void {
+function mountHome() {
   const PartnerHome = partnerHomeModule.default;
-  render(
+  return render(
     <storeModule.ReadOnlyStoreProvider>
       <PartnerHome />
       <Probe />
@@ -106,6 +107,20 @@ function makeAttack(overrides: Partial<Attack> = {}): Attack {
     symptoms: [],
     triggers: [],
     aura: null,
+    notes: '',
+    source: 'manual',
+    ...overrides,
+  };
+}
+
+function makeMed(overrides: Partial<MedEvent> = {}): MedEvent {
+  return {
+    id: 'med-1',
+    medId: 'nurtec',
+    ts: at(-60 * 60 * 1000),
+    dose: '75 mg',
+    quantity: 1,
+    attackId: null,
     notes: '',
     source: 'manual',
     ...overrides,
@@ -310,5 +325,189 @@ describe('PartnerHome (read-only Now)', () => {
     expect(screen.getByText('Showing the last data received — reconnecting automatically.')).toBeTruthy();
     expect(screen.getByText('Attack in progress')).toBeTruthy();
     expect(screen.queryByText('Current status unavailable')).toBeNull();
+  });
+
+  it('shows medications linked to the active attack inside the attack card', async () => {
+    const linkedTs = at(-30 * 60 * 1000);
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      meds: [
+        makeMed({ id: 'med-linked', attackId: 'attack-1', ts: linkedTs }),
+        makeMed({
+          id: 'med-unlinked', medId: 'tylenol', attackId: null,
+          ts: at(-45 * 60 * 1000), dose: '500 mg', quantity: 2,
+        }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
+    const inCard = within(attackCard);
+
+    expect(inCard.getByText('Medications for this attack')).toBeTruthy();
+    expect(inCard.getByText('Nurtec')).toBeTruthy();
+    expect(inCard.getByText('75 mg')).toBeTruthy();
+    expect(inCard.getByText('1 tab')).toBeTruthy();
+    expect(inCard.getByText(fmtTime(linkedTs))).toBeTruthy();
+    // Today's all-medications list is a separate section: unlinked meds never
+    // appear inside the attack card.
+    expect(inCard.queryByText('Tylenol')).toBeNull();
+    expect(inCard.queryByText('500 mg')).toBeNull();
+    expect(inCard.queryByText('2 tab')).toBeNull();
+    expect(inCard.queryByText('No medication linked to this attack.')).toBeNull();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('shows the attack-medication empty state without hiding unlinked meds today', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      meds: [makeMed({ id: 'med-unlinked', attackId: null })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
+    expect(within(attackCard).getByText('No medication linked to this attack.')).toBeTruthy();
+    expect(within(attackCard).queryByText('Nurtec')).toBeNull();
+
+    // The same unlinked dose still renders under Today's Medications.
+    const todaySection = screen.getByText('Today').closest('section') as HTMLElement;
+    const inToday = within(todaySection);
+    expect(inToday.getByText('Nurtec')).toBeTruthy();
+    expect(inToday.getByText('75 mg')).toBeTruthy();
+    expect(inToday.getByText('1 tab')).toBeTruthy();
+  });
+
+  it('lists attack-linked medications newest first', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      meds: [
+        makeMed({
+          id: 'med-old', medId: 'ibuprofen', attackId: 'attack-1',
+          ts: at(-60 * 60 * 1000), dose: '200 mg',
+        }),
+        makeMed({
+          id: 'med-new', medId: 'nurtec', attackId: 'attack-1',
+          ts: at(-10 * 60 * 1000),
+        }),
+        makeMed({
+          id: 'med-mid', medId: 'tylenol', attackId: 'attack-1',
+          ts: at(-30 * 60 * 1000), dose: '500 mg',
+        }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
+    const rows = within(attackCard).getAllByRole('listitem');
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('Nurtec');
+    expect(rows[1].textContent).toContain('Tylenol');
+    expect(rows[2].textContent).toContain('Ibuprofen');
+  });
+
+  it('keeps attack-linked meds with a malformed timestamp and shows an em dash', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      meds: [
+        makeMed({
+          id: 'med-bad', medId: 'tylenol', attackId: 'attack-1',
+          ts: 'not-a-date', dose: '500 mg',
+        }),
+        makeMed({ id: 'med-good', attackId: 'attack-1', ts: at(-30 * 60 * 1000) }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
+    const rows = within(attackCard).getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    // Malformed timestamps sort last and never reach fmtTime.
+    expect(rows[0].textContent).toContain('Nurtec');
+    expect(rows[1].textContent).toContain('Tylenol');
+    expect(within(rows[1]).getByText('—')).toBeTruthy();
+    expect(screen.queryByText(/Invalid Date/)).toBeNull();
+  });
+
+  it('renders 0/10 pain and attack-linked meds together', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack({ peakPain: 0 })],
+      meds: [makeMed({ id: 'med-linked', attackId: 'attack-1' })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getAllByText('0/10').length).toBeGreaterThanOrEqual(1);
+    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
+    expect(within(attackCard).getByText('Nurtec')).toBeTruthy();
+    expect(within(attackCard).getByText('75 mg')).toBeTruthy();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('keeps every meaningful secondary text style at slate-400 or stronger', async () => {
+    // text-slate-500 / text-slate-600 fail contrast on this page's slate-900 and
+    // slate-950 surfaces, so meaningful secondary text must be slate-400+.
+    const assertReadable = (container: HTMLElement) => {
+      expect(container.querySelector('.text-slate-500')).toBeNull();
+      expect(container.querySelector('.text-slate-600')).toBeNull();
+    };
+    const today = localDayKey(NOW, TZ);
+
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      dayStates: [{ day: today, status: 'off', notes: '', updatedAt: at(-4 * 60 * 60 * 1000) }],
+      meds: [
+        makeMed({ id: 'med-linked', attackId: 'attack-1' }),
+        makeMed({ id: 'med-unlinked', attackId: null }),
+      ],
+      workouts: [{
+        id: 'workout-1', performedAt: at(-3 * 60 * 60 * 1000), kind: 'cardio',
+        effort: 'hard', durationMinutes: 30, notes: '', source: 'manual',
+      }],
+      stockBaselines: [{
+        id: 'baseline-1', medId: 'nurtec', effectiveAt: at(-5 * 24 * 60 * 60 * 1000),
+        quantity: 8, notes: '', source: 'manual', createdAt: at(-5 * 24 * 60 * 60 * 1000),
+      }],
+    });
+
+    const active = mountHome();
+    await waitForSync();
+    assertReadable(active.container);
+    cleanup();
+
+    // Calm state covers "Last attack ended …" and the footer notice.
+    captured = null;
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack({ start: at(-3 * 60 * 60 * 1000), end: at(-60 * 60 * 1000) })],
+    });
+    const calm = mountHome();
+    await waitForSync();
+    expect(screen.getByText(/Last attack ended/)).toBeTruthy();
+    assertReadable(calm.container);
+    cleanup();
+
+    // Empty state covers the "Not logged" label and both empty-state lines.
+    captured = null;
+    api.exportAll.mockResolvedValue(emptyExport());
+    const empty = mountHome();
+    await waitForSync();
+    expect(screen.getByText('Not logged')).toBeTruthy();
+    expect(screen.getAllByText('None logged today.')).toHaveLength(2);
+    assertReadable(empty.container);
   });
 });

@@ -31,7 +31,7 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 const bodyObject = (req) => (isPlainObject(req.body) ? req.body : {});
 
 export async function buildApp({
-  db, distDir, logger = false, onAttackChange,
+  db, distDir, logger = false, onAttackChange, notificationStatus,
 } = {}) {
   const app = Fastify({ logger });
 
@@ -390,7 +390,15 @@ export async function buildApp({
 
   app.get('/api/export', () => exportEnvelope(db));
 
-  app.get('/api/health', () => ({ ok: true }));
+  // Non-secret notification configuration only. Missing/malformed values are
+  // false; extra fields (URLs, tokens, reasons) are never echoed.
+  app.get('/api/health', () => ({
+    ok: true,
+    notifications: {
+      reminders: notificationStatus?.reminders === true,
+      attackAlerts: notificationStatus?.attackAlerts === true,
+    },
+  }));
 
   app.post('/api/reset', () => {
     db.exec(`DELETE FROM meds; DELETE FROM attacks; DELETE FROM refills; DELETE FROM workouts;

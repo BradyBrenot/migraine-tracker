@@ -25,6 +25,12 @@ const store = vi.hoisted(() => ({
 
 vi.mock('@/lib/store', () => ({ useStore: () => store }));
 
+// Settings fetches health on mount; keep it pending so these inventory tests
+// stay synchronous and never touch a real network.
+vi.mock('@/lib/api', () => ({
+  api: { getHealth: vi.fn(() => new Promise(() => {})) },
+}));
+
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));

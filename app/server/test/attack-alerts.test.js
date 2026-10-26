@@ -38,6 +38,11 @@ const ATTACK_PERSONAL = {
   enabled: true, preventive: false, lowStock: false, checkIn: false, exercise: false,
 };
 
+const START_SUPPRESSED_LOG =
+  'attack alert start suppressed: instant outside freshness window or invalid';
+const END_SUPPRESSED_LOG =
+  'attack alert end suppressed: instant outside freshness window or invalid';
+
 // ── harness ───────────────────────────────────────────────────────────
 const setSetting = (db, key, value) => db.prepare(
   'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -261,6 +266,119 @@ test('freshness: an unparseable start is never enqueued', async (t) => {
   });
   await h.engine.tick();
   assert.equal(h.attack.calls.length, 0);
+  assert.equal(occurrenceCount(h.db), 0);
+});
+
+// ── 3b. safe suppression logging ──────────────────────────────────────
+test('logging: a suppressed stale start logs exactly one fixed message and enqueues nothing', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-stale-start' });
+  const id = 'a-log-stale-9271';
+  const instant = '2026-04-10T20:00:00.000Z'; // 2 hours old
+
+  h.engine.noteAttackWrite({ before: null, after: { id, start: instant, end: null } });
+
+  assert.deepEqual(h.logs, [START_SUPPRESSED_LOG]);
+  assert.equal(occurrenceCount(h.db), 0);
+  for (const line of h.logs) {
+    assert.equal(line.includes(id), false);
+    assert.equal(line.includes(instant), false);
+  }
+});
+
+test('logging: suppressed future and invalid starts log the same fixed message', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-bad-start' });
+  const id = 'a-log-future-4412';
+  const future = '2026-04-10T22:30:00.000Z'; // 30 minutes ahead
+  const invalid = 'not-a-timestamp';
+
+  h.engine.noteAttackWrite({ before: null, after: { id, start: future, end: null } });
+  h.engine.noteAttackWrite({ before: null, after: { id, start: invalid, end: null } });
+
+  assert.deepEqual(h.logs, [START_SUPPRESSED_LOG, START_SUPPRESSED_LOG]);
+  assert.equal(occurrenceCount(h.db), 0);
+  for (const line of h.logs) {
+    assert.equal(line.includes(id), false);
+    assert.equal(line.includes(future), false);
+    assert.equal(line.includes(invalid), false);
+  }
+});
+
+test('logging: a rejected end transition logs exactly the fixed end message', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-stale-end' });
+  const id = 'a-log-end-3388';
+  const start = '2026-04-10T21:30:00.000Z';
+  const end = '2026-04-10T19:00:00.000Z'; // stale end instant
+
+  h.engine.noteAttackWrite({
+    before: { id, start, end: null },
+    after: { id, start, end },
+  });
+
+  assert.deepEqual(h.logs, [END_SUPPRESSED_LOG]);
+  assert.equal(occurrenceCount(h.db), 0);
+  for (const line of h.logs) {
+    assert.equal(line.includes(id), false);
+    assert.equal(line.includes(start), false);
+    assert.equal(line.includes(end), false);
+  }
+});
+
+test('logging: a normal fresh alert logs nothing', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-fresh' });
+  const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
+
+  const res = await postAttack(app, {
+    id: 'a-log-fresh',
+    start: '2026-04-10T21:30:00.000Z',
+    end: '2026-04-10T21:58:00.000Z',
+  });
+  assert.equal(res.statusCode, 201);
+  assert.equal(occurrenceCount(h.db), 2);
+  assert.deepEqual(h.logs, []);
+});
+
+test('logging: existing-attack metadata and repeat-end PATCHes log nothing', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-patch' });
+  const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
+
+  const created = await postAttack(app, {
+    id: 'a-log-patch',
+    start: '2026-04-10T21:30:00.000Z',
+    end: '2026-04-10T21:55:00.000Z',
+  });
+  assert.equal(created.statusCode, 201);
+  assert.equal(occurrenceCount(h.db), 2);
+
+  const metadata = await app.inject({
+    method: 'PATCH',
+    url: '/api/attacks/a-log-patch',
+    payload: { peakPain: 7, notes: 'metadata only' },
+  });
+  assert.equal(metadata.statusCode, 200);
+  const repeatEnd = await app.inject({
+    method: 'PATCH',
+    url: '/api/attacks/a-log-patch',
+    payload: { end: '2026-04-10T21:58:00.000Z' },
+  });
+  assert.equal(repeatEnd.statusCode, 200);
+
+  assert.deepEqual(h.logs, []);
+  assert.equal(occurrenceCount(h.db), 2); // no new occurrence either
+});
+
+test('logging: a personal-only engine never logs attack suppression', async (t) => {
+  const h = makeHarness(t, { label: 'attack-log-personal-only', attack: false });
+
+  h.engine.noteAttackWrite({
+    before: null,
+    after: {
+      id: 'a-log-personal-only',
+      start: '2026-04-10T20:00:00.000Z',
+      end: null,
+    },
+  });
+
+  assert.deepEqual(h.logs, []);
   assert.equal(occurrenceCount(h.db), 0);
 });
 

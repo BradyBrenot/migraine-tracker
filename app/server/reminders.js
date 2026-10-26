@@ -50,6 +50,12 @@ export const ATTACK_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ATTACK_START = 'attack_start';
 const ATTACK_END = 'attack_end';
 const ATTACK_TYPES = new Set([ATTACK_START, ATTACK_END]);
+// Fixed non-secret audit text. It intentionally carries no attack id, instant,
+// URL, token, or error detail: suppression can be a privacy-sensitive fact.
+const ATTACK_START_SUPPRESSED =
+  'attack alert start suppressed: instant outside freshness window or invalid';
+const ATTACK_END_SUPPRESSED =
+  'attack alert end suppressed: instant outside freshness window or invalid';
 
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -240,6 +246,10 @@ export function createReminderEngine({
       const isInsert = before === null || before === undefined;
 
       const startMs = freshAttackInstantMs(after.start, nowMs);
+      if (isInsert && startMs === null
+        && typeof after.start === 'string' && after.start !== '') {
+        log(ATTACK_START_SUPPRESSED);
+      }
       if (isInsert && startMs !== null) {
         ensurePending({
           key: attackOccurrenceKey(ATTACK_START, id, after.start),
@@ -260,6 +270,9 @@ export function createReminderEngine({
       const endTransition = (isInsert || beforeEndAbsent)
         && typeof after.end === 'string' && after.end !== '';
       const endMs = endTransition ? freshAttackInstantMs(after.end, nowMs) : null;
+      if (endTransition && endMs === null) {
+        log(ATTACK_END_SUPPRESSED);
+      }
       if (endMs !== null) {
         ensurePending({
           key: attackOccurrenceKey(ATTACK_END, id, after.end),

@@ -119,6 +119,20 @@ appear on the reminder topic and are not controlled by app reminder settings.
   or logged.
 - Deleting an attack or using `/api/import` never raises an alert.
 
+### Health and alert/sync diagnostics
+
+- `GET /api/health` returns only `{ ok: true, notifications: { reminders,
+  attackAlerts } }` — booleans describing whether each environment topic is
+  configured. It never returns ntfy URLs, tokens, failure reasons, or any other
+  configuration detail.
+- Settings shows the attack-alert configuration read-only ("Configured",
+  "Not configured", or "Unavailable"). This reports configuration only: it is
+  not a delivery guarantee, and an accepted send is not proof a phone displayed
+  the notification.
+- Frontend API requests time out after about 15 seconds. A stalled backend
+  therefore fails the request and the change is shown as unsynced/failed instead
+  of leaving the serialized writer queue hanging indefinitely.
+
 ### One controlled notification test (performed by the user)
 
 Only the user should run this, once, from a machine that can reach the ntfy

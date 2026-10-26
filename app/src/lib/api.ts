@@ -1,18 +1,43 @@
 // Thin API client. Same-origin in production (the server serves the
 // frontend); via Vite dev proxy locally. All failures throw — callers
 // (the store) catch and stay in localStorage demo mode.
+//
+// Every request is bounded: a stalled server must reject (and release the
+// store's serialized write queue) instead of hanging forever.
+
+const REQUEST_TIMEOUT_MS = 15_000;
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
-  return res.json() as Promise<T>;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
+    // Await the body inside the try so a response whose body stalls is bounded
+    // by the same timeout instead of hanging after the headers arrived.
+    return await res.json() as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Non-secret notification configuration reported by GET /api/health. */
+export interface HealthResponse {
+  ok: boolean;
+  notifications?: {
+    reminders?: boolean;
+    attackAlerts?: boolean;
+  };
 }
 
 export const api = {
+  getHealth: () => req<HealthResponse>('GET', '/api/health'),
+
   exportAll: () => req<{ attacks: unknown[]; meds: unknown[]; refills?: unknown[]; workouts?: unknown[]; dayStates?: unknown[]; stockBaselines?: unknown[]; settings: Record<string, unknown> }>('GET', '/api/export'),
   importAll: (payload: unknown) => req('POST', '/api/import', payload),
   resetAll: () => req('POST', '/api/reset'),

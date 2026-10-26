@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Upload, Trash2, Sparkles, FileDown, AlertTriangle, Pill, Plus } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import { api } from '@/lib/api';
 import { nurtecInventory, parseTabletQuantity } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { fmtDateFull, fmtTime, toLocalInput } from '@/lib/format';
@@ -24,6 +25,8 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 
+type AttackAlertStatus = 'checking' | 'configured' | 'not-configured' | 'unavailable';
+
 export default function Settings() {
   const store = useStore();
   const { state } = store;
@@ -38,7 +41,37 @@ export default function Settings() {
   const [baselineAt, setBaselineAt] = useState<string | null>(null);
   /** null = follow the persisted settings; otherwise an unsaved form draft. */
   const [reminderDraft, setReminderDraft] = useState<ReminderSettings | null>(null);
+  const [attackAlertStatus, setAttackAlertStatus] =
+    useState<AttackAlertStatus>('checking');
   const now = useNow();
+
+  // Read-only environment configuration. Fetched once; a late response after
+  // unmount is ignored, and any failure/malformed body reads as unavailable.
+  useEffect(() => {
+    let cancelled = false;
+    void api.getHealth()
+      .then((health) => {
+        if (cancelled) return;
+        const configured = health?.notifications?.attackAlerts;
+        if (configured === true) setAttackAlertStatus('configured');
+        else if (configured === false) setAttackAlertStatus('not-configured');
+        else setAttackAlertStatus('unavailable');
+      })
+      .catch(() => {
+        if (!cancelled) setAttackAlertStatus('unavailable');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const attackAlertLabel = attackAlertStatus === 'checking'
+    ? 'Checking…'
+    : attackAlertStatus === 'configured'
+      ? 'Configured'
+      : attackAlertStatus === 'not-configured'
+        ? 'Not configured'
+        : 'Unavailable';
 
   const savedReminders = normalizeReminderSettings(state.reminders);
   const reminderForm = reminderDraft ?? savedReminders;
@@ -384,6 +417,20 @@ export default function Settings() {
           or displays delivery credentials, and a send is not proof that a phone
           displayed the message.
         </p>
+
+        <div className="mt-3 rounded-lg border border-slate-800 px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-sm font-semibold text-slate-200">Attack alerts</span>
+            <span role="status" className="text-xs font-semibold text-slate-400">
+              {attackAlertLabel}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Configuration comes from the server environment and is read-only here.
+            It only indicates configuration — it gives no delivery guarantee, and a
+            send is not proof that a phone displayed it.
+          </p>
+        </div>
 
         <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2">
           <div>

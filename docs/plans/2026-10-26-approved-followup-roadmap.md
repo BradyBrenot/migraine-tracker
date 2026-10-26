@@ -50,6 +50,11 @@ User approved the reviewer-prioritized items 1–5 and all smaller worthwhile im
 - Log fixed non-secret text when a direct attack write is suppressed by the event-freshness rule. Do not widen the freshness window.
 - Expose only boolean reminder/attack-alert configuration status through health metadata, never URLs/tokens. Show attack-alert configuration status in Settings as read-only environment information.
 - Update API mocks/tests, health tests, and deployment docs. No real notification traffic.
+- Implemented: every frontend API request now carries a ~15-second `AbortController` timeout; a stalled request rejects so the serialized writer queue latches unsynced/failed instead of hanging, and the timer is always cleared.
+- Implemented: `noteAttackWrite` logs one fixed non-secret message when a genuine fresh-window rejection suppresses a start or end alert (`attack alert start suppressed: instant outside freshness window or invalid` / the matching `end` text). The freshness windows and enqueue behavior are unchanged, and fresh alerts, metadata/repeat PATCHes, and personal-only engines log nothing.
+- Implemented: `GET /api/health` reports only `{ ok: true, notifications: { reminders, attackAlerts } }` booleans (only `=== true` is true; everything else is false and extra fields are never echoed), wired from the startup ntfy configuration.
+- Implemented: Settings fetches health once on mount and shows a read-only "Attack alerts" configuration status ("Configured" / "Not configured" / "Unavailable") with a no-delivery-guarantee explanation and no toggles or credentials.
+- Implemented: focused Vitest API-timeout and Settings health tests, extended Node attack-alert suppression-log and health endpoint tests, and documented the timeout, health booleans, and read-only Settings status in DEPLOY.md.
 
 ## 6. Home timezone parity
 

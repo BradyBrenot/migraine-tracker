@@ -98,7 +98,14 @@ const onAttackChange = reminderEngine && attackConfig.enabled
   : undefined;
 
 const app = await buildApp({
-  db, distDir: DIST_DIR, logger: true, onAttackChange,
+  db,
+  distDir: DIST_DIR,
+  logger: true,
+  onAttackChange,
+  notificationStatus: {
+    reminders: reminderConfig.enabled,
+    attackAlerts: attackConfig.enabled,
+  },
 });
 
 // ── nightly JSON backup dump ─────────────────────────────────────────

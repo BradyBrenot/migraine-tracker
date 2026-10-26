@@ -26,14 +26,77 @@ async function withDb(label, fn) {
   }
 }
 
-test('health endpoint reports ok', async () => {
-  await withDb('migraine-health', async (_dir, db) => {
-    const app = await buildApp({ db });
-    const res = await app.inject({ method: 'GET', url: '/api/health' });
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { ok: true });
-    await app.close();
+const NO_NOTIFICATIONS = {
+  ok: true,
+  notifications: { reminders: false, attackAlerts: false },
+};
+
+/** Inject GET /api/health into a fresh app and return the parsed body. */
+async function healthFor(label, notificationStatus) {
+  return withDb(label, async (_dir, db) => {
+    const app = await buildApp({ db, notificationStatus });
+    try {
+      const res = await app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(res.statusCode, 200);
+      return res.json();
+    } finally {
+      await app.close();
+    }
   });
+}
+
+test('health endpoint reports ok and defaults notification flags to false', async () => {
+  assert.deepEqual(await healthFor('migraine-health'), NO_NOTIFICATIONS);
+});
+
+test('health: reminders-only, attack-only, and both configurations', async () => {
+  assert.deepEqual(
+    await healthFor('migraine-health-reminders', { reminders: true, attackAlerts: false }),
+    { ok: true, notifications: { reminders: true, attackAlerts: false } },
+  );
+  assert.deepEqual(
+    await healthFor('migraine-health-attacks', { reminders: false, attackAlerts: true }),
+    { ok: true, notifications: { reminders: false, attackAlerts: true } },
+  );
+  assert.deepEqual(
+    await healthFor('migraine-health-both', { reminders: true, attackAlerts: true }),
+    { ok: true, notifications: { reminders: true, attackAlerts: true } },
+  );
+});
+
+test('health: malformed or partial status falls back to false', async () => {
+  assert.deepEqual(
+    await healthFor('migraine-health-garbage', { reminders: 'yes', attackAlerts: 1 }),
+    NO_NOTIFICATIONS,
+  );
+  assert.deepEqual(
+    await healthFor('migraine-health-partial', { reminders: true }),
+    { ok: true, notifications: { reminders: true, attackAlerts: false } },
+  );
+});
+
+test('health: never echoes ntfy URLs, tokens, or reasons', async () => {
+  const body = await healthFor('migraine-health-secrets', {
+    reminders: true,
+    attackAlerts: false,
+    ntfyUrl: 'https://ntfy.example.invalid/attack-secret-topic',
+    ntfyToken: 'tk_fake_attack_secret_xyz789',
+    reason: 'NTFY_ATTACK_URL is not set',
+  });
+
+  assert.deepEqual(body, {
+    ok: true,
+    notifications: { reminders: true, attackAlerts: false },
+  });
+  const text = JSON.stringify(body);
+  for (const secret of [
+    'ntfy.example.invalid',
+    'attack-secret-topic',
+    'tk_fake_attack_secret_xyz789',
+    'NTFY_ATTACK_URL',
+  ]) {
+    assert.equal(text.includes(secret), false, `health leaked ${secret}`);
+  }
 });
 
 test('without dist/: unknown routes (including /api) get plain JSON 404s', async () => {

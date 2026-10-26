@@ -59,6 +59,8 @@ User approved the reviewer-prioritized items 1–5 and all smaller worthwhile im
 ## 6. Home timezone parity
 
 - Home Today's medications uses configured-timezone local-day filtering with invalid-date guards, matching PartnerHome and workout behavior. Add non-UTC coverage.
+- Implemented: Home derives one `todayKey` from `localDayKey(now, state.timezone)` before the "Today's meds" `useMemo`; the filter parses each `ts`, skips non-finite values, and compares its configured-zone day key to `todayKey`. Ordering (newest first) and the empty-section/rendering behavior are unchanged.
+- Implemented: `Home.wellness.test.tsx` adds non-UTC coverage in two configured zones (Pacific/Kiritimati UTC+14 and America/Los_Angeles UTC-7) proving that meds in the configured-local day are included even when UTC is another day, and meds just outside it (UTC-today or UTC-yesterday) are excluded; both timezone cases fail under the previous browser-day filter. Invalid-timestamp guards are covered with mixed valid/invalid rows and an all-invalid set that keeps state intact and renders no Today section.
 
 ## 7. Partner readability and attack-medication context
 

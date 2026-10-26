@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
-import type { Attack, DayState, TrackerState, Workout, WorkoutKind } from '@/types';
+import type { Attack, DayState, MedEvent, TrackerState, Workout, WorkoutKind } from '@/types';
 import { localDayKey } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 
@@ -172,6 +172,18 @@ function makeDayState(day: string): DayState {
     status: 'attack',
     notes: '',
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function makeMed(overrides: Partial<MedEvent> = {}): MedEvent {
+  return {
+    id: 'seed-med',
+    medId: 'tylenol',
+    ts: new Date().toISOString(),
+    attackId: null,
+    notes: '',
+    source: 'manual',
+    ...overrides,
   };
 }
 
@@ -1036,5 +1048,130 @@ describe('Home workout per-kind dedup', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("Home today's meds", () => {
+  it('selects today by the configured timezone day, not the browser/UTC day', async () => {
+    // Same fake-Date + re-import pattern as the workout timezone test: the
+    // clock module captures Date.now() at import time.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-06-01T00:00:00.000Z').getTime());
+      vi.resetModules();
+      captured = null;
+      localStorage.clear();
+      seedState({
+        // UTC+14: local "now" is 2026-06-01 14:00, while UTC is still Jun 1
+        // 00:00. Configured today = May 31 10:00Z .. Jun 1 10:00Z.
+        timezone: 'Pacific/Kiritimati',
+        meds: [
+          // Local Jun 1 00:30 — the first half-hour of configured today, but
+          // still yesterday in UTC/Europe.
+          makeMed({ id: 'local-today-first', medId: 'local-today-first-med', ts: '2026-05-31T10:30:00.000Z' }),
+          // Local Jun 1 02:30 — configured today, but May 31 in UTC.
+          makeMed({ id: 'local-today', medId: 'local-today-med', ts: '2026-05-31T12:30:00.000Z' }),
+          // Local May 31 23:00 — configured yesterday.
+          makeMed({ id: 'local-yesterday', medId: 'local-yesterday-med', ts: '2026-05-31T09:00:00.000Z' }),
+          // Local Jun 2 01:00 — configured tomorrow, still Jun 1 in UTC.
+          makeMed({ id: 'local-tomorrow', medId: 'local-tomorrow-med', ts: '2026-06-01T11:00:00.000Z' }),
+        ],
+      });
+      api = (await import('@/lib/api')).api as unknown as MockedBackend;
+      applyApiDefaults(api);
+      homeModule = await import('@/pages/Home');
+      storeModule = await import('@/lib/store');
+
+      mountHome();
+      await waitForSync();
+
+      // The meds section renders only for the configured local day. (The
+      // check-in's "Today" label is a span; the meds header is the heading.)
+      expect(screen.getByRole('heading', { name: 'Today' })).toBeTruthy();
+      expect(screen.getByText('Local Today Med')).toBeTruthy();
+      expect(screen.getByText('Local Today First Med')).toBeTruthy();
+      expect(screen.queryByText('Local Yesterday Med')).toBeNull();
+      expect(screen.queryByText('Local Tomorrow Med')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('selects today in a western configured zone too', async () => {
+    // A second zone (UTC-7 in June) keeps the browser-day regression detectable
+    // on hosts whose local day happens to match the UTC+14 case above.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-06-01T00:00:00.000Z').getTime());
+      vi.resetModules();
+      captured = null;
+      localStorage.clear();
+      seedState({
+        // Local "now" is 2026-05-31 17:00. Configured today =
+        // May 31 07:00Z .. Jun 1 07:00Z.
+        timezone: 'America/Los_Angeles',
+        meds: [
+          // Local May 31 00:30 — start of configured today.
+          makeMed({ id: 'la-today-first', medId: 'la-today-first-med', ts: '2026-05-31T07:30:00.000Z' }),
+          // Local May 31 05:30 — configured today (May 31 in UTC too).
+          makeMed({ id: 'la-today', medId: 'la-today-med', ts: '2026-05-31T12:30:00.000Z' }),
+          // Local May 31 23:30 — last half-hour of configured today.
+          makeMed({ id: 'la-today-last', medId: 'la-today-last-med', ts: '2026-06-01T06:30:00.000Z' }),
+          // Local May 30 23:30 — configured yesterday, but May 31 in UTC.
+          makeMed({ id: 'la-yesterday', medId: 'la-yesterday-med', ts: '2026-05-31T06:30:00.000Z' }),
+          // Local Jun 1 01:00 — configured tomorrow, but Jun 1 in UTC.
+          makeMed({ id: 'la-tomorrow', medId: 'la-tomorrow-med', ts: '2026-06-01T08:00:00.000Z' }),
+        ],
+      });
+      api = (await import('@/lib/api')).api as unknown as MockedBackend;
+      applyApiDefaults(api);
+      homeModule = await import('@/pages/Home');
+      storeModule = await import('@/lib/store');
+
+      mountHome();
+      await waitForSync();
+
+      expect(screen.getByRole('heading', { name: 'Today' })).toBeTruthy();
+      expect(screen.getByText('La Today Med')).toBeTruthy();
+      expect(screen.getByText('La Today First Med')).toBeTruthy();
+      expect(screen.getByText('La Today Last Med')).toBeTruthy();
+      expect(screen.queryByText('La Yesterday Med')).toBeNull();
+      expect(screen.queryByText('La Tomorrow Med')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores meds with invalid timestamps instead of crashing', async () => {
+    seedState({
+      timezone: 'UTC',
+      meds: [
+        makeMed({ id: 'bad-unparseable', medId: 'bad-unparseable-med', ts: 'not-a-date' }),
+        makeMed({ id: 'bad-empty', medId: 'bad-empty-med', ts: '' }),
+        makeMed({ id: 'good', medId: 'good-med', ts: new Date().toISOString() }),
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getByRole('heading', { name: 'Today' })).toBeTruthy();
+    expect(screen.getByText('Good Med')).toBeTruthy();
+    expect(screen.queryByText('Bad Unparseable Med')).toBeNull();
+    expect(screen.queryByText('Bad Empty Med')).toBeNull();
+  });
+
+  it('omits the Today section when every timestamp is invalid', async () => {
+    seedState({
+      timezone: 'UTC',
+      meds: [makeMed({ id: 'bad-only', medId: 'bad-only-med', ts: '2026-13-45T99:99:99Z' })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.queryByRole('heading', { name: 'Today' })).toBeNull();
+    // The invalid record is still in state — hydration does not drop data.
+    expect(captured!.state.meds).toHaveLength(1);
   });
 });

@@ -61,11 +61,16 @@ export default function Home() {
   const [newOpen, setNewOpen] = useState(false);
   const [pastMedOpen, setPastMedOpen] = useState(false);
 
+  // Today is the configured-zone local day (same rule as PartnerHome and the
+  // weekly workout goals), not the browser's day. Invalid timestamps are
+  // skipped instead of producing an "Invalid Date" comparison.
+  const todayKey = localDayKey(now, state.timezone);
   const todaysMeds = useMemo(() => {
-    const today = new Date(now).toDateString();
-    return state.meds.filter((m) => new Date(m.ts).toDateString() === today)
-      .sort((a, b) => b.ts.localeCompare(a.ts));
-  }, [state.meds, now]);
+    return state.meds.filter((m) => {
+      const ms = Date.parse(m.ts);
+      return Number.isFinite(ms) && localDayKey(ms, state.timezone) === todayKey;
+    }).sort((a, b) => b.ts.localeCompare(a.ts));
+  }, [state.meds, state.timezone, todayKey]);
 
   // Nurtec usage badge for the quick grid
   const nurtecDays = usageDaysInWindow(state.meds, 'nurtec', 30, now, state.timezone);
@@ -74,7 +79,6 @@ export default function Home() {
   const nurtecBadge = nurtecStockBadge(nurtecStock);
 
   // ── Today's wellness state ─────────────────────────────────
-  const todayKey = localDayKey(now, state.timezone);
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
   // Does any real attack (active or ended) overlap today's local day? An active
   // attack always counts — it is still ongoing.

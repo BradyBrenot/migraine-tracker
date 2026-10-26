@@ -16,6 +16,12 @@ User approved the reviewer-prioritized items 1–5 and all smaller worthwhile im
 - Add a distinct partner manifest with `id`/`start_url` `/view`, scope `/view`, and a Migraine Partner name. Reuse icons and dark colors.
 - Serve a deterministic partner HTML document referencing that manifest for `/view` and nested routes; a second Vite HTML input is preferred over delayed JavaScript manifest swapping.
 - Normal writer install behavior remains unchanged. Extend source/build PWA validation for both manifests and SPA fallback tests. Verify actual production `/view` document/manifest linkage.
+- Implemented: `public/partner.webmanifest` declares the distinct app (`id`/`start_url` `/view`, scope `/view`, Migraine Partner name/short name and description) and reuses the writer's icon array verbatim.
+- Implemented: `view.html` is a second Vite HTML input (`dist/view.html`) with the partner title and `/partner.webmanifest` link; it shares the single `src/main.tsx` runtime, and `index.html`/writer install output is unchanged.
+- Implemented: the server resolves the partner shell once at startup and the SPA fallback serves it for `/view` and `/view/*` (query strings ignored), while every other route keeps the writer shell; a stale dist without `view.html` falls back to the writer shell without a `callNotFound` loop.
+- Implemented: `validate:pwa` and the Vitest installable-shell tests cover both manifests (identity, colors, icon IHDR checks, writer/partner icon equality) and both HTML shells, including built-dist asset and manifest linkage.
+- Implemented: server static tests cover the partner fallback (root, nested, trailing slash, query string), writer fallback for all other routes, the JSON `/api` 404, stale-dist degradation, and partner-scoped encoded traversal.
+- Implemented: DEPLOY.md documents the separate partner install and its online-only behavior; writer install behavior is unchanged.
 
 ## 3. Peak-pain correction
 

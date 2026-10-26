@@ -20,6 +20,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        index: path.resolve(__dirname, 'index.html'),
+        view: path.resolve(__dirname, 'view.html'),
+      },
+    },
+  },
   test: {
     // Pure unit tests only — the server has its own `node --test` suite
     // (run via `npm test --prefix server`), and no jsdom/network/storage.

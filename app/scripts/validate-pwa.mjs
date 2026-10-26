@@ -70,25 +70,48 @@ function pngSize(file, label, declared) {
   return { width, height };
 }
 
-function validateManifest(manifest, label) {
+function validateManifest(manifest, label, expected = {}) {
   if (!manifest) return;
-  check(manifest.id === '/', `${label}: id must be "/" (got ${JSON.stringify(manifest.id)})`);
+  const id = expected.id ?? '/';
+  const startUrl = expected.start_url ?? '/';
+  const scope = expected.scope ?? '/';
+  check(manifest.id === id, `${label}: id must be ${JSON.stringify(id)} (got ${JSON.stringify(manifest.id)})`);
   check(
-    manifest.start_url === '/',
-    `${label}: start_url must be "/" (got ${JSON.stringify(manifest.start_url)})`,
+    manifest.start_url === startUrl,
+    `${label}: start_url must be ${JSON.stringify(startUrl)} (got ${JSON.stringify(manifest.start_url)})`,
   );
   check(
-    manifest.scope === '/',
-    `${label}: scope must be "/" (got ${JSON.stringify(manifest.scope)})`,
+    manifest.scope === scope,
+    `${label}: scope must be ${JSON.stringify(scope)} (got ${JSON.stringify(manifest.scope)})`,
   );
-  check(
-    typeof manifest.name === 'string' && manifest.name.trim().length > 0,
-    `${label}: name is required`,
-  );
-  check(
-    typeof manifest.short_name === 'string' && manifest.short_name.trim().length > 0,
-    `${label}: short_name is required`,
-  );
+  if (expected.name !== undefined) {
+    check(
+      manifest.name === expected.name,
+      `${label}: name must be ${JSON.stringify(expected.name)} (got ${JSON.stringify(manifest.name)})`,
+    );
+  } else {
+    check(
+      typeof manifest.name === 'string' && manifest.name.trim().length > 0,
+      `${label}: name is required`,
+    );
+  }
+  if (expected.short_name !== undefined) {
+    check(
+      manifest.short_name === expected.short_name,
+      `${label}: short_name must be ${JSON.stringify(expected.short_name)} (got ${JSON.stringify(manifest.short_name)})`,
+    );
+  } else {
+    check(
+      typeof manifest.short_name === 'string' && manifest.short_name.trim().length > 0,
+      `${label}: short_name is required`,
+    );
+  }
+  if (expected.requireDescription) {
+    check(
+      typeof manifest.description === 'string' && manifest.description.trim().length > 0,
+      `${label}: description is required`,
+    );
+  }
   check(manifest.display === 'standalone', `${label}: display must be "standalone"`);
   check(
     manifest.background_color === BACKGROUND,
@@ -129,12 +152,31 @@ function validateIcons(manifest, root, label) {
   });
 }
 
-function validateIndex(html, label) {
+const PARTNER_IDENTITY = {
+  id: '/view',
+  start_url: '/view',
+  scope: '/view',
+  name: 'Migraine Partner',
+  short_name: 'Partner',
+};
+
+function validateIndex(html, label, options = {}) {
+  const manifestHref = options.manifestHref ?? '/manifest.webmanifest';
+  const escapedHref = manifestHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   check(
-    /<link[^>]+rel="manifest"[^>]+href="\/manifest\.webmanifest"/.test(html) ||
-      /<link[^>]+href="\/manifest\.webmanifest"[^>]+rel="manifest"/.test(html),
+    new RegExp(`<link[^>]+rel="manifest"[^>]+href="${escapedHref}"`).test(html) ||
+      new RegExp(`<link[^>]+href="${escapedHref}"[^>]+rel="manifest"`).test(html),
     `${label}: missing root-absolute manifest link`,
   );
+  if (options.forbiddenHref) {
+    check(
+      !html.includes(`href="${options.forbiddenHref}"`),
+      `${label}: must not link ${options.forbiddenHref}`,
+    );
+  }
+  if (options.title) {
+    check(html.includes(`<title>${options.title}</title>`), `${label}: title must be ${options.title}`);
+  }
   check(html.includes(`name="theme-color" content="${BACKGROUND}"`), `${label}: theme-color`);
   check(html.includes('viewport-fit=cover'), `${label}: viewport-fit=cover`);
   check(/<link[^>]+rel="apple-touch-icon"[^>]+href="\/[^"]+"/.test(html), `${label}: apple-touch-icon`);
@@ -163,19 +205,63 @@ const sourceIcons = validateIcons(sourceManifest, PUBLIC_DIR, 'source');
 console.log('  source icons:');
 for (const line of sourceIcons) console.log(`    ${line ?? 'FAILED'}`);
 
+// ── source: partner manifest + icons ──────────────────────────────────
+const sourcePartnerFile = join(PUBLIC_DIR, 'partner.webmanifest');
+const sourcePartner = readJson(sourcePartnerFile, 'source partner manifest');
+console.log('  source partner manifest: public/partner.webmanifest');
+validateManifest(sourcePartner, 'source partner manifest', {
+  ...PARTNER_IDENTITY,
+  requireDescription: true,
+});
+if (sourcePartner) {
+  console.log(
+    `    id=${sourcePartner.id} start_url=${sourcePartner.start_url} ` +
+      `scope=${sourcePartner.scope} display=${sourcePartner.display}`,
+  );
+  console.log(
+    `    name="${sourcePartner.name}" short_name="${sourcePartner.short_name}" ` +
+      `background=${sourcePartner.background_color} theme=${sourcePartner.theme_color}`,
+  );
+  check(
+    sourceManifest !== null &&
+      JSON.stringify(sourcePartner.icons) === JSON.stringify(sourceManifest.icons),
+    'source partner manifest: icons must match public/manifest.webmanifest',
+  );
+}
+
+const sourcePartnerIcons = validateIcons(sourcePartner, PUBLIC_DIR, 'source partner');
+console.log('  source partner icons:');
+for (const line of sourcePartnerIcons) console.log(`    ${line ?? 'FAILED'}`);
+
 // ── source: index.html metadata ───────────────────────────────────────
 const sourceIndexFile = join(APP_ROOT, 'index.html');
 if (existsSync(sourceIndexFile)) {
-  validateIndex(readFileSync(sourceIndexFile, 'utf8'), 'source index.html');
+  validateIndex(readFileSync(sourceIndexFile, 'utf8'), 'source index.html', {
+    forbiddenHref: '/partner.webmanifest',
+  });
   console.log('  source index.html: manifest link, theme-color, viewport-fit=cover');
 } else {
   fail(`source index.html: missing ${sourceIndexFile}`);
 }
 
+// ── source: partner shell (view.html) ─────────────────────────────────
+const sourceViewFile = join(APP_ROOT, 'view.html');
+if (existsSync(sourceViewFile)) {
+  validateIndex(readFileSync(sourceViewFile, 'utf8'), 'source view.html', {
+    manifestHref: '/partner.webmanifest',
+    forbiddenHref: '/manifest.webmanifest',
+    title: 'Migraine Partner',
+  });
+  console.log('  source view.html: partner manifest link, theme-color, viewport-fit=cover');
+} else {
+  fail(`source view.html: missing ${sourceViewFile}`);
+}
+
 // ── built output (optional) ───────────────────────────────────────────
 const distIndexFile = join(DIST_DIR, 'index.html');
 const distManifestFile = join(DIST_DIR, 'manifest.webmanifest');
-const distBuilt = existsSync(distIndexFile) || existsSync(distManifestFile);
+const distPartnerManifestFile = join(DIST_DIR, 'partner.webmanifest');
+const distBuilt = existsSync(distIndexFile) || existsSync(distManifestFile) || existsSync(distPartnerManifestFile);
 
 if (!distBuilt) {
   console.log('  built dist: not present — skipping dist checks (run `npm run build`)');
@@ -193,9 +279,21 @@ if (!distBuilt) {
   const distIcons = validateIcons(distManifest, DIST_DIR, 'dist');
   for (const line of distIcons) console.log(`    ${line ?? 'FAILED'}`);
 
+  // The partner files are produced only by a current build; with dist/
+  // present these are required (a missing file means a stale build).
+  const distPartner = readJson(distPartnerManifestFile, 'dist partner manifest');
+  if (distPartner && sourcePartner) {
+    check(
+      JSON.stringify(distPartner) === JSON.stringify(sourcePartner),
+      'dist partner manifest: does not match public/partner.webmanifest',
+    );
+  }
+  const distPartnerIcons = validateIcons(distPartner, DIST_DIR, 'dist partner');
+  for (const line of distPartnerIcons) console.log(`    ${line ?? 'FAILED'}`);
+
   if (existsSync(distIndexFile)) {
     const html = readFileSync(distIndexFile, 'utf8');
-    validateIndex(html, 'dist index.html');
+    validateIndex(html, 'dist index.html', { forbiddenHref: '/partner.webmanifest' });
     check(
       /(?:src|href)="\/assets\//.test(html),
       'dist index.html: asset URLs must be root-absolute (/assets/...)',
@@ -209,6 +307,31 @@ if (!distBuilt) {
       'dist index.html: unbundled /src/ entry script left in the build',
     );
     console.log('    dist index.html: root-absolute /assets/ URLs');
+  }
+
+  const distViewFile = join(DIST_DIR, 'view.html');
+  if (existsSync(distViewFile)) {
+    const html = readFileSync(distViewFile, 'utf8');
+    validateIndex(html, 'dist view.html', {
+      manifestHref: '/partner.webmanifest',
+      forbiddenHref: '/manifest.webmanifest',
+      title: 'Migraine Partner',
+    });
+    check(
+      /(?:src|href)="\/assets\//.test(html),
+      'dist view.html: asset URLs must be root-absolute (/assets/...)',
+    );
+    check(
+      !html.includes('"./assets/'),
+      'dist view.html: found relative ./assets/ URLs (base must be "/")',
+    );
+    check(
+      !html.includes('src="/src/'),
+      'dist view.html: unbundled /src/ entry script left in the build',
+    );
+    console.log('    dist view.html: root-absolute /assets/ URLs');
+  } else {
+    fail(`dist view.html: missing ${distViewFile} (stale build — run \`npm run build\`)`);
   }
 }
 

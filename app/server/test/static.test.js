@@ -75,6 +75,80 @@ test('with dist/: SPA fallback serves index.html for non-API GETs, /api stays JS
   });
 });
 
+const INDEX_FIXTURE =
+  '<!doctype html><title>app</title><link rel="manifest" href="/manifest.webmanifest">';
+const VIEW_FIXTURE =
+  '<!doctype html><title>partner</title><link rel="manifest" href="/partner.webmanifest">';
+
+function assertPartnerShell(res, label) {
+  assert.equal(res.statusCode, 200, label);
+  assert.match(res.body, /<title>partner<\/title>/, label);
+  assert.match(res.body, /href="\/partner\.webmanifest"/, label);
+  assert.doesNotMatch(res.body, /href="\/manifest\.webmanifest"/, label);
+}
+
+function assertWriterShell(res, label) {
+  assert.equal(res.statusCode, 200, label);
+  assert.match(res.body, /<title>app<\/title>/, label);
+  assert.match(res.body, /href="\/manifest\.webmanifest"/, label);
+  assert.doesNotMatch(res.body, /href="\/partner\.webmanifest"/, label);
+}
+
+test('with dist/: /view and nested partner routes get the partner shell', async () => {
+  await withDb('migraine-partner-static', async (dir, db) => {
+    const distDir = join(dir, 'dist');
+    mkdirSync(distDir, { recursive: true });
+    writeFileSync(join(distDir, 'index.html'), INDEX_FIXTURE);
+    writeFileSync(join(distDir, 'view.html'), VIEW_FIXTURE);
+
+    const app = await buildApp({ db, distDir });
+
+    assertPartnerShell(await app.inject({ method: 'GET', url: '/view' }), '/view');
+    assertPartnerShell(await app.inject({ method: 'GET', url: '/view/' }), '/view/');
+    assertPartnerShell(
+      await app.inject({ method: 'GET', url: '/view/history' }),
+      '/view/history',
+    );
+    assertPartnerShell(
+      await app.inject({ method: 'GET', url: '/view?refresh=1' }),
+      '/view?refresh=1',
+    );
+
+    assertWriterShell(await app.inject({ method: 'GET', url: '/' }), '/');
+    assertWriterShell(await app.inject({ method: 'GET', url: '/settings' }), '/settings');
+    assertWriterShell(
+      await app.inject({ method: 'GET', url: '/history/deep/link' }),
+      '/history/deep/link',
+    );
+
+    const api = await app.inject({ method: 'GET', url: '/api/nonexistent' });
+    assert.equal(api.statusCode, 404);
+    assert.deepEqual(api.json(), { error: 'not found' });
+
+    await app.close();
+  });
+});
+
+test('with dist/ lacking view.html: /view falls back to the writer shell', async () => {
+  await withDb('migraine-partner-stale', async (dir, db) => {
+    // A stale dist from before the partner shell existed: only index.html.
+    const distDir = join(dir, 'dist');
+    mkdirSync(distDir, { recursive: true });
+    writeFileSync(join(distDir, 'index.html'), INDEX_FIXTURE);
+
+    const app = await buildApp({ db, distDir });
+
+    const view = await app.inject({ method: 'GET', url: '/view' });
+    assert.equal(view.statusCode, 200);
+    assert.match(view.body, /<title>app<\/title>/);
+    const nested = await app.inject({ method: 'GET', url: '/view/history' });
+    assert.equal(nested.statusCode, 200);
+    assert.match(nested.body, /<title>app<\/title>/);
+
+    await app.close();
+  });
+});
+
 // @fastify/static guards its wildcard route against path traversal. These
 // encoded forms are the historical bypass shapes (encoded dots, encoded
 // separators, double encoding, and case variants for case-insensitive
@@ -89,6 +163,7 @@ const TRAVERSAL_URLS = [
   '/assets/%2e%2e/%2e%2e/secret.txt',
   '/%252e%252e/secret.txt',
   '/%2E%2E/secret.txt',
+  '/view/%2e%2e/secret.txt',
 ];
 const SENTINEL = 'TOP-SECRET-SENTINEL';
 

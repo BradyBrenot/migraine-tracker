@@ -6,6 +6,7 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   attackFromRow, attackToRow, medFromRow, medToRow, refillFromRow, refillToRow,
   workoutFromRow, workoutToRow, dayStateFromRow, dayStateToRow,
@@ -401,10 +402,19 @@ export async function buildApp({
   // ── static frontend ────────────────────────────────────────────────
   if (distDir && existsSync(distDir)) {
     await app.register(fastifyStatic, { root: distDir });
-    // SPA fallback: unknown non-API GETs → index.html
+    // Partner shell exists only in a dist built by the current config; with a
+    // stale dist (no view.html) /view falls back to the writer shell exactly
+    // like before, and sendFile can never re-enter this handler (ENOENT would
+    // callNotFound → infinite loop).
+    const partnerEntry = existsSync(join(distDir, 'view.html')) ? 'view.html' : null;
+    // SPA fallback: unknown non-API GETs → /view and nested partner routes get
+    // the partner document (partner manifest); every other route gets the
+    // writer document. Query strings must not affect the choice.
     app.setNotFoundHandler((req, reply) => {
       if (req.method === 'GET' && !req.url.startsWith('/api/')) {
-        return reply.sendFile('index.html');
+        const path = req.url.split('?')[0];
+        const partner = partnerEntry && (path === '/view' || path.startsWith('/view/'));
+        return reply.sendFile(partner ? partnerEntry : 'index.html');
       }
       reply.code(404).send({ error: 'not found' });
     });

@@ -3,7 +3,7 @@ FROM node:24-bookworm-slim AS web
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY index.html vite.config.ts tsconfig*.json tailwind.config.js postcss.config.js components.json* ./
+COPY index.html view.html vite.config.ts tsconfig*.json tailwind.config.js postcss.config.js components.json* ./
 COPY src ./src
 COPY shared ./shared
 COPY public ./public

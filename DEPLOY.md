@@ -20,10 +20,10 @@ Copy the `app/` directory (this project) to:
 ```
 
 Required contents: `Dockerfile`, `compose.yaml`, `.dockerignore`,
-`package.json`, `package-lock.json`, `index.html`, `vite.config.ts`,
-`tsconfig*.json`, `tailwind.config.js`, `postcss.config.js`, `public/`
-(manifest + icons), `shared/`, `src/`, and `server/` (without `node_modules`
-or `server/data`).
+`package.json`, `package-lock.json`, `index.html`, `view.html`,
+`vite.config.ts`, `tsconfig*.json`, `tailwind.config.js`,
+`postcss.config.js`, `public/` (manifests + icons), `shared/`, `src/`, and
+`server/` (without `node_modules` or `server/data`).
 
 (e.g. via SMB share, or `scp -r app/ truenas:/mnt/fast_pool/app_data/migraine-tracker/app`)
 
@@ -273,6 +273,13 @@ seconds, and also when the tab becomes visible or the window regains focus.
 Editing, adding/deleting, quick logging, refills, imports/exports, downloads,
 and Settings are absent from this route.
 
+Installing that page from the browser menu (Android Chrome **Install app** or
+iOS Share -> **Add to Home Screen**) installs a separate read-only app named
+**Migraine Partner**. Its manifest (`id`/`start_url` `/view`, scope `/view`)
+always launches `/view`; the writer app installed from `/` is unchanged. The
+partner app is online-only exactly like the writer (no service worker or
+offline cache), so connectivity to the Tailscale host is still required.
+
 **This is accidental-edit protection only — not authentication or
 authorization.** The API remains unauthenticated and the Tailscale network is
 the security boundary. Anyone with network access can still open the normal
@@ -321,7 +328,9 @@ Settings, then verify stock/inventory and the calendar.
 On Android Chrome, open `https://migraine.crustaceansoup.com` over Tailscale,
 open the menu, and choose **Install app**. It then launches standalone with the
 app icon. iOS can use Share -> **Add to Home Screen**. This on-device install
-is a manual acceptance check; it is not performed from this repository.
+is a manual acceptance check; it is not performed from this repository. The
+partner installs separately from `https://<host>/view` with its own icon and
+name, and always opens the read-only view.
 
 The app is **online-only**: no service worker, no offline cache, no Web Push,
 and no background sync. Installing does not change that - loading, refreshing,

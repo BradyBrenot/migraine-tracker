@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router';
 import { Home, CalendarDays, BarChart3, List, Settings } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import type { SyncStatus } from '../../shared/sync.ts';
 import { Toaster } from '@/components/ui/sonner';
 
 const tabs = [
@@ -10,6 +11,34 @@ const tabs = [
   { to: '/history', label: 'History', icon: List },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
+
+const SYNC_PILL: Record<SyncStatus, { cls: string; label: string; dot: string }> = {
+  synced: { cls: 'border-slate-800 text-slate-500', label: 'Synced', dot: 'bg-emerald-500' },
+  syncing: { cls: 'border-sky-900 bg-sky-950/60 text-sky-300', label: 'Syncing…', dot: 'bg-sky-400 animate-pulse' },
+  error: { cls: 'border-amber-900 bg-amber-950/60 text-amber-300', label: 'Unsynced', dot: 'bg-amber-400' },
+  conflict: { cls: 'border-rose-900 bg-rose-950/60 text-rose-300', label: 'Needs review', dot: 'bg-rose-500' },
+  // neutral wording + desktop-only so offline/demo users aren't alarmed
+  local: { cls: 'border-slate-800 text-slate-500', label: 'Local only', dot: 'bg-slate-600' },
+};
+
+function SyncPill() {
+  const { sync } = useStore();
+  const s = SYNC_PILL[sync.status];
+  const needsAttention =
+    sync.status === 'error' || sync.status === 'conflict' || sync.status === 'syncing';
+  return (
+    <NavLink
+      to="/settings"
+      title={`Sync: ${s.label}`}
+      className={`${s.cls} ml-auto inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold md:ml-3 ${
+        needsAttention ? '' : 'hidden md:inline-flex'
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
+      {s.label}
+    </NavLink>
+  );
+}
 
 export default function Layout() {
   const { activeAttack } = useStore();
@@ -30,6 +59,7 @@ export default function Layout() {
               Attack in progress
             </span>
           )}
+          <SyncPill />
           {/* desktop nav */}
           <nav className="ml-auto hidden gap-1 md:flex">
             {tabs.map(({ to, label, icon: Icon }) => (
@@ -53,12 +83,12 @@ export default function Layout() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 pb-24 pt-6 md:pb-10">
+      <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-6 md:pb-10">
         <Outlet />
       </main>
 
       {/* mobile bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 border-t bg-slate-900/95 backdrop-blur md:hidden">
+      <nav className="fixed bottom-0 left-0 right-0 z-30 border-t bg-slate-900/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur md:hidden">
         <div className="mx-auto grid max-w-lg grid-cols-5">
           {tabs.map(({ to, label, icon: Icon }) => (
             <NavLink

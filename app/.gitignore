@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Default/local DATA_DIR health data (SQLite/WAL, backups, exports) — never commit
+server/data/
+data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

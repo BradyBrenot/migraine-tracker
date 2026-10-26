@@ -13,7 +13,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
-  exportAll: () => req<{ attacks: unknown[]; meds: unknown[]; refills?: unknown[]; settings: Record<string, unknown> }>('GET', '/api/export'),
+  exportAll: () => req<{ attacks: unknown[]; meds: unknown[]; refills?: unknown[]; workouts?: unknown[]; dayStates?: unknown[]; stockBaselines?: unknown[]; settings: Record<string, unknown> }>('GET', '/api/export'),
   importAll: (payload: unknown) => req('POST', '/api/import', payload),
   resetAll: () => req('POST', '/api/reset'),
 
@@ -26,7 +26,20 @@ export const api = {
   deleteMed: (id: string) => req('DELETE', `/api/meds/${id}`),
 
   addRefill: (r: unknown) => req('POST', '/api/refills', r),
+  patchRefill: (id: string, patch: unknown) => req('PATCH', `/api/refills/${id}`, patch),
   deleteRefill: (id: string) => req('DELETE', `/api/refills/${id}`),
+
+  addStockBaseline: (b: unknown) => req('POST', '/api/stock-baselines', b),
+  patchStockBaseline: (id: string, patch: unknown) => req('PATCH', `/api/stock-baselines/${id}`, patch),
+  deleteStockBaseline: (id: string) => req('DELETE', `/api/stock-baselines/${id}`),
+
+  addWorkout: (w: unknown) => req('POST', '/api/workouts', w),
+  patchWorkout: (id: string, patch: unknown) => req('PATCH', `/api/workouts/${id}`, patch),
+  deleteWorkout: (id: string) => req('DELETE', `/api/workouts/${id}`),
+  listWorkouts: () => req('GET', '/api/workouts'),
+
+  listDayStates: () => req('GET', '/api/day-states'),
+  putDayState: (day: string, body: unknown) => req('PUT', `/api/day-states/${day}`, body),
 
   putSetting: (key: string, value: unknown) => req('PUT', `/api/settings/${key}`, value),
 };

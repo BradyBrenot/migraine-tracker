@@ -118,7 +118,7 @@ function slugify(name: string): string {
  * "#","Started","Lasted",… with four medication-by-helpfulness columns.
  */
 export function importMigraineBuddyCSV(text: string): ImportResult {
-  const rows = parseCSV(text.replace(/^﻿/, ''));
+  const rows = parseCSV(text.replace(/^\uFEFF/, ''));
   const warnings: string[] = [];
 
   // find the attacks table header (the file may contain preamble sections)

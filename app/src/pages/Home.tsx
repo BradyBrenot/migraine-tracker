@@ -1,29 +1,59 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon, Zap } from 'lucide-react';
-import { useStore, usageDaysInWindow } from '@/lib/store';
+import { useStore } from '@/lib/store';
+import { usageDaysInWindow } from '@/lib/usage';
+import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
+import { useNow } from '@/lib/clock';
 import { MED_CATALOG, painColor, medColor, medName, textOn } from '@/lib/meds';
 import { fmtDuration, fmtTime, fmtDateFull } from '@/lib/format';
 import AttackFormDialog from '@/components/AttackFormDialog';
 import MedFormDialog from '@/components/MedFormDialog';
+import DayCheckIn from '@/components/DayCheckIn';
+import WorkoutQuickLog from '@/components/WorkoutQuickLog';
+import { addDays, dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
+import { effectiveDayState } from '../../shared/daystate.ts';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 
-function useNow(intervalMs = 30000) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(t);
-  }, [intervalMs]);
-  return now;
+/**
+ * Compact remaining-stock badge shown beside the rolling-use badge on the
+ * Nurtec quick-log button. Wording/colors only — the numbers come from the
+ * shared calculation via `nurtecInventory`.
+ */
+function nurtecStockBadge(stock: NurtecInventory): {
+  text: string;
+  className: string;
+  title: string;
+} {
+  if (stock.level === 'unknown' || stock.quantity === null) {
+    return {
+      text: 'stock not set',
+      className: 'bg-slate-800 text-slate-400',
+      title: 'No starting count recorded — add one in Settings.',
+    };
+  }
+  if (stock.level === 'negative') {
+    return {
+      text: `−${Math.abs(stock.quantity)} stock`,
+      className: 'bg-rose-950 text-rose-300',
+      title: 'Recorded stock is negative — correct it in Settings.',
+    };
+  }
+  return {
+    text: `${stock.quantity} left`,
+    className:
+      stock.level === 'low' ? 'bg-amber-950 text-amber-300' : 'bg-slate-800 text-slate-400',
+    title: 'Optimistic count from this device — the server inventory count is authoritative.',
+  };
 }
 
 export default function Home() {
   const store = useStore();
   const { activeAttack, state } = store;
-  const now = useNow(15000);
+  const now = useNow();
 
   const [painOpen, setPainOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -31,13 +61,40 @@ export default function Home() {
   const [pastMedOpen, setPastMedOpen] = useState(false);
 
   const todaysMeds = useMemo(() => {
-    const today = new Date().toDateString();
+    const today = new Date(now).toDateString();
     return state.meds.filter((m) => new Date(m.ts).toDateString() === today)
       .sort((a, b) => b.ts.localeCompare(a.ts));
-  }, [state.meds]);
+  }, [state.meds, now]);
 
   // Nurtec usage badge for the quick grid
-  const nurtecDays = usageDaysInWindow(state.meds, 'nurtec', 30);
+  const nurtecDays = usageDaysInWindow(state.meds, 'nurtec', 30, now, state.timezone);
+  // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
+  const nurtecStock = nurtecInventory(state, now);
+  const nurtecBadge = nurtecStockBadge(nurtecStock);
+
+  // ── Today's wellness state ─────────────────────────────────
+  const todayKey = localDayKey(now, state.timezone);
+  const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
+  const todayState = useMemo(() => {
+    const dayStart = dayKeyStartMs(todayKey, state.timezone);
+    const dayEnd = dayKeyStartMs(addDays(todayKey, 1), state.timezone);
+    const attackToday = !!activeAttack || state.attacks.some((a) => {
+      const start = Date.parse(a.start);
+      if (!Number.isFinite(start)) return false;
+      const end = a.end ? Date.parse(a.end) : now;
+      return Number.isFinite(end) && start < dayEnd && end > dayStart;
+    });
+    return effectiveDayState(todayRecord, attackToday);
+  }, [todayKey, todayRecord, state.timezone, state.attacks, activeAttack, now]);
+
+  const wellnessGuidance =
+    todayState === 'well'
+      ? 'Well — normal routine today.'
+      : todayState === 'off'
+        ? 'Off — gentle day: a 10-minute light walk or mobility counts as following the plan.'
+        : todayState === 'attack'
+          ? 'Attack — rest. No exercise needed.'
+          : 'How was today?';
 
   function handleStart() {
     store.startAttack();
@@ -68,7 +125,11 @@ export default function Home() {
   }
 
   function handleMed(medId: string) {
-    const entry = store.logMed(medId, new Date(), activeAttack?.id ?? null, state.doses[medId] ?? '');
+    // New Nurtec doses are one tablet by default; other meds keep dose text only.
+    const quantity = medId === 'nurtec' ? 1 : null;
+    const entry = store.logMed(
+      medId, new Date(), activeAttack?.id ?? null, state.doses[medId] ?? '', '', quantity,
+    );
     toast.success(`${medName(medId)} logged`, {
       description: `${state.doses[medId] ? state.doses[medId] + ' · ' : ''}${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
       action: {
@@ -144,6 +205,13 @@ export default function Home() {
         </button>
       )}
 
+      {/* ── Today's wellness ────────────────────────────────────── */}
+      <section className="space-y-2 rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm">
+        <DayCheckIn />
+        <p className="text-xs text-slate-400">{wellnessGuidance}</p>
+        {todayState !== 'attack' && <WorkoutQuickLog />}
+      </section>
+
       {/* ── Medications ─────────────────────────────────────────── */}
       <section>
         <div className="mb-2 flex items-center justify-between">
@@ -166,16 +234,24 @@ export default function Home() {
               <div className="font-semibold leading-tight">{m.name}</div>
               <div className="text-[11px] text-slate-400">{m.kindLabel}</div>
               {m.id === 'nurtec' && (
-                <span
-                  className={`absolute right-2 top-2 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
-                    nurtecDays >= 13
-                      ? 'bg-rose-950 text-rose-300'
-                      : nurtecDays >= 10
-                        ? 'bg-amber-950 text-amber-300'
-                        : 'bg-slate-800 text-slate-400'
-                  }`}
-                >
-                  {nurtecDays}/15
+                <span className="absolute right-2 top-2 flex flex-col items-end gap-1">
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                      nurtecDays >= 13
+                        ? 'bg-rose-950 text-rose-300'
+                        : nurtecDays >= 10
+                          ? 'bg-amber-950 text-amber-300'
+                          : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {nurtecDays}/15
+                  </span>
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${nurtecBadge.className}`}
+                    title={nurtecBadge.title}
+                  >
+                    {nurtecBadge.text}
+                  </span>
                 </span>
               )}
             </button>

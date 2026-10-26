@@ -2,10 +2,14 @@ import { useMemo, useState } from 'react';
 import { Pencil, Trash2, Plus } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { allMedIds, medColor, medName, painColor, textOn } from '@/lib/meds';
+import { parseTabletQuantity } from '@/lib/inventory';
+import { useNow } from '@/lib/clock';
+import { diffDayKeys, isValidDayKey, localDayKey } from '../../shared/datetime.ts';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
-import type { Attack, MedEvent } from '@/types';
+import type { Attack, MedEvent, Refill, Workout, WorkoutKind } from '@/types';
 import AttackFormDialog from '@/components/AttackFormDialog';
 import MedFormDialog from '@/components/MedFormDialog';
+import WorkoutFormDialog from '@/components/WorkoutFormDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -18,19 +22,34 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
+const WORKOUT_KIND_LABEL: Record<WorkoutKind, string> = {
+  strength: 'Strength',
+  cardio: 'Cardio',
+  mobility: 'Mobility',
+};
+
+/** Nurtec's standard pack size, used as the new-pickup default. */
+const NURTEC_PACK_SIZE = '8';
+
 export default function History() {
   const store = useStore();
   const { state } = store;
+  const now = useNow();
   const [editAttack, setEditAttack] = useState<Attack | null>(null);
   const [newAttackOpen, setNewAttackOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleteMedId, setDeleteMedId] = useState<string | null>(null);
   const [editMed, setEditMed] = useState<MedEvent | null>(null);
   const [newMedOpen, setNewMedOpen] = useState(false);
+  const [editWorkout, setEditWorkout] = useState<Workout | null>(null);
+  const [newWorkoutOpen, setNewWorkoutOpen] = useState(false);
+  const [deleteWorkoutId, setDeleteWorkoutId] = useState<string | null>(null);
   const [refillOpen, setRefillOpen] = useState(false);
+  const [refillEditId, setRefillEditId] = useState<string | null>(null);
   const [refillMed, setRefillMed] = useState('nurtec');
   const [refillDate, setRefillDate] = useState('');
   const [refillNotes, setRefillNotes] = useState('');
+  const [refillQuantity, setRefillQuantity] = useState('');
   const [deleteRefillId, setDeleteRefillId] = useState<string | null>(null);
 
   const attacks = useMemo(
@@ -45,30 +64,89 @@ export default function History() {
     () => [...state.refills].sort((a, b) => b.date.localeCompare(a.date)),
     [state.refills],
   );
+  const workouts = useMemo(
+    () => [...state.workouts].sort((a, b) => b.performedAt.localeCompare(a.performedAt)),
+    [state.workouts],
+  );
 
-  // days since previous pickup of the same med (for refill cadence display)
+  // Days since the previous pickup of the same med (for refill cadence
+  // display). Calendar-day arithmetic on valid 'YYYY-MM-DD' keys, so DST and
+  // the browser zone cannot skew the gap. Server validation only requires a
+  // non-empty string, so a malformed legacy date is skipped: it produces no
+  // gap and never becomes the baseline for the next pickup.
   const refillGaps = useMemo(() => {
     const gaps = new Map<string, number>();
     const asc = [...state.refills].sort((a, b) => a.date.localeCompare(b.date));
     const lastByMed = new Map<string, string>();
     for (const r of asc) {
+      if (!isValidDayKey(r.date)) continue;
       const prev = lastByMed.get(r.medId);
-      if (prev) {
-        gaps.set(r.id, Math.round(
-          (new Date(r.date + 'T00:00:00').getTime() - new Date(prev + 'T00:00:00').getTime()) / 86400000));
-      }
+      if (prev !== undefined) gaps.set(r.id, diffDayKeys(r.date, prev));
       lastByMed.set(r.medId, r.date);
     }
     return gaps;
   }, [state.refills]);
 
+  const refillQuantityParsed = parseTabletQuantity(refillQuantity);
+  const canSaveRefill = refillDate !== '' && refillQuantityParsed.valid;
+
+  function openNewRefill() {
+    setRefillEditId(null);
+    setRefillMed('nurtec');
+    // A new pickup defaults to the CONFIGURED LOCAL day, never the UTC day:
+    // near midnight the two differ, and this day key drives stock and
+    // refill-cadence math. Date.now() is fine here — this is an event
+    // handler, not a render.
+    setRefillDate(localDayKey(Date.now(), state.timezone));
+    setRefillNotes('');
+    setRefillQuantity(NURTEC_PACK_SIZE);
+    setRefillOpen(true);
+  }
+
+  function openEditRefill(r: Refill) {
+    setRefillEditId(r.id);
+    setRefillMed(r.medId);
+    setRefillDate(r.date);
+    setRefillNotes(r.notes);
+    // Legacy pickups have null quantity — blank means unknown, never 0.
+    setRefillQuantity(r.quantity != null ? String(r.quantity) : '');
+    setRefillOpen(true);
+  }
+
+  function closeRefill() {
+    setRefillOpen(false);
+    setRefillEditId(null);
+  }
+
+  function selectRefillMed(id: string) {
+    if (id === refillMed) return;
+    setRefillMed(id);
+    // Pack-size defaults apply only while creating a new pickup.
+    if (refillEditId === null) setRefillQuantity(id === 'nurtec' ? NURTEC_PACK_SIZE : '');
+  }
+
+  function saveRefill() {
+    if (!canSaveRefill) return;
+    if (refillEditId) {
+      store.updateRefill(refillEditId, {
+        date: refillDate,
+        notes: refillNotes,
+        quantity: refillQuantityParsed.quantity,
+      });
+    } else {
+      store.addRefill(refillMed, refillDate, refillNotes, refillQuantityParsed.quantity);
+    }
+    closeRefill();
+  }
+
   return (
     <div className="mx-auto max-w-2xl">
       <Tabs defaultValue="attacks">
-        <TabsList className="grid w-full grid-cols-3">
+        <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="attacks">Attacks ({attacks.length})</TabsTrigger>
           <TabsTrigger value="meds">Medications ({meds.length})</TabsTrigger>
           <TabsTrigger value="refills">Rx pickups ({refills.length})</TabsTrigger>
+          <TabsTrigger value="workouts">Workouts ({workouts.length})</TabsTrigger>
         </TabsList>
 
         <TabsContent value="attacks" className="mt-4 space-y-2">
@@ -79,7 +157,7 @@ export default function History() {
             <p className="py-10 text-center text-sm text-slate-400">No attacks logged yet.</p>
           )}
           {attacks.map((a) => {
-            const dur = (a.end ? new Date(a.end).getTime() : Date.now()) - new Date(a.start).getTime();
+            const dur = (a.end ? new Date(a.end).getTime() : now) - new Date(a.start).getTime();
             const attackMeds = meds.filter((m) => m.attackId === a.id);
             return (
               <div key={a.id} className="rounded-xl border bg-slate-900 p-3 shadow-sm">
@@ -182,12 +260,7 @@ export default function History() {
           <Button
             variant="outline"
             className="mb-2 w-full gap-2"
-            onClick={() => {
-              setRefillOpen(true);
-              setRefillMed('nurtec');
-              setRefillDate(new Date().toISOString().slice(0, 10));
-              setRefillNotes('');
-            }}
+            onClick={openNewRefill}
           >
             <Plus className="h-4 w-4" /> Add Rx pickup
           </Button>
@@ -212,6 +285,9 @@ export default function History() {
                 <div className="flex-1">
                   <span className="text-sm font-semibold">{medName(r.medId)}</span>
                   {r.notes && <span className="ml-2 text-xs text-slate-400">{r.notes}</span>}
+                  {r.quantity != null && (
+                    <span className="ml-2 text-xs text-slate-400">{r.quantity} tabs</span>
+                  )}
                   <div className="text-xs text-slate-400">
                     {new Date(r.date + 'T00:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                     {gap !== undefined && (
@@ -219,6 +295,13 @@ export default function History() {
                     )}
                   </div>
                 </div>
+                <button
+                  onClick={() => openEditRefill(r)}
+                  className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                  aria-label="Edit"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
                 <button
                   onClick={() => setDeleteRefillId(r.id)}
                   className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
@@ -229,6 +312,47 @@ export default function History() {
               </div>
             );
           })}
+        </TabsContent>
+
+        <TabsContent value="workouts" className="mt-4 space-y-1.5">
+          <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewWorkoutOpen(true)}>
+            <Plus className="h-4 w-4" /> Add past workout
+          </Button>
+          {workouts.length === 0 && (
+            <p className="py-10 text-center text-sm text-slate-400">No workouts logged yet.</p>
+          )}
+          {workouts.map((w) => (
+            <div key={w.id} className="flex items-center gap-3 rounded-lg border bg-slate-900 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold">
+                  {WORKOUT_KIND_LABEL[w.kind]} · {w.effort}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {fmtDateFull(w.performedAt)} at {fmtTime(w.performedAt)}
+                  {w.durationMinutes !== null && ` · ${w.durationMinutes}m`}
+                </div>
+                {w.notes && (
+                  <p className="mt-1 border-l-2 border-slate-700 pl-2 text-xs italic text-slate-400">
+                    {w.notes}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => setEditWorkout(w)}
+                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                aria-label="Edit"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setDeleteWorkoutId(w.id)}
+                className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
+                aria-label="Delete"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          ))}
         </TabsContent>
       </Tabs>
 
@@ -253,51 +377,78 @@ export default function History() {
         onClose={() => { setEditMed(null); setNewMedOpen(false); }}
       />
 
-      {/* add refill pickup */}
-      <Dialog open={refillOpen} onOpenChange={(o) => !o && setRefillOpen(false)}>
+      {/* add / edit workout */}
+      <WorkoutFormDialog
+        workout={editWorkout}
+        open={!!editWorkout || newWorkoutOpen}
+        onClose={() => { setEditWorkout(null); setNewWorkoutOpen(false); }}
+      />
+
+      {/* add / edit refill pickup */}
+      <Dialog open={refillOpen} onOpenChange={(o) => !o && closeRefill()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Add Rx pickup</DialogTitle>
+            <DialogTitle>{refillEditId ? 'Edit Rx pickup' : 'Add Rx pickup'}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <div className="space-y-1.5">
               <Label>Medication</Label>
-              <div className="grid grid-cols-3 gap-1.5">
-                {allMedIds([...state.meds, ...state.refills]).map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setRefillMed(id)}
-                    className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
-                      refillMed === id
-                        ? 'border-transparent text-slate-950'
-                        : 'border-slate-700 text-slate-300 hover:border-slate-500'
-                    }`}
-                    style={refillMed === id ? { background: medColor(id) } : undefined}
-                  >
-                    {medName(id)}
-                  </button>
-                ))}
-              </div>
+              {refillEditId ? (
+                <div className="text-sm font-semibold text-slate-200">{medName(refillMed)}</div>
+              ) : (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {allMedIds([...state.meds, ...state.refills]).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => selectRefillMed(id)}
+                      className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
+                        refillMed === id
+                          ? 'border-transparent text-slate-950'
+                          : 'border-slate-700 text-slate-300 hover:border-slate-500'
+                      }`}
+                      style={refillMed === id ? { background: medColor(id) } : undefined}
+                    >
+                      {medName(id)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>Pickup date</Label>
               <Input type="date" value={refillDate} onChange={(e) => setRefillDate(e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Notes <span className="font-normal text-slate-500">(quantity, pharmacy…)</span></Label>
-              <Input value={refillNotes} onChange={(e) => setRefillNotes(e.target.value)} placeholder="e.g. 8 tablets" />
+              <Label>
+                Tablets <span className="font-normal text-slate-500">(blank = unknown)</span>
+              </Label>
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                aria-label="Tablets"
+                aria-invalid={!refillQuantityParsed.valid}
+                placeholder="—"
+                value={refillQuantity}
+                onChange={(e) => setRefillQuantity(e.target.value)}
+              />
+              {!refillQuantityParsed.valid && (
+                <p role="alert" className="text-xs text-rose-300">
+                  Tablets must be a whole number (0 or more), or leave blank.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label>Notes <span className="font-normal text-slate-500">(pharmacy…)</span></Label>
+              <Input value={refillNotes} onChange={(e) => setRefillNotes(e.target.value)} placeholder="e.g. CVS" />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRefillOpen(false)}>Cancel</Button>
-            <Button
-              onClick={() => {
-                if (refillDate) store.addRefill(refillMed, refillDate, refillNotes);
-                setRefillOpen(false);
-              }}
-            >
-              Add
+            <Button variant="outline" onClick={closeRefill}>Cancel</Button>
+            <Button onClick={saveRefill} disabled={!canSaveRefill}>
+              {refillEditId ? 'Save' : 'Add'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -350,6 +501,23 @@ export default function History() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => { if (deleteMedId) store.deleteMed(deleteMedId); setDeleteMedId(null); }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* delete workout confirm */}
+      <AlertDialog open={!!deleteWorkoutId} onOpenChange={(o) => !o && setDeleteWorkoutId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this workout?</AlertDialogTitle>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => { if (deleteWorkoutId) store.deleteWorkout(deleteWorkoutId); setDeleteWorkoutId(null); }}
             >
               Delete
             </AlertDialogAction>

@@ -4,7 +4,9 @@ import {
   ComposedChart, Line, Legend,
 } from 'recharts';
 import { Download, Clock, Activity, TrendingUp, CalendarX, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useStore, usageDaysInWindow, daysSinceLast } from '@/lib/store';
+import { useStore } from '@/lib/store';
+import { usageDaysInWindow, daysSinceLast } from '@/lib/usage';
+import { useNow } from '@/lib/clock';
 import { MED_CATALOG, allMedIds, medColor, medName, painColor } from '@/lib/meds';
 import { dayKey, fmtDuration } from '@/lib/format';
 import { Button } from '@/components/ui/button';
@@ -31,6 +33,7 @@ function StatCard({
 
 export default function Reports() {
   const { state } = useStore();
+  const now = useNow();
   // exact-month view for on-screen stats
   const [cursor, setCursor] = useState(() => {
     const d = new Date(); d.setDate(1); return d;
@@ -52,7 +55,7 @@ export default function Reports() {
     // but listed/counted once by their start month
     const attacks = state.attacks.filter((a) => {
       const s = new Date(a.start).getTime();
-      const e = a.end ? new Date(a.end).getTime() : Date.now();
+      const e = a.end ? new Date(a.end).getTime() : now;
       return s < mEnd && e >= mStart;
     });
     const meds = state.meds.filter((m) => inMonth(m.ts));
@@ -70,7 +73,7 @@ export default function Reports() {
     const daysLost = new Set<string>();
     for (const a of attacks) {
       const s = new Date(a.start).getTime();
-      const e = a.end ? new Date(a.end).getTime() : Date.now();
+      const e = a.end ? new Date(a.end).getTime() : now;
       for (let t = Math.max(s, mStart); t < Math.min(e, mEnd); t += 86400000) {
         daysLost.add(dayKey(new Date(t)));
       }
@@ -106,16 +109,16 @@ export default function Reports() {
     const symptoms = count(attacks.map((a) => a.symptoms));
 
     return { attacks, meds, avgMs, avgPain, daysLost: daysLost.size, painDist, medUsage, triggers, symptoms };
-  }, [state, year, month]);
+  }, [state, year, month, now]);
 
   // Monthly trend buckets — last 12 calendar months, independent of the
   // month picker. This is the view that matches "how many migraine days
   // per month" from medical questionnaires.
   const monthly = useMemo(() => {
-    const now = new Date();
+    const nowDate = new Date(now);
     const rows = [];
     for (let i = 11; i >= 0; i--) {
-      const first = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const first = new Date(nowDate.getFullYear(), nowDate.getMonth() - i, 1);
       const mStart = first.getTime();
       const mEnd = new Date(first.getFullYear(), first.getMonth() + 1, 1).getTime();
 
@@ -125,7 +128,7 @@ export default function Reports() {
       let painN = 0;
       for (const a of state.attacks) {
         const s = new Date(a.start).getTime();
-        const e = a.end ? new Date(a.end).getTime() : Date.now();
+        const e = a.end ? new Date(a.end).getTime() : now;
         if (s >= mEnd || e < mStart) continue;
         attacks++;
         if (a.peakPain >= 0) { painSum += a.peakPain; painN++; }
@@ -155,7 +158,7 @@ export default function Reports() {
       });
     }
     return rows;
-  }, [state.attacks, state.meds]);
+  }, [state.attacks, state.meds, now]);
 
   /** Build a month-by-month Markdown report. */
   function downloadReport() {
@@ -291,7 +294,7 @@ export default function Reports() {
       const doses = state.meds
         .filter((e) => e.medId === m.id)
         .sort((a, b) => a.ts.localeCompare(b.ts));
-      const d = daysSinceLast(state.meds, m.id);
+      const d = daysSinceLast(state.meds, m.id, Date.now(), state.timezone);
       lines.push(
         `- ${m.name}: last dose ${d === null ? 'never logged' : `${d} days ago`} (every ~${m.intervalDays}d)` +
           (doses.length
@@ -447,7 +450,7 @@ export default function Reports() {
               {data.medUsage.map((m) => {
                 const rule = state.rules[m.id];
                 const windowUsed = rule
-                  ? usageDaysInWindow(state.meds, m.id, rule.windowDays)
+                  ? usageDaysInWindow(state.meds, m.id, rule.windowDays, now, state.timezone)
                   : null;
                 return (
                   <div key={m.name}>
@@ -490,7 +493,7 @@ export default function Reports() {
         <h3 className="mb-3 text-sm font-bold">Preventive timing</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           {MED_CATALOG.filter((m) => m.kind === 'preventive').map((m) => {
-            const d = daysSinceLast(state.meds, m.id);
+            const d = daysSinceLast(state.meds, m.id, now, state.timezone);
             const interval = m.intervalDays ?? 30;
             return (
               <div key={m.id} className="flex items-center gap-3 rounded-lg bg-slate-800 p-3">

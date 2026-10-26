@@ -45,3 +45,14 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+ * Respect the OS "reduce motion" setting: the attack badge and sync dot stay
+ * visible (and keep their colour/shape), they just stop animating.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-ping,
+  .animate-pulse {
+    animation: none;
+  }
+}

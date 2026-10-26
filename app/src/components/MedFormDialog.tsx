@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { allMedIds, medColor, medName } from '@/lib/meds';
+import { parseTabletQuantity } from '@/lib/inventory';
 import { toLocalInput } from '@/lib/format';
 import type { MedEvent } from '@/types';
 import {
@@ -27,6 +28,7 @@ export default function MedFormDialog({
   const [medId, setMedId] = useState('nurtec');
   const [ts, setTs] = useState('');
   const [dose, setDose] = useState('');
+  const [quantityText, setQuantityText] = useState('1');
 
   useEffect(() => {
     if (!open) return;
@@ -34,25 +36,37 @@ export default function MedFormDialog({
       setMedId(med.medId);
       setTs(toLocalInput(new Date(med.ts)));
       setDose(med.dose ?? '');
+      // Legacy records have null quantity: blank means "unknown", never 0.
+      setQuantityText(med.quantity != null ? String(med.quantity) : '');
     } else {
       setMedId('nurtec');
       setTs(toLocalInput(new Date()));
       setDose(state.doses['nurtec'] ?? '');
+      setQuantityText('1');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, med]);
 
   function onMedChange(id: string) {
     setMedId(id);
-    if (isNew) setDose(state.doses[id] ?? '');
+    if (isNew) {
+      setDose(state.doses[id] ?? '');
+      setQuantityText(id === 'nurtec' ? '1' : '');
+    }
   }
 
+  const isNurtec = medId === 'nurtec';
+  const quantity = parseTabletQuantity(quantityText);
+  const canSave = ts !== '' && quantity.valid;
+
   function save() {
-    if (!ts) return;
+    if (!canSave) return;
+    // Only Nurtec has a structured tablet count; other meds stay null.
+    const tablets = isNurtec ? quantity.quantity : null;
     if (isNew) {
-      store.logMed(medId, new Date(ts), defaultAttackId, dose);
+      store.logMed(medId, new Date(ts), defaultAttackId, dose, '', tablets);
     } else {
-      store.updateMed(med!.id, { ts: new Date(ts).toISOString(), dose });
+      store.updateMed(med!.id, { ts: new Date(ts).toISOString(), dose, quantity: tablets });
     }
     onClose();
   }
@@ -94,10 +108,33 @@ export default function MedFormDialog({
             <Label>Dose</Label>
             <Input value={dose} onChange={(e) => setDose(e.target.value)} placeholder="e.g. 75 mg" />
           </div>
+          {isNurtec && (
+            <div className="space-y-1.5">
+              <Label>
+                Tablets <span className="font-normal text-slate-500">(blank = unknown)</span>
+              </Label>
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                aria-label="Tablets"
+                aria-invalid={!quantity.valid}
+                placeholder="—"
+                value={quantityText}
+                onChange={(e) => setQuantityText(e.target.value)}
+              />
+              {!quantity.valid && (
+                <p role="alert" className="text-xs text-rose-300">
+                  Tablets must be a whole number (0 or more), or leave blank.
+                </p>
+              )}
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save}>{isNew ? 'Add' : 'Save'}</Button>
+          <Button onClick={save} disabled={!canSave}>{isNew ? 'Add' : 'Save'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

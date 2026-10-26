@@ -57,6 +57,10 @@ export default function AttackFormDialog({
   useEffect(() => {
     if (!open) return;
     if (attack) {
+      // Intentional one-shot form initialization on dialog open: the fields
+      // must re-sync to the edited attack. This is a controlled reset that
+      // runs once per open, not render-derived state cascading every render.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStart(toLocalInput(new Date(attack.start)));
       setEnd(attack.end ? toLocalInput(new Date(attack.end)) : '');
       setOngoing(attack.end === null);

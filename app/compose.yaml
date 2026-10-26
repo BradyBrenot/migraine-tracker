@@ -10,3 +10,10 @@ services:
       - "8097:3000"
     volumes:
       - /mnt/fast_pool/app_data/migraine-tracker/data:/data
+    environment:
+      # Server-only ntfy delivery configuration. Leave any value empty/unset to
+      # disable reminders; never put real credentials in this file or git.
+      # NTFY_URL is the FULL topic publish URL (e.g. https://ntfy.example/topic).
+      NTFY_URL: ${NTFY_URL:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}

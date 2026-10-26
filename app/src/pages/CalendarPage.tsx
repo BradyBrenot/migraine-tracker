@@ -1,12 +1,19 @@
 import { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, AlertTriangle, CalendarPlus } from 'lucide-react';
-import { useStore, usageDaysInWindow, daysSinceLast } from '@/lib/store';
+import { useStore } from '@/lib/store';
+import { usageDaysInWindow, daysSinceLast } from '@/lib/usage';
+import { useNow } from '@/lib/clock';
 import {
   MED_CATALOG, MED_MAP, allMedIds, medAbbr, medColor, medName,
   painColor, painTint, textOn, STATUS,
 } from '@/lib/meds';
-import { dayKey, fmtDateFull, fmtTime, fmtDuration } from '@/lib/format';
-import type { Attack, MedEvent } from '@/types';
+import { fmtTime, fmtDuration } from '@/lib/format';
+import type { Attack, MedEvent, WorkoutKind } from '@/types';
+import {
+  addDays, dayKeyStartMs, localDayKey, weekdayOf, type DayKey,
+} from '../../shared/datetime.ts';
+import { effectiveDayState } from '../../shared/daystate.ts';
+import { PREVENTIVE_DUE_TIME, preventiveDue } from '../../shared/reminders.ts';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet';
@@ -20,13 +27,56 @@ import AttackFormDialog from '@/components/AttackFormDialog';
 
 const DAY_MS = 86400000;
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+/** First day of the month containing `key` ('YYYY-MM-DD' -> 'YYYY-MM-01'). */
+function monthStartKey(key: DayKey): DayKey {
+  return `${key.slice(0, 7)}-01`;
+}
+
+/** Calendar-month arithmetic on day keys; never fixed DAY_MS across a month. */
+function addMonths(key: DayKey, n: number): DayKey {
+  const year = Number(key.slice(0, 4));
+  const month = Number(key.slice(5, 7));
+  const d = new Date(Date.UTC(year, month - 1 + n, 1, 12));
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-01`;
+}
+
+/** Configured-zone calendar date label for a day key (never browser-local ISO). */
+function formatDayLabel(key: DayKey, timeZone: string, withYear = false): string {
+  const options: Intl.DateTimeFormatOptions = {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    timeZone,
+  };
+  if (withYear) options.year = 'numeric';
+  return new Intl.DateTimeFormat(undefined, options)
+    .format(new Date(dayKeyStartMs(key, timeZone)));
+}
+
+const WORKOUT_KIND_LABEL: Record<WorkoutKind, string> = {
+  strength: 'Strength',
+  cardio: 'Cardio',
+  mobility: 'Mobility',
+};
+
+const DAY_STATE_LABEL = { well: 'Well', off: 'Off', attack: 'Attack' } as const;
+const DAY_STATE_CLASS = {
+  well: 'text-emerald-300',
+  off: 'text-amber-300',
+  attack: 'text-rose-300',
+} as const;
+
 interface DayData {
+  key: DayKey;            // configured-zone local calendar day
   attacks: Attack[];      // attacks overlapping this day
   meds: MedEvent[];       // meds taken this day
   maxPain: number;        // peak pain of attacks overlapping this day
   isToday: boolean;
   inMonth: boolean;
-  date: Date;
 }
 
 /** A continuous attack bar clipped to one week row. */
@@ -41,9 +91,10 @@ interface BarSegment {
 
 function MedLimitBar({ medId }: { medId: string }) {
   const { state } = useStore();
+  const now = useNow();
   const rule = state.rules[medId];
   if (!rule) return null;
-  const used = usageDaysInWindow(state.meds, medId, rule.windowDays);
+  const used = usageDaysInWindow(state.meds, medId, rule.windowDays, now, state.timezone);
   const pct = Math.min(100, (used / rule.limit) * 100);
   const over = used > rule.limit;
   const near = !over && used >= rule.limit - 3;
@@ -80,23 +131,33 @@ function MedLimitBar({ medId }: { medId: string }) {
 
 function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule: (medId: string) => void }) {
   const { state } = useStore();
+  const now = useNow();
   const def = MED_MAP[medId];
-  const days = daysSinceLast(state.meds, medId);
+  const days = daysSinceLast(state.meds, medId, now, state.timezone);
   const interval = def?.intervalDays ?? 30;
-  const plannedDate = state.planned[medId] ?? null;
 
-  // next due: manual appointment if set, else last dose + interval
-  const lastTs = (() => {
-    const events = state.meds.filter((m) => m.medId === medId);
-    return events.length ? Math.max(...events.map((m) => new Date(m.ts).getTime())) : null;
-  })();
-  const autoDue = lastTs !== null ? new Date(lastTs + interval * DAY_MS) : null;
-  const nextDate = plannedDate ? new Date(plannedDate + 'T09:00:00') : autoDue;
-  const daysUntil = nextDate
-    ? Math.ceil((nextDate.getTime() - Date.now()) / DAY_MS)
-    : null;
-  const due = daysUntil !== null && daysUntil <= 0;
+  // Shared with the server scheduler: planned dates override the automatic
+  // local-day + interval calculation, and both resolve to 09:00 configured
+  // local time (calendar days, not fixed 24h arithmetic).
+  const dueInfo = preventiveDue({
+    medId,
+    intervalDays: interval,
+    meds: state.meds,
+    planned: state.planned,
+    now,
+    timeZone: state.timezone,
+    dueTime: PREVENTIVE_DUE_TIME,
+  });
+  const nextDate = dueInfo.dueMs !== null ? dueInfo.dueMs : null;
+  const daysUntil = nextDate !== null ? Math.ceil((nextDate - now) / DAY_MS) : null;
+  const due = dueInfo.status === 'due';
+  const plannedDate = dueInfo.planned ? dueInfo.dueDay : null;
   const pct = days === null ? 0 : Math.min(100, (days / interval) * 100);
+  const dueLabel = dueInfo.dueDay === null
+    ? ''
+    : new Intl.DateTimeFormat(undefined, {
+      month: 'short', day: 'numeric', timeZone: state.timezone,
+    }).format(new Date(dayKeyStartMs(dueInfo.dueDay, state.timezone)));
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
@@ -124,12 +185,12 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule: (med
           </button>
         </span>
       </div>
-      {nextDate && (
+      {nextDate !== null && (
         <div className="mt-1.5 text-xs">
           <span className={due ? 'font-semibold' : ''} style={due ? { color: STATUS.danger } : undefined}>
             {due
-              ? `due since ${nextDate.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
-              : `next: ${nextDate.toLocaleDateString([], { month: 'short', day: 'numeric' })} (in ${daysUntil}d)`}
+              ? `due since ${dueLabel}`
+              : `next: ${dueLabel} (in ${daysUntil}d)`}
           </span>
           {plannedDate && (
             <span className="ml-1.5 rounded bg-sky-900/60 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
@@ -170,45 +231,56 @@ function assignLanes(segments: Omit<BarSegment, 'lane'>[]): BarSegment[] {
 export default function CalendarPage() {
   const store = useStore();
   const { state } = store;
-  const [cursor, setCursor] = useState(() => {
-    const d = new Date(); d.setDate(1); return d;
-  });
-  const [selected, setSelected] = useState<string | null>(null); // dayKey
+  const now = useNow();
+  // Month cursor is a configured-zone local month, not a browser-local Date.
+  const [cursor, setCursor] = useState<DayKey>(() => monthStartKey(localDayKey(now, state.timezone)));
+  const [selected, setSelected] = useState<DayKey | null>(null);
   const [editAttack, setEditAttack] = useState<Attack | null>(null);
   const [scheduleMed, setScheduleMed] = useState<string | null>(null);
   const [scheduleDate, setScheduleDate] = useState('');
 
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
+  // cursor is always 'YYYY-MM-01'; these are 1-based calendar fields.
+  const year = Number(cursor.slice(0, 4));
+  const month = Number(cursor.slice(5, 7));
+  const monthKey = cursor.slice(0, 7);
 
   const weeks = useMemo(() => {
-    const first = new Date(year, month, 1);
-    const startOffset = (first.getDay() + 6) % 7; // Monday-first
-    const gridStart = new Date(year, month, 1 - startOffset);
-    gridStart.setHours(0, 0, 0, 0);
-    const todayKey = dayKey(new Date());
-    const out: { days: DayData[]; bars: BarSegment[]; weekStart: Date }[] = [];
+    const todayKey = localDayKey(now, state.timezone);
+    const startOffset = (weekdayOf(cursor) + 6) % 7; // Monday-first
+    const gridStartKey = addDays(cursor, -startOffset);
+    const out: {
+      days: DayData[];
+      bars: BarSegment[];
+      weekStartMs: number;
+      weekEndMs: number;
+    }[] = [];
 
     for (let w = 0; w < 6; w++) {
-      const weekStart = new Date(gridStart.getTime() + w * 7 * DAY_MS);
-      const weekEnd = new Date(weekStart.getTime() + 7 * DAY_MS);
+      const weekStartKey = addDays(gridStartKey, w * 7);
+      // Configured-zone local midnights: DST weeks are not exactly 7 × DAY_MS.
+      const weekStartMs = dayKeyStartMs(weekStartKey, state.timezone);
+      const weekEndMs = dayKeyStartMs(addDays(weekStartKey, 7), state.timezone);
       const days: DayData[] = [];
 
       for (let d = 0; d < 7; d++) {
-        const date = new Date(weekStart.getTime() + d * DAY_MS);
-        const dayStart = date.getTime();
-        const dayEnd = dayStart + DAY_MS;
+        const key = addDays(weekStartKey, d);
+        const dayStart = dayKeyStartMs(key, state.timezone);
+        const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
         const attacks = state.attacks.filter((a) => {
-          const s = new Date(a.start).getTime();
-          const e = a.end ? new Date(a.end).getTime() : Date.now();
-          return s < dayEnd && e > dayStart;
+          const s = Date.parse(a.start);
+          if (!Number.isFinite(s)) return false;
+          const e = a.end ? Date.parse(a.end) : now;
+          return Number.isFinite(e) && s < dayEnd && e > dayStart;
         });
         days.push({
-          date,
-          inMonth: date.getMonth() === month,
-          isToday: dayKey(date) === todayKey,
+          key,
+          inMonth: key.slice(0, 7) === monthKey,
+          isToday: key === todayKey,
           attacks,
-          meds: state.meds.filter((m) => dayKey(new Date(m.ts)) === dayKey(date)),
+          meds: state.meds.filter((m) => {
+            const t = Date.parse(m.ts);
+            return Number.isFinite(t) && localDayKey(t, state.timezone) === key;
+          }),
           maxPain: attacks.length ? Math.max(...attacks.map((a) => a.peakPain)) : -1,
         });
       }
@@ -216,66 +288,96 @@ export default function CalendarPage() {
       // continuous bars for attacks overlapping this week
       const overlapping = state.attacks
         .filter((a) => {
-          const s = new Date(a.start).getTime();
-          const e = a.end ? new Date(a.end).getTime() : Date.now();
-          return s < weekEnd.getTime() && e > weekStart.getTime();
+          const s = Date.parse(a.start);
+          if (!Number.isFinite(s)) return false;
+          const e = a.end ? Date.parse(a.end) : now;
+          return Number.isFinite(e) && s < weekEndMs && e > weekStartMs;
         })
         .sort((a, b) => a.start.localeCompare(b.start));
       const raw = overlapping.map((a) => {
-        const s = new Date(a.start).getTime();
-        const e = a.end ? new Date(a.end).getTime() : Date.now();
-        let from = (s - weekStart.getTime()) / DAY_MS;
-        let to = (e - weekStart.getTime()) / DAY_MS;
+        const s = Date.parse(a.start);
+        const e = a.end ? Date.parse(a.end) : now;
+        // Fractional positioning may normalize by DAY_MS, but the bounds are
+        // real configured-zone local midnights (DST-safe bucketing above).
+        let from = (s - weekStartMs) / DAY_MS;
+        let to = (e - weekStartMs) / DAY_MS;
         from = Math.max(0, from);
         to = Math.min(7, to);
         if (to - from < 0.18) to = Math.min(7, from + 0.18); // keep short attacks visible
         return {
           attack: a, from, to,
-          continuesLeft: s < weekStart.getTime(),
-          continuesRight: e > weekEnd.getTime(),
+          continuesLeft: s < weekStartMs,
+          continuesRight: e > weekEndMs,
         };
       });
 
-      out.push({ days, bars: assignLanes(raw), weekStart });
+      out.push({ days, bars: assignLanes(raw), weekStartMs, weekEndMs });
     }
     return out;
-  }, [year, month, state.attacks, state.meds]);
+  }, [cursor, monthKey, state.attacks, state.meds, state.timezone, now]);
 
   const selData = useMemo(() => {
     if (!selected) return null;
-    for (const w of weeks) for (const d of w.days) if (dayKey(d.date) === selected) return d;
+    for (const w of weeks) for (const d of w.days) if (d.key === selected) return d;
     return null;
   }, [selected, weeks]);
 
-  const monthName = cursor.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  // Day state + workouts for the open sheet, bucketed in state.timezone.
+  const selectedWellness = useMemo(() => {
+    if (!selected) return null;
+    const record = state.dayStates.find((d) => d.day === selected) ?? null;
+    const dayStart = dayKeyStartMs(selected, state.timezone);
+    const dayEnd = dayKeyStartMs(addDays(selected, 1), state.timezone);
+    const hasAttack = state.attacks.some((a) => {
+      const start = Date.parse(a.start);
+      if (!Number.isFinite(start)) return false;
+      const end = a.end ? Date.parse(a.end) : now;
+      return Number.isFinite(end) && start < dayEnd && end > dayStart;
+    });
+    const workouts = state.workouts
+      .filter((w) => {
+        const ms = Date.parse(w.performedAt);
+        return Number.isFinite(ms) && localDayKey(ms, state.timezone) === selected;
+      })
+      .sort((a, b) => b.performedAt.localeCompare(a.performedAt));
+    return { record, status: effectiveDayState(record, hasAttack), workouts };
+  }, [selected, state.dayStates, state.timezone, state.attacks, state.workouts, now]);
+
+  const monthName = new Intl.DateTimeFormat(undefined, {
+    month: 'long', year: 'numeric', timeZone: state.timezone,
+  }).format(new Date(dayKeyStartMs(cursor, state.timezone)));
+
   const overuseFlags = Object.entries(state.rules).filter(
-    ([id, r]) => usageDaysInWindow(state.meds, id, r.windowDays) >= r.limit - 3,
+    ([id, r]) => usageDaysInWindow(state.meds, id, r.windowDays, now, state.timezone) >= r.limit - 3,
   );
 
-  // "X attack days out of Y" for the visible month — the metric most
-  // migraine questionnaires (MIDAS, diaries) ask about.
+  const monthBounds = useMemo(() => ({
+    startMs: dayKeyStartMs(cursor, state.timezone),
+    endMs: dayKeyStartMs(addMonths(cursor, 1), state.timezone),
+  }), [cursor, state.timezone]);
+
+  // "X attack days out of Y" for the visible configured-zone month — the
+  // metric most migraine questionnaires (MIDAS, diaries) ask about. Days are
+  // bucketed with the same local-midnight bounds as the grid cells.
   const monthStats = useMemo(() => {
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const attackDays = new Set<string>();
-    let attackCount = 0;
-    for (const a of state.attacks) {
-      const s = new Date(a.start).getTime();
-      const e = a.end ? new Date(a.end).getTime() : Date.now();
-      const monthStart = new Date(year, month, 1).getTime();
-      const monthEnd = new Date(year, month + 1, 1).getTime();
-      if (s >= monthEnd || e < monthStart) continue;
-      attackCount++;
-      for (
-        let t = Math.max(s, monthStart);
-        t < Math.min(e, monthEnd);
-        t += DAY_MS
-      ) {
-        const d = new Date(t);
-        if (d.getMonth() === month) attackDays.add(dayKey(d));
-      }
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const intervals = state.attacks.map((a) => {
+      const s = Date.parse(a.start);
+      const e = a.end ? Date.parse(a.end) : now;
+      return { s, e };
+    }).filter(({ s, e }) => Number.isFinite(s) && Number.isFinite(e));
+    const attackCount = intervals
+      .filter(({ s, e }) => s < monthBounds.endMs && e > monthBounds.startMs)
+      .length;
+    let attackDays = 0;
+    for (let d = 0; d < daysInMonth; d++) {
+      const key = addDays(cursor, d);
+      const dayStart = dayKeyStartMs(key, state.timezone);
+      const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
+      if (intervals.some(({ s, e }) => s < dayEnd && e > dayStart)) attackDays++;
     }
-    return { attackDays: attackDays.size, daysInMonth, attackCount };
-  }, [state.attacks, year, month]);
+    return { attackDays, daysInMonth, attackCount };
+  }, [state.attacks, cursor, year, month, monthBounds, state.timezone, now]);
 
   return (
     <div className="space-y-6">
@@ -318,7 +420,7 @@ export default function CalendarPage() {
       <section className="rounded-2xl border border-slate-800 bg-slate-900 p-3 shadow-sm sm:p-4">
         <div className="mb-3 flex items-center justify-between">
           <button
-            onClick={() => setCursor(new Date(year, month - 1, 1))}
+            onClick={() => setCursor((c) => addMonths(c, -1))}
             className="rounded-lg p-2 text-slate-300 hover:bg-slate-800"
             aria-label="Previous month"
           >
@@ -333,7 +435,7 @@ export default function CalendarPage() {
             </p>
           </div>
           <button
-            onClick={() => setCursor(new Date(year, month + 1, 1))}
+            onClick={() => setCursor((c) => addMonths(c, 1))}
             className="rounded-lg p-2 text-slate-300 hover:bg-slate-800"
             aria-label="Next month"
           >
@@ -353,10 +455,12 @@ export default function CalendarPage() {
               {/* day cells */}
               <div className="grid grid-cols-7 gap-px bg-slate-800">
                 {week.days.map((d) => {
-                  const key = dayKey(d.date);
+                  const key = d.key;
                   return (
                     <button
                       key={key}
+                      data-day={key}
+                      aria-label={formatDayLabel(key, state.timezone, true)}
                       onClick={() => setSelected(key)}
                       className={`relative flex min-h-[70px] flex-col bg-slate-950 p-1 text-left transition-colors hover:bg-slate-800 sm:min-h-[88px] ${
                         d.inMonth ? '' : 'opacity-35'
@@ -370,7 +474,7 @@ export default function CalendarPage() {
                             : 'text-slate-400'
                         }`}
                       >
-                        {d.date.getDate()}
+                        {Number(key.slice(8, 10))}
                       </span>
 
                       {/* med letter chips */}
@@ -457,11 +561,12 @@ export default function CalendarPage() {
               // they actually appear in the visible month
               .filter((id) => {
                 if (MED_MAP[id]) return true;
-                const mStart = new Date(year, month, 1).getTime();
-                const mEnd = new Date(year, month + 1, 1).getTime();
                 return state.meds.some((e) => {
-                  const t = new Date(e.ts).getTime();
-                  return e.medId === id && t >= mStart && t < mEnd;
+                  const t = Date.parse(e.ts);
+                  return e.medId === id
+                    && Number.isFinite(t)
+                    && t >= monthBounds.startMs
+                    && t < monthBounds.endMs;
                 });
               })
               .map((id) => {
@@ -488,16 +593,44 @@ export default function CalendarPage() {
           {selData && (
             <>
               <SheetHeader>
-                <SheetTitle>{fmtDateFull(selData.date.toISOString())}</SheetTitle>
+                <SheetTitle>{formatDayLabel(selData.key, state.timezone)}</SheetTitle>
               </SheetHeader>
               <div className="space-y-4 py-4">
-                {selData.attacks.length === 0 && selData.meds.length === 0 && (
+                {selectedWellness && (
+                  <div className="rounded-lg border border-slate-800 bg-slate-900">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                        Day state
+                      </span>
+                      <span
+                        className={`text-sm font-semibold ${
+                          selectedWellness.status === null
+                            ? 'text-slate-500'
+                            : DAY_STATE_CLASS[selectedWellness.status]
+                        }`}
+                      >
+                        {selectedWellness.status === null
+                          ? '—'
+                          : selectedWellness.record
+                            ? DAY_STATE_LABEL[selectedWellness.record.status]
+                            : 'attack (from attacks)'}
+                      </span>
+                    </div>
+                    {selectedWellness.record?.notes && (
+                      <p className="border-t border-slate-800 px-3 py-2 text-xs italic text-slate-400">
+                        {selectedWellness.record.notes}
+                      </p>
+                    )}
+                  </div>
+                )}
+                {selData.attacks.length === 0 && selData.meds.length === 0
+                  && (selectedWellness?.workouts.length ?? 0) === 0 && (
                   <p className="py-6 text-center text-sm text-slate-500">
                     Nothing logged this day 🎉
                   </p>
                 )}
                 {selData.attacks.map((a) => {
-                  const dur = (a.end ? new Date(a.end).getTime() : Date.now()) - new Date(a.start).getTime();
+                  const dur = (a.end ? new Date(a.end).getTime() : now) - new Date(a.start).getTime();
                   const c = painColor(a.peakPain);
                   return (
                     <button
@@ -556,6 +689,38 @@ export default function CalendarPage() {
                           </div>
                         );
                       })}
+                    </div>
+                  </div>
+                )}
+                {(selectedWellness?.workouts.length ?? 0) > 0 && (
+                  <div>
+                    <h3 className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Workouts
+                    </h3>
+                    <div className="space-y-1">
+                      {selectedWellness!.workouts.map((w) => (
+                        <div
+                          key={w.id}
+                          className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-slate-200">
+                              {WORKOUT_KIND_LABEL[w.kind]} · {w.effort}
+                            </span>
+                            <span className="ml-auto text-xs tabular-nums text-slate-500">
+                              {fmtTime(w.performedAt)}
+                            </span>
+                          </div>
+                          {w.durationMinutes !== null && (
+                            <div className="text-xs text-slate-500">{w.durationMinutes}m</div>
+                          )}
+                          {w.notes && (
+                            <p className="mt-1 border-l-2 border-slate-700 pl-2 text-xs italic text-slate-400">
+                              {w.notes}
+                            </p>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

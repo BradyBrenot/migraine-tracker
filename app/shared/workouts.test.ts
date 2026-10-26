@@ -137,6 +137,153 @@ describe('countWorkoutsInWeek', () => {
       mobility: 0,
     });
   });
+
+  it('counts duplicate same-kind rows on one configured-local day once', () => {
+    const workouts = [
+      entry('2026-06-08T12:00:00.000Z', 'strength'), // 08:00 EDT Jun 8
+      entry('2026-06-08T18:00:00.000Z', 'strength'), // 14:00 EDT Jun 8
+      entry('2026-06-08T23:30:00.000Z', 'strength'), // 19:30 EDT Jun 8
+    ];
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York')).toEqual({
+      strength: 1,
+      cardio: 0,
+      mobility: 0,
+    });
+  });
+
+  it('counts Strength and Cardio on the same day once each', () => {
+    const workouts = [
+      entry('2026-06-09T12:00:00.000Z', 'strength'),
+      entry('2026-06-09T18:00:00.000Z', 'strength'),
+      entry('2026-06-09T13:00:00.000Z', 'cardio'),
+      entry('2026-06-09T19:00:00.000Z', 'cardio'),
+    ];
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York')).toEqual({
+      strength: 1,
+      cardio: 1,
+      mobility: 0,
+    });
+  });
+
+  it('counts duplicates on different days separately', () => {
+    const workouts = [
+      entry('2026-06-08T12:00:00.000Z', 'strength'),
+      entry('2026-06-08T15:00:00.000Z', 'strength'), // duplicate day, ignored
+      entry('2026-06-09T12:00:00.000Z', 'strength'),
+      entry('2026-06-10T12:00:00.000Z', 'cardio'),
+      entry('2026-06-10T15:00:00.000Z', 'cardio'), // duplicate day, ignored
+      entry('2026-06-11T12:00:00.000Z', 'cardio'),
+    ];
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York')).toEqual({
+      strength: 2,
+      cardio: 2,
+      mobility: 0,
+    });
+  });
+
+  it('buckets duplicate days by the configured zone, not the UTC date', () => {
+    // 15:20Z Jun 6 = Sun 00:20 Jun 7 in Tokyo, Sat 11:20 Jun 6 in New York.
+    const workouts = [
+      entry('2026-06-06T15:20:00.000Z', 'strength'),
+      entry('2026-06-06T16:20:00.000Z', 'strength'), // same Tokyo Sunday
+    ];
+    // Tokyo: both are Sunday Jun 7, one distinct day in the Jun 7 week.
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'Asia/Tokyo').strength).toBe(1);
+    // New York: both are Saturday Jun 6, so the Jun 7 week has none...
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York').strength).toBe(0);
+    // ...and they collapse to one distinct day in the May 31 week.
+    expect(countWorkoutsInWeek(workouts, '2026-06-06', 'America/New_York').strength).toBe(1);
+  });
+
+  it('counts a repeated fall-back local hour once and keeps days distinct', () => {
+    // 2026-11-01 NY falls back at 02:00 EDT: 01:30 happens twice (05:30Z EDT
+    // and 06:30Z EST) on the same local day.
+    const repeated = [
+      entry('2026-11-01T05:30:00.000Z', 'strength'),
+      entry('2026-11-01T06:30:00.000Z', 'strength'),
+    ];
+    // Week of Sunday 2026-11-01 is 169h: [04:00Z Nov 1, 05:00Z Nov 8).
+    expect(countWorkoutsInWeek(repeated, '2026-11-03', 'America/New_York')).toEqual({
+      strength: 1,
+      cardio: 0,
+      mobility: 0,
+    });
+    // A second calendar day does add a distinct day, even in the long week.
+    expect(countWorkoutsInWeek(
+      [...repeated, entry('2026-11-02T05:00:00.000Z', 'strength')], // local Nov 2 midnight
+      '2026-11-03',
+      'America/New_York',
+    ).strength).toBe(2);
+  });
+
+  it('collapses spring-forward duplicate days without widening the local week', () => {
+    // Week of Sunday 2026-03-08 (167h). Two rows on Monday Mar 9 local.
+    const duplicated = [
+      entry('2026-03-09T14:00:00.000Z', 'strength'), // 10:00 EDT
+      entry('2026-03-09T18:00:00.000Z', 'strength'), // 14:00 EDT
+    ];
+    expect(countWorkoutsInWeek(duplicated, '2026-03-10', 'America/New_York')).toEqual({
+      strength: 1,
+      cardio: 0,
+      mobility: 0,
+    });
+    // The following Monday is still its own week, not the spring-forward one.
+    const nextMonday = [entry('2026-03-16T14:00:00.000Z', 'strength')];
+    expect(countWorkoutsInWeek(nextMonday, '2026-03-10', 'America/New_York').strength).toBe(0);
+    expect(countWorkoutsInWeek(nextMonday, '2026-03-16', 'America/New_York').strength).toBe(1);
+  });
+
+  it('skips invalid timestamps without creating a day bucket', () => {
+    const workouts = [
+      entry('not-a-date', 'strength'),
+      entry('2026-13-45', 'strength'),
+      entry('', 'cardio'),
+      entry('2026-06-09T12:00:00.000Z', 'strength'),
+      entry('2026-06-09T18:00:00.000Z', 'cardio'),
+    ];
+    // One real strength day and one real cardio day; the three garbage rows add
+    // neither a count nor a phantom day, and never throw.
+    expect(countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York')).toEqual({
+      strength: 1,
+      cardio: 1,
+      mobility: 0,
+    });
+  });
+
+  it('still counts every mobility session individually and never toward goals', () => {
+    const workouts = [
+      entry('2026-06-08T12:00:00.000Z', 'mobility'),
+      entry('2026-06-08T18:00:00.000Z', 'mobility'),
+      entry('2026-06-08T20:00:00.000Z', 'mobility'),
+    ];
+    const counts = countWorkoutsInWeek(workouts, '2026-06-10', 'America/New_York');
+    expect(counts).toEqual({ strength: 0, cardio: 0, mobility: 3 });
+    expect(weekGoalStatus(counts)).toEqual({ strengthMet: false, cardioMet: false });
+  });
+
+  it('cannot meet a goal with duplicates from a single day', () => {
+    const strengthDuplicates = [
+      entry('2026-06-08T12:00:00.000Z', 'strength'),
+      entry('2026-06-08T15:00:00.000Z', 'strength'),
+      entry('2026-06-08T18:00:00.000Z', 'strength'),
+    ];
+    const strengthCounts = countWorkoutsInWeek(
+      strengthDuplicates,
+      '2026-06-10',
+      'America/New_York',
+    );
+    expect(strengthCounts.strength).toBe(1);
+    expect(weekGoalStatus(strengthCounts)).toEqual({ strengthMet: false, cardioMet: false });
+
+    const cardioDuplicates = [
+      entry('2026-06-09T12:00:00.000Z', 'cardio'),
+      entry('2026-06-09T15:00:00.000Z', 'cardio'),
+      entry('2026-06-09T18:00:00.000Z', 'cardio'),
+    ];
+    const cardioCounts = countWorkoutsInWeek(cardioDuplicates, '2026-06-10', 'America/New_York');
+    expect(cardioCounts.cardio).toBe(1);
+    expect(weekGoalStatus(cardioCounts)).toEqual({ strengthMet: false, cardioMet: false });
+  });
 });
 
 describe('weekGoalStatus', () => {

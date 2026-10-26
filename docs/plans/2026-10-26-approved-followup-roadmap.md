@@ -38,6 +38,11 @@ User approved the reviewer-prioritized items 1–5 and all smaller worthwhile im
 - Weekly goals count distinct configured-local days per kind for Strength and Cardio, at most one of each per day; Mobility behavior remains unchanged. This repairs legacy duplicate inflation without deleting/migrating records.
 - WorkoutFormDialog warns when the selected kind already has a record on that configured-local day (excluding the record being edited), but does not block detailed historical entry. Home quick-log highest-effort behavior remains unchanged.
 - Add duplicate-day, timezone, invalid-date, and dialog tests.
+- Implemented: `countWorkoutsInWeek` keeps its signature/shape but buckets Strength and Cardio into per-kind sets of `localDayKey(instantMs, timeZone)` inside the existing half-open `sundayWeekBounds` window, so duplicate same-day rows count once; no records are deleted, merged, or migrated.
+- Implemented: Mobility is deliberately unchanged — every mobility session still counts individually and never satisfies a strength/cardio goal. Invalid `performedAt` values are still skipped before any day bucket is created.
+- Implemented: `WorkoutFormDialog` shows an inline `role="status"` warning (before the save button, never disabling it) when another same-kind goal record already exists on the configured-local day of the valid entered `performedAt`, excluding the record being edited. Changing kind/day clears it, an invalid/cleared date never warns, and Mobility never warns because mobility duplicates cannot change a goal.
+- Implemented: shared workout/reminder tests cover same-day duplicates, one-per-kind days, distinct days, cross-zone bucketing, the fall-back repeated hour, spring-forward bounds, invalid timestamps, unchanged mobility, and duplicates failing to meet goals; dialog tests cover warn-before-save, edit exclusion, kind/date clearing, invalid dates, and no mobility warning; server reminder tests prove duplicate-only weeks still send instead of `condition_gone`.
+- Review fix: goal copy now says strength/cardio DAYS (constants unchanged at 2/3), the exercise reminder body matches ("2 strength days and 3 cardio days"), and the dialog warning uses a persistent polite live region that skips workout scans while the dialog is closed.
 
 ## 5. Alert and sync diagnostics
 

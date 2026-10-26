@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { Workout, WorkoutEffort, WorkoutKind } from '@/types';
 import { useStore } from '@/lib/store';
 import { toLocalInput } from '@/lib/format';
+import { localDayKey } from '../../shared/datetime.ts';
+import { workoutInstantMs } from '../../shared/workouts.ts';
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -47,6 +49,38 @@ function parseDurationInput(raw: string): { valid: boolean; minutes: number | nu
   const value = Number(trimmed);
   if (!Number.isInteger(value) || value < 1) return { valid: false, minutes: null };
   return { valid: true, minutes: value };
+}
+
+function kindLabel(kind: WorkoutKind): string {
+  return KINDS.find(({ value }) => value === kind)?.label ?? kind;
+}
+
+/**
+ * First OTHER goal-kind record on the same configured-local day as
+ * `instantMs`, or null.
+ *
+ * Only strength/cardio matter: weekly goals count those once per day, while
+ * mobility duplicates never affect a goal, so mobility is exempt. The record
+ * being edited (by id) never counts as its own duplicate. Invalid stored
+ * timestamps are ignored, never thrown on.
+ */
+function findSameDayGoalWorkout(
+  workouts: Workout[],
+  kind: WorkoutKind | null,
+  instantMs: number,
+  timeZone: string,
+  excludeId: string | null,
+): Workout | null {
+  if (kind !== 'strength' && kind !== 'cardio') return null;
+  const dayKey = localDayKey(instantMs, timeZone);
+  for (const other of workouts) {
+    if (other.kind !== kind) continue;
+    if (excludeId !== null && other.id === excludeId) continue;
+    const otherMs = workoutInstantMs(other.performedAt);
+    if (otherMs === null) continue;
+    if (localDayKey(otherMs, timeZone) === dayKey) return other;
+  }
+  return null;
 }
 
 function Toggle({
@@ -107,6 +141,20 @@ export default function WorkoutFormDialog({
     && form.effort !== null
     && Number.isFinite(performedMs)
     && duration.valid;
+  const duplicateWorkout = open && Number.isFinite(performedMs)
+    ? findSameDayGoalWorkout(
+      store.state.workouts,
+      form.kind,
+      performedMs,
+      store.state.timezone,
+      workout?.id ?? null,
+    )
+    : null;
+  // Persistent live region content: empty string keeps the same <p> mounted so
+  // assistive tech treats it as a stable status region that toggles text.
+  const duplicateWarning = duplicateWorkout !== null && form.kind !== null
+    ? `This day already has a ${kindLabel(form.kind)} workout. Weekly goals count each day once, so this won't add another day — you can still save it.`
+    : '';
 
   function save() {
     if (!canSave || form.kind === null || form.effort === null) return;
@@ -198,6 +246,13 @@ export default function WorkoutFormDialog({
               placeholder="Anything worth remembering…"
             />
           </div>
+
+          {/* Always mounted while the dialog is open (stable polite live
+              region); `empty:!m-0` keeps the blank state from adding the
+              space-y gap, so the layout is unchanged without a warning. */}
+          <p role="status" aria-live="polite" className="text-xs text-amber-200 empty:!m-0">
+            {duplicateWarning}
+          </p>
         </div>
 
         <DialogFooter>

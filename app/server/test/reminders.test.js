@@ -471,6 +471,11 @@ test('exercise: a behind Sunday week sends at exerciseTime and met goals suppres
   assert.equal((await behindEngine.tick()).sent, 1);
   assert.equal(behindRecorder.calls.length, 1);
   assert.equal(behindRecorder.calls[0].title, 'Weekly movement check');
+  assert.equal(
+    behindRecorder.calls[0].body,
+    'Your weekly goals are still open: 2 strength days and 3 cardio days. '
+      + 'A short workout still counts.',
+  );
 
   const met = makeDb(t, 'exercise-met');
   seedSettings(met.db, { reminders: EXERCISE_ONLY });
@@ -501,6 +506,29 @@ test('exercise: mobility sessions never satisfy strength/cardio goals', async (t
 
   assert.equal((await engine.tick()).sent, 1);
   assert.equal(calls.length, 1);
+});
+
+test('exercise: duplicate same-day goal-kind workouts never meet the goals or suppress the prompt', async (t) => {
+  const { db } = makeDb(t, 'exercise-duplicates');
+  seedSettings(db, { reminders: EXERCISE_ONLY });
+  // Strength x2 on Monday Apr 6 and Cardio x3 on Tuesday Apr 7: only two
+  // distinct goal days, so the weekly minimums are still short.
+  seedWorkouts(db, [
+    ['2026-04-06T12:00:00.000Z', 'strength'],
+    ['2026-04-06T18:00:00.000Z', 'strength'],
+    ['2026-04-07T12:00:00.000Z', 'cardio'],
+    ['2026-04-07T15:00:00.000Z', 'cardio'],
+    ['2026-04-07T18:00:00.000Z', 'cardio'],
+  ]);
+  const clock = makeClock('2026-04-10T22:30:00.000Z'); // 18:30 EDT Fri
+  const { transport, calls } = recorder();
+  const engine = engineFor(db, clock, transport);
+
+  assert.equal((await engine.tick()).sent, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].title, 'Weekly movement check');
+  assert.match(calls[0].body, /2 strength days and 3 cardio days/);
+  assert.equal(occurrence(db, 'exercise:2026-04-10').status, 'succeeded');
 });
 
 test('exercise: explicit and attack-inferred Attack days suppress the prompt', async (t) => {

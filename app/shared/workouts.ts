@@ -3,8 +3,13 @@
  *
  * Conventions:
  * - Weeks are the same Sunday-start weeks used by the calendar/day pages.
- * - `mobility` sessions are tracked separately and NEVER satisfy the strength
- *   or cardio goals.
+ * - Weekly strength/cardio goals count DISTINCT configured-local days per
+ *   kind, at most one of each per local day. Duplicate rows (legacy imports,
+ *   repeated History entries) therefore cannot inflate a goal, matching Home's
+ *   one-highest-effort-session-per-day model. Historical records are never
+ *   deleted or merged by this rule.
+ * - `mobility` sessions are tracked separately, count individually, and NEVER
+ *   satisfy the strength or cardio goals.
  * - Dirty timestamps must not crash reports: unparseable `performedAt` values
  *   are skipped rather than throwing.
  *
@@ -17,11 +22,11 @@
  */
 
 import type { WorkoutKind } from '../src/types/index.ts';
-import { sundayWeekBounds, type DayKey } from './datetime.ts';
+import { localDayKey, sundayWeekBounds, type DayKey } from './datetime.ts';
 
-/** Minimum strength sessions per Sunday–Saturday week. */
+/** Minimum distinct strength days per Sunday–Saturday week. */
 export const WEEKLY_STRENGTH_GOAL = 2;
-/** Minimum cardio sessions per Sunday–Saturday week. */
+/** Minimum distinct cardio days per Sunday–Saturday week. */
 export const WEEKLY_CARDIO_GOAL = 3;
 
 export interface WorkoutWeekCounts {
@@ -45,6 +50,12 @@ export function workoutInstantMs(performedAt: string): number | null {
  * `anyDayKey`, in `timeZone`. Week bounds are half-open [startMs, endMs) and
  * come from `sundayWeekBounds`, so DST-shortened/lengthened weeks stay aligned
  * with local midnights. Workouts with unparseable timestamps are skipped.
+ *
+ * Strength and cardio each contribute at most ONE count per configured-local
+ * day, no matter how many same-kind rows share that day. That keeps duplicate
+ * legacy/imported/History rows from inflating goals or wrongly suppressing
+ * reminders without touching the records themselves. Mobility is unchanged:
+ * every mobility session counts.
  */
 export function countWorkoutsInWeek(
   workouts: { performedAt: string; kind: WorkoutKind }[],
@@ -53,15 +64,21 @@ export function countWorkoutsInWeek(
 ): WorkoutWeekCounts {
   const bounds = sundayWeekBounds(anyDayKey, timeZone);
   const counts: WorkoutWeekCounts = { strength: 0, cardio: 0, mobility: 0 };
+  const goalDays: Record<'strength' | 'cardio', Set<DayKey>> = {
+    strength: new Set<DayKey>(),
+    cardio: new Set<DayKey>(),
+  };
   for (const workout of workouts) {
     const instantMs = workoutInstantMs(workout.performedAt);
     if (instantMs === null) continue;
     if (instantMs < bounds.startMs || instantMs >= bounds.endMs) continue;
     // Unknown kinds are ignored rather than miscounted as strength/cardio.
-    if (workout.kind === 'strength') counts.strength += 1;
-    else if (workout.kind === 'cardio') counts.cardio += 1;
+    if (workout.kind === 'strength') goalDays.strength.add(localDayKey(instantMs, timeZone));
+    else if (workout.kind === 'cardio') goalDays.cardio.add(localDayKey(instantMs, timeZone));
     else if (workout.kind === 'mobility') counts.mobility += 1;
   }
+  counts.strength = goalDays.strength.size;
+  counts.cardio = goalDays.cardio.size;
   return counts;
 }
 

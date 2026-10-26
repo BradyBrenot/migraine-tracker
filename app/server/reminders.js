@@ -616,8 +616,8 @@ export function createReminderEngine({
     }
     return {
       title: 'Weekly movement check',
-      body: 'Your weekly goals are still open: 2 strength and 3 cardio sessions. '
-        + 'A short session still counts.',
+      body: 'Your weekly goals are still open: 2 strength days and 3 cardio days. '
+        + 'A short workout still counts.',
     };
   }
 

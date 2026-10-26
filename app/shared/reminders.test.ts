@@ -348,6 +348,40 @@ describe('assessExercise', () => {
     });
   });
 
+  it('counts duplicate same-day goal-kind rows once so they cannot meet goals', () => {
+    // 3 strength rows on one local day and 3 cardio rows on another: one
+    // distinct day per kind, so neither goal is met and nothing suppresses.
+    const duplicates = [
+      workout('2026-06-08T12:00:00.000Z', 'strength'),
+      workout('2026-06-08T15:00:00.000Z', 'strength'),
+      workout('2026-06-08T18:00:00.000Z', 'strength'),
+      workout('2026-06-09T12:00:00.000Z', 'cardio'),
+      workout('2026-06-09T15:00:00.000Z', 'cardio'),
+      workout('2026-06-09T18:00:00.000Z', 'cardio'),
+    ];
+    expect(assess({ workouts: duplicates })).toMatchObject({
+      suppressed: null,
+      counts: { strength: 1, cardio: 1, mobility: 0 },
+      strengthMet: false,
+      cardioMet: false,
+    });
+
+    // Spread across two days, the duplicated rows still count only those two
+    // days: strength is met, cardio stays short, so the prompt is not dropped.
+    const twoDays = [
+      ...duplicates.filter((w) => w.kind === 'strength'),
+      workout('2026-06-09T12:00:00.000Z', 'strength'),
+      ...duplicates.filter((w) => w.kind === 'cardio'),
+      workout('2026-06-10T12:00:00.000Z', 'cardio'),
+    ];
+    expect(assess({ workouts: twoDays })).toMatchObject({
+      suppressed: null,
+      counts: { strength: 2, cardio: 2, mobility: 0 },
+      strengthMet: true,
+      cardioMet: false,
+    });
+  });
+
   it('uses Sunday-start weeks with half-open local bounds', () => {
     const boundaries = [
       // One millisecond before the Sunday 2026-06-07 (EDT) week start.

@@ -101,7 +101,7 @@ function doseAgeText(ageMs: number): string {
 
 export default function Home() {
   const store = useStore();
-  const { activeAttack, state } = store;
+  const { activeAttack, state, serverMode } = store;
   const now = useNow();
 
   const [painOpen, setPainOpen] = useState(false);
@@ -416,7 +416,13 @@ export default function Home() {
         </Button>
       </section>
 
-      {!state.seeded && state.attacks.length === 0 && (
+      {/* Local-only demo seeding. The server import is additive
+          (`INSERT OR IGNORE`), so in confirmed server mode this action would
+          silently append demo records to canonical server data. Gate on
+          `serverMode` (a backend was confirmed reachable via hydration), not
+          on hydration completion: before the first `/api/export` resolves
+          this is still local mode. */}
+      {!serverMode && !state.seeded && state.attacks.length === 0 && (
         <div className="rounded-xl border border-dashed bg-slate-900 p-4 text-center text-sm text-slate-400">
           <p>No data yet. This demo stores everything in your browser only.</p>
           <button

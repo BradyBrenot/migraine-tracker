@@ -1381,3 +1381,53 @@ describe('Home recent-dose surfacing', () => {
     await waitFor(() => expect(captured!.state.meds).toHaveLength(2));
   });
 });
+
+describe('Home demo-data guard', () => {
+  const DEMO_COPY = 'No data yet. This demo stores everything in your browser only.';
+  const DEMO_BUTTON = 'Load 75 days of demo data';
+
+  it('hides the demo block in confirmed server mode and never imports demo data', async () => {
+    mountHome();
+    await waitForSync();
+    await waitFor(() => expect(captured!.serverMode).toBe(true));
+
+    expect(screen.queryByText(DEMO_COPY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DEMO_BUTTON })).toBeNull();
+    expect(api.importAll).not.toHaveBeenCalled();
+  });
+
+  it('keeps the demo block and still loads demo data locally when the server is unreachable', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+
+    mountHome();
+    // The rejected hydration leaves the store in local mode for good.
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalled());
+    expect(captured!.serverMode).toBe(false);
+    expect(captured!.sync.status).toBe('local');
+
+    expect(screen.getByText(DEMO_COPY)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: DEMO_BUTTON }));
+
+    await waitFor(() => expect(captured!.state.seeded).toBe(true));
+    expect(captured!.state.attacks.length).toBeGreaterThan(0);
+    expect(captured!.state.meds.length).toBeGreaterThan(0);
+    // The store's serialized queue short-circuits writes while offline, so the
+    // demo import never reaches the API at all — unchanged offline behavior.
+    expect(api.importAll).not.toHaveBeenCalled();
+    // Seeding flips `seeded`, so the existing condition hides the block.
+    expect(screen.queryByText(DEMO_COPY)).toBeNull();
+  });
+
+  it('keeps the demo block hidden for already-seeded local state', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+    seedState({ seeded: true });
+
+    mountHome();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalled());
+    expect(captured!.serverMode).toBe(false);
+
+    expect(screen.queryByText(DEMO_COPY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DEMO_BUTTON })).toBeNull();
+    expect(api.importAll).not.toHaveBeenCalled();
+  });
+});

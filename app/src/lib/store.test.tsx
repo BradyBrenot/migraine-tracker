@@ -1561,3 +1561,212 @@ describe('Nurtec inventory and low-stock latch', () => {
     expect(toast2.warning).not.toHaveBeenCalled();
   });
 });
+
+describe('peak pain correction', () => {
+  const PAIN_TS = '2026-10-20T09:00:00.000Z';
+
+  async function mountWithAttack(attack: Attack): Promise<void> {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [attack] });
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    await waitFor(() =>
+      expect(currentStore().state.attacks.find((a) => a.id === attack.id)).toBeDefined());
+  }
+
+  function storedAttack(id: string): Attack {
+    const found = currentStore().state.attacks.find((a) => a.id === id);
+    if (!found) throw new Error(`attack ${id} missing from store state`);
+    return found;
+  }
+
+  function lastAttackPatch(): Partial<Attack> {
+    const calls = api.patchAttack.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][1] as Partial<Attack>;
+  }
+
+  async function settle(): Promise<void> {
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+  }
+
+  function seededAttack(id: string): Attack {
+    return {
+      ...makeAttack(id),
+      peakPain: 6,
+      painLog: [{ ts: PAIN_TS, level: 6 }],
+    };
+  }
+
+  it('applies an explicit raised peak and keeps the existing single log entry', async () => {
+    await mountWithAttack(seededAttack('a1'));
+    expect(storedAttack('a1').peakPain).toBe(6);
+
+    await act(async () => {
+      currentStore().updateAttack('a1', { peakPain: 9 });
+    });
+
+    expect(storedAttack('a1').peakPain).toBe(9);
+    expect(storedAttack('a1').painLog).toEqual([{ ts: PAIN_TS, level: 6 }]);
+    await settle();
+
+    const payload = lastAttackPatch();
+    expect(payload.peakPain).toBe(9);
+    expect(payload.painLog).toEqual([{ ts: PAIN_TS, level: 6 }]);
+  });
+
+  it('applies an explicit downward correction', async () => {
+    await mountWithAttack(seededAttack('a1'));
+
+    await act(async () => {
+      currentStore().updateAttack('a1', { peakPain: 2 });
+    });
+
+    expect(storedAttack('a1').peakPain).toBe(2);
+    expect(storedAttack('a1').painLog).toHaveLength(1);
+    await settle();
+    const payload = lastAttackPatch();
+    expect(payload.peakPain).toBe(2);
+    expect(payload.painLog).toHaveLength(1);
+  });
+
+  it('accepts an explicit 0 peak', async () => {
+    await mountWithAttack(seededAttack('a1'));
+
+    await act(async () => {
+      currentStore().updateAttack('a1', { peakPain: 0 });
+    });
+
+    expect(storedAttack('a1').peakPain).toBe(0);
+    await settle();
+    expect(lastAttackPatch().peakPain).toBe(0);
+  });
+
+  it('does not resurrect an old peak on a metadata-only update after a correction', async () => {
+    await mountWithAttack(seededAttack('a1'));
+    await act(async () => {
+      currentStore().updateAttack('a1', { peakPain: 2 });
+    });
+    await act(async () => {
+      currentStore().updateAttack('a1', { notes: 'x' });
+    });
+
+    expect(storedAttack('a1').peakPain).toBe(2);
+    expect(storedAttack('a1').notes).toBe('x');
+    await settle();
+
+    const payload = lastAttackPatch();
+    expect(payload.peakPain).toBe(2);
+    expect(payload.notes).toBe('x');
+  });
+
+  it('folds only new pain entries into the corrected peak', async () => {
+    await mountWithAttack(seededAttack('a1'));
+    await act(async () => {
+      currentStore().updateAttack('a1', { peakPain: 2 });
+    });
+    await settle();
+
+    await act(async () => {
+      currentStore().logPain('a1', 3);
+    });
+    expect(storedAttack('a1').peakPain).toBe(3);
+    expect(storedAttack('a1').painLog).toHaveLength(2);
+
+    await act(async () => {
+      currentStore().logPain('a1', 1);
+    });
+    expect(storedAttack('a1').peakPain).toBe(3);
+    expect(storedAttack('a1').painLog).toHaveLength(3);
+
+    await act(async () => {
+      currentStore().logPain('a1', 9);
+    });
+    expect(storedAttack('a1').peakPain).toBe(9);
+    expect(storedAttack('a1').painLog).toHaveLength(4);
+    await settle();
+
+    const payload = lastAttackPatch();
+    expect(payload.peakPain).toBe(9);
+    expect(payload.painLog).toHaveLength(4);
+  });
+
+  it('still derives a peak for legacy attacks whose stored peak is unknown', async () => {
+    await mountWithAttack({
+      ...makeAttack('legacy'),
+      peakPain: -1,
+      painLog: [
+        { ts: PAIN_TS, level: 4 },
+        { ts: '2026-10-20T10:00:00.000Z', level: 6 },
+      ],
+    });
+
+    await act(async () => {
+      currentStore().updateAttack('legacy', { notes: 'legacy' });
+    });
+    expect(storedAttack('legacy').peakPain).toBe(6);
+    await settle();
+    expect(lastAttackPatch().peakPain).toBe(6);
+  });
+
+  it('uses max semantics for new pain entries on a fresh attack', async () => {
+    await mountWithAttack(makeAttack('fresh'));
+    expect(storedAttack('fresh').peakPain).toBe(-1);
+
+    await act(async () => {
+      currentStore().logPain('fresh', 3);
+    });
+    expect(storedAttack('fresh').peakPain).toBe(3);
+
+    await act(async () => {
+      currentStore().logPain('fresh', 7);
+    });
+    expect(storedAttack('fresh').peakPain).toBe(7);
+
+    await act(async () => {
+      currentStore().logPain('fresh', 2);
+    });
+    expect(storedAttack('fresh').peakPain).toBe(7);
+    await settle();
+    expect(lastAttackPatch().peakPain).toBe(7);
+  });
+
+  it('keeps a 0-pain attack valid', async () => {
+    await mountWithAttack(makeAttack('zero'));
+
+    await act(async () => {
+      currentStore().logPain('zero', 0);
+    });
+
+    expect(storedAttack('zero').peakPain).toBe(0);
+    expect(storedAttack('zero').painLog).toEqual([
+      { ts: expect.any(String), level: 0 },
+    ]);
+    await settle();
+    expect(lastAttackPatch().peakPain).toBe(0);
+    expect(lastAttackPatch().painLog).toEqual([{ ts: expect.any(String), level: 0 }]);
+  });
+
+  it.each([7, 0])(
+    'keeps an initial %i-pain attack intact through the creation sequence',
+    async (level) => {
+      // AttackFormDialog's new/past path: startAttack -> logPain -> metadata
+      // updateAttack. The metadata patch must not reset the captured peak.
+      mountStore();
+      await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+      let createdId = '';
+      const start = new Date('2026-10-20T08:00:00.000Z');
+      await act(async () => {
+        createdId = currentStore().startAttack(start).id;
+        currentStore().logPain(createdId, level, start);
+        currentStore().updateAttack(createdId, { notes: 'past attack' });
+      });
+      await settle();
+
+      expect(storedAttack(createdId).peakPain).toBe(level);
+      expect(storedAttack(createdId).painLog).toHaveLength(1);
+      expect(lastAttackPatch()).toMatchObject({ peakPain: level, notes: 'past attack' });
+      expect(lastAttackPatch().painLog).toHaveLength(1);
+    },
+  );
+});

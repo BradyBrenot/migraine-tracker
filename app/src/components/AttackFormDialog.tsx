@@ -97,10 +97,9 @@ export default function AttackFormDialog({
         start: startDate.toISOString(),
         end: endDate ? endDate.toISOString() : null,
         symptoms, triggers, aura, notes,
+        // Save the chosen peak directly; no synthetic pain-log entry.
+        ...(painSet ? { peakPain: pain } : {}),
       });
-      if (painSet && attack!.peakPain < 0) {
-        logPain(attack!.id, pain, startDate);
-      }
     }
     onClose();
   }

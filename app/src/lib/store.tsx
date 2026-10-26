@@ -152,7 +152,9 @@ function loadState(): TrackerState {
   }
 }
 
-/** Cached peak pain across the pain log (and an explicitly set peak). */
+/** Legacy-peak derivation across the pain log (and an explicitly set peak).
+ * Only used when the stored peak is unknown (-1); an explicit or previously
+ * derived peak is authoritative and must not be rescan-resurrected. */
 function recomputePeak(a: Attack): number {
   const levels = a.painLog.map((p) => p.level);
   if (a.peakPain >= 0) levels.push(a.peakPain);
@@ -775,7 +777,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const current = stateRef.current.attacks.find((x) => x.id === id);
         if (!current) return;
         const merged: Attack = { ...current, ...patch };
-        merged.peakPain = recomputePeak(merged);
+        if (typeof patch.peakPain === 'number') {
+          // An explicit peak (including a downward correction) wins verbatim;
+          // never re-derive it from old pain-log history.
+          merged.peakPain = patch.peakPain;
+        } else if (current.peakPain >= 0) {
+          // Metadata edits must not rescan history and resurrect a peak the
+          // user deliberately lowered.
+          merged.peakPain = current.peakPain;
+        } else {
+          // Legacy record with no cached peak: derive it once from its log.
+          merged.peakPain = recomputePeak(merged);
+        }
         applyState((s) => ({
           ...s,
           attacks: s.attacks.map((x) => (x.id === id ? merged : x)),
@@ -798,7 +811,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           painLog: [...current.painLog, { ts: when.toISOString(), level }]
             .sort((x, y) => x.ts.localeCompare(y.ts)),
         };
-        next.peakPain = recomputePeak(next);
+        // Fold only the new entry into the stored peak. Rescanning the whole
+        // log here would resurrect a peak the user lowered via edit.
+        next.peakPain = Math.max(current.peakPain, level);
         applyState((s) => ({
           ...s,
           attacks: s.attacks.map((x) => (x.id === attackId ? next : x)),

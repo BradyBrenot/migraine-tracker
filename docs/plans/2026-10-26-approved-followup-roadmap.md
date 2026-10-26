@@ -28,6 +28,10 @@ User approved the reviewer-prioritized items 1–5 and all smaller worthwhile im
 - AttackFormDialog must save explicit peak changes for existing attacks, including raising and lowering, without adding a synthetic pain-log entry.
 - Store update semantics must distinguish an explicit `peakPain` patch from recomputation. Future new pain entries must not silently resurrect an older corrected peak; derive from the stored current peak plus the new entry rather than rescanning old history in that path.
 - Preserve 0-pain attacks and new/past attack behavior. Add create/raise/lower/store regression tests.
+- Implemented: editing an attack now sends the selected `peakPain` directly in the patch (raising, lowering, or 0) with no `logPain` call or synthetic pain-log entry; untouched legacy peaks stay out of the patch, and new/past attack creation still uses `logPain`.
+- Implemented: `updateAttack` honors an explicit numeric `peakPain` verbatim, preserves an already-known peak across metadata edits, and derives from the log only when the stored peak is still `-1` (legacy records).
+- Implemented: `logPain` folds the new entry into the stored peak with `Math.max` instead of rescanning history, so a corrected-down peak cannot be resurrected.
+- Implemented: new AttackFormDialog and store regression tests cover raise/lower/0, metadata-only edits, later pain entries, legacy derivation, and 0-pain attacks.
 
 ## 4. Workout goal integrity and History warning
 

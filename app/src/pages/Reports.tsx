@@ -314,8 +314,8 @@ export default function Reports() {
 
   return (
     <div className="space-y-6">
-      {/* month picker + export */}
-      <div className="flex items-center justify-between">
+      {/* month picker + export -- wraps to separate rows at phone widths */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           <button
             onClick={() => setCursor(new Date(year, month - 1, 1))}

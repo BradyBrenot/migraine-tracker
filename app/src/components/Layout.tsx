@@ -13,12 +13,12 @@ const tabs = [
 ];
 
 const SYNC_PILL: Record<SyncStatus, { cls: string; label: string; dot: string }> = {
-  synced: { cls: 'border-slate-800 text-slate-500', label: 'Synced', dot: 'bg-emerald-500' },
+  synced: { cls: 'border-slate-800 text-slate-400', label: 'Synced', dot: 'bg-emerald-500' },
   syncing: { cls: 'border-sky-900 bg-sky-950/60 text-sky-300', label: 'Syncing…', dot: 'bg-sky-400 animate-pulse' },
   error: { cls: 'border-amber-900 bg-amber-950/60 text-amber-300', label: 'Unsynced', dot: 'bg-amber-400' },
   conflict: { cls: 'border-rose-900 bg-rose-950/60 text-rose-300', label: 'Needs review', dot: 'bg-rose-500' },
   // neutral wording + desktop-only so offline/demo users aren't alarmed
-  local: { cls: 'border-slate-800 text-slate-500', label: 'Local only', dot: 'bg-slate-600' },
+  local: { cls: 'border-slate-800 text-slate-400', label: 'Local only', dot: 'bg-slate-600' },
 };
 
 function SyncPill() {
@@ -83,7 +83,7 @@ export default function Layout() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-6 md:pb-10">
+      <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 sm:pt-6">
         <Outlet />
       </main>
 

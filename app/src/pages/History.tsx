@@ -142,11 +142,29 @@ export default function History() {
   return (
     <div className="mx-auto max-w-2xl">
       <Tabs defaultValue="attacks">
-        <TabsList className="grid w-full grid-cols-4">
-          <TabsTrigger value="attacks">Attacks ({attacks.length})</TabsTrigger>
-          <TabsTrigger value="meds">Medications ({meds.length})</TabsTrigger>
-          <TabsTrigger value="refills">Rx pickups ({refills.length})</TabsTrigger>
-          <TabsTrigger value="workouts">Workouts ({workouts.length})</TabsTrigger>
+        {/* Compact labels keep the four tabs readable at phone widths; the
+            full wording returns at sm+. Counts stay visible at every size. The
+            list is taller on mobile so the padded triggers stay ~41px tap targets; the desktop height
+            at sm+. */}
+        <TabsList className="grid h-12 w-full grid-cols-4 sm:h-9">
+          <TabsTrigger value="attacks" className="gap-1 px-1 text-[11px] sm:gap-1.5 sm:px-2 sm:text-sm">
+            Attacks
+            <span className="tabular-nums">({attacks.length})</span>
+          </TabsTrigger>
+          <TabsTrigger value="meds" className="gap-1 px-1 text-[11px] sm:gap-1.5 sm:px-2 sm:text-sm">
+            <span className="sm:hidden">Meds</span>
+            <span className="hidden sm:inline">Medications</span>
+            <span className="tabular-nums">({meds.length})</span>
+          </TabsTrigger>
+          <TabsTrigger value="refills" className="gap-1 px-1 text-[11px] sm:gap-1.5 sm:px-2 sm:text-sm">
+            <span className="sm:hidden">Rx</span>
+            <span className="hidden sm:inline">Rx pickups</span>
+            <span className="tabular-nums">({refills.length})</span>
+          </TabsTrigger>
+          <TabsTrigger value="workouts" className="gap-1 px-1 text-[11px] sm:gap-1.5 sm:px-2 sm:text-sm">
+            Workouts
+            <span className="tabular-nums">({workouts.length})</span>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="attacks" className="mt-4 space-y-2">

@@ -188,11 +188,13 @@ afterEach(() => {
 });
 
 describe('Home Nurtec inventory display', () => {
-  it('shows "stock not set" when no baseline applies (never zero)', async () => {
+  it('shows "no count" when no baseline applies (never zero)', async () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByText('stock not set')).toBeTruthy();
+    // Shortened from 'stock not set' to fit the 4-up mobile card (~61px inner
+    // width at 360px); the explanatory title is unchanged.
+    expect(screen.getByText('no count')).toBeTruthy();
     expect(screen.queryByText('0 left')).toBeNull();
   });
 

@@ -30,7 +30,8 @@ function nurtecStockBadge(stock: NurtecInventory): {
 } {
   if (stock.level === 'unknown' || stock.quantity === null) {
     return {
-      text: 'stock not set',
+      // Short enough for a 61px card at 360px; the `title` carries the detail.
+      text: 'no count',
       className: 'bg-slate-800 text-slate-400',
       title: 'No starting count recorded — add one in Settings.',
     };
@@ -75,25 +76,36 @@ export default function Home() {
   // ── Today's wellness state ─────────────────────────────────
   const todayKey = localDayKey(now, state.timezone);
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
-  const todayState = useMemo(() => {
+  // Does any real attack (active or ended) overlap today's local day? An active
+  // attack always counts — it is still ongoing.
+  const attackOverlapsToday = useMemo(() => {
+    if (activeAttack) return true;
     const dayStart = dayKeyStartMs(todayKey, state.timezone);
     const dayEnd = dayKeyStartMs(addDays(todayKey, 1), state.timezone);
-    const attackToday = !!activeAttack || state.attacks.some((a) => {
+    return state.attacks.some((a) => {
       const start = Date.parse(a.start);
       if (!Number.isFinite(start)) return false;
       const end = a.end ? Date.parse(a.end) : now;
       return Number.isFinite(end) && start < dayEnd && end > dayStart;
     });
-    return effectiveDayState(todayRecord, attackToday);
-  }, [todayKey, todayRecord, state.timezone, state.attacks, activeAttack, now]);
+  }, [todayKey, state.timezone, state.attacks, activeAttack, now]);
 
+  // An explicit Well/Off record still wins over an inferred (or ended) attack
+  // day; without a record, an attack overlapping today means Attack/Rest.
+  const todayState = useMemo(
+    () => effectiveDayState(todayRecord, attackOverlapsToday),
+    [todayRecord, attackOverlapsToday],
+  );
+
+  // Short guidance for the wellness card. The status pill already names the
+  // day, so these describe what the status means instead of repeating it.
   const wellnessGuidance =
     todayState === 'well'
-      ? 'Well — normal routine today.'
+      ? 'Normal routine today.'
       : todayState === 'off'
-        ? 'Off — gentle day: a 10-minute light walk or mobility counts as following the plan.'
+        ? 'Easy day — a 10-min walk counts (Cardio · Low).'
         : todayState === 'attack'
-          ? 'Attack — rest. No exercise needed.'
+          ? 'Rest — no exercise needed.'
           : 'How was today?';
 
   function handleStart() {
@@ -143,7 +155,7 @@ export default function Home() {
   const preventives = MED_CATALOG.filter((m) => m.kind === 'preventive');
 
   return (
-    <div className="mx-auto max-w-xl space-y-6">
+    <div className="mx-auto max-w-xl space-y-4 sm:space-y-5">
       {/* ── Active attack banner / start button ─────────────────── */}
       {activeAttack ? (
         <section className="overflow-hidden rounded-2xl border border-rose-900 bg-gradient-to-br from-rose-950 to-slate-950 shadow-sm">
@@ -177,6 +189,9 @@ export default function Home() {
                 </>
               )}
             </div>
+            {/* Rest guidance lives here because the wellness card is hidden
+                while an attack is active (it can never re-enable exercise). */}
+            <p className="mt-2 text-xs text-slate-400">Rest — no exercise needed.</p>
           </div>
           <div className="grid grid-cols-2 divide-x border-t border-rose-900">
             <button
@@ -198,45 +213,56 @@ export default function Home() {
       ) : (
         <button
           onClick={handleStart}
-          className="group flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 py-8 text-xl font-bold text-white shadow-lg shadow-red-950 transition-colors hover:bg-red-500 active:scale-[0.98]"
+          className="group flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 py-5 text-xl font-bold text-white shadow-lg shadow-red-950 transition-colors hover:bg-red-500 active:scale-[0.98] sm:py-8"
         >
           <Play className="h-7 w-7 transition-transform group-hover:scale-110" />
-          Attack started
+          {attackOverlapsToday ? 'Another attack started' : 'Attack started'}
         </button>
       )}
 
       {/* ── Today's wellness ────────────────────────────────────── */}
-      <section className="space-y-2 rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm">
-        <DayCheckIn />
-        <p className="text-xs text-slate-400">{wellnessGuidance}</p>
-        {todayState !== 'attack' && <WorkoutQuickLog />}
-      </section>
+      {/* Hidden during an active attack: the banner owns guidance then, and an
+          earlier Well/Off record must never re-enable exercise logging. */}
+      {!activeAttack && (
+        <section className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm">
+          <DayCheckIn guidance={wellnessGuidance} effectiveStatus={todayState} />
+          {todayState !== 'attack' && (
+            <div className="mt-2.5 border-t border-slate-800/70 pt-2.5">
+              <WorkoutQuickLog />
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ── Medications ─────────────────────────────────────────── */}
       <section>
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-1.5 flex items-center justify-between sm:mb-2">
           <h2 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-400">
             <Pill className="h-4 w-4" /> Took a med
           </h2>
           <span className="text-xs text-slate-400">one tap = logged now</span>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
           {acuteMeds.map((m) => (
             <button
               key={m.id}
               onClick={() => handleMed(m.id)}
-              className="relative rounded-xl border bg-slate-900 p-3 text-left shadow-sm transition-all hover:shadow active:scale-[0.97]"
+              className="relative rounded-xl border bg-slate-900 p-2 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
             >
               <span
-                className="mb-1.5 block h-1.5 w-8 rounded-full"
+                className="mb-1.5 block h-1 w-6 rounded-full sm:h-1.5 sm:w-8"
                 style={{ background: m.color }}
               />
-              <div className="font-semibold leading-tight">{m.name}</div>
-              <div className="text-[11px] text-slate-400">{m.kindLabel}</div>
+              <div className="break-words text-xs font-semibold leading-tight sm:text-base">
+                {m.name}
+              </div>
+              <div className="truncate text-[10px] text-slate-400 sm:text-[11px]" title={m.kindLabel}>
+                {m.kindLabel}
+              </div>
               {m.id === 'nurtec' && (
-                <span className="absolute right-2 top-2 flex flex-col items-end gap-1">
+                <span className="mt-1 flex flex-wrap gap-1 sm:absolute sm:right-2 sm:top-2 sm:mt-0 sm:flex-col sm:items-end">
                   <span
-                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                    className={`whitespace-nowrap rounded-full px-1 py-0.5 text-[10px] font-bold sm:px-1.5 ${
                       nurtecDays >= 13
                         ? 'bg-rose-950 text-rose-300'
                         : nurtecDays >= 10
@@ -247,7 +273,7 @@ export default function Home() {
                     {nurtecDays}/15
                   </span>
                   <span
-                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${nurtecBadge.className}`}
+                    className={`whitespace-nowrap rounded-full px-1 py-0.5 text-[10px] font-bold sm:px-1.5 ${nurtecBadge.className}`}
                     title={nurtecBadge.title}
                   >
                     {nurtecBadge.text}
@@ -257,12 +283,12 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="mt-2 grid grid-cols-2 gap-2">
+        <div className="mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
           {preventives.map((m) => (
             <button
               key={m.id}
               onClick={() => handleMed(m.id)}
-              className="flex items-center gap-3 rounded-xl border bg-slate-900 p-3 text-left shadow-sm transition-all hover:shadow active:scale-[0.97]"
+              className="flex items-center gap-3 rounded-xl border bg-slate-900 p-2.5 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
             >
               <span className="h-8 w-1.5 rounded-full" style={{ background: m.color }} />
               <span>
@@ -335,7 +361,7 @@ export default function Home() {
       <Dialog open={painOpen} onOpenChange={setPainOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>How bad is it right now?</DialogTitle>
+            <DialogTitle>How bad is the pain right now?</DialogTitle>
           </DialogHeader>
           <div className="grid grid-cols-4 gap-2 py-2">
             {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
@@ -359,6 +385,9 @@ export default function Home() {
             {activeAttack
               ? 'Logged against your current attack'
               : 'No active attack — this will start one'}
+          </p>
+          <p className="text-center text-xs text-slate-400">
+            0 = no pain, but still an attack.
           </p>
         </DialogContent>
       </Dialog>

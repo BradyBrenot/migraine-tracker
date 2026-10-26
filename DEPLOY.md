@@ -194,6 +194,21 @@ then use `image: migraine-tracker:latest` in place of `build:`.
 - HTTPS is required for mobile Chrome installation; use the real HTTPS hostname
   for the install acceptance check.
 
+### Partner read-only view
+
+Send the partner to `https://<host>/view` (the same host used for the app). It
+shows Now, Calendar, Reports, and History with a visible **Read only** label.
+The page fetches `GET /api/export` and refreshes automatically about every 20
+seconds, and also when the tab becomes visible or the window regains focus.
+Editing, adding/deleting, quick logging, refills, imports/exports, downloads,
+and Settings are absent from this route.
+
+**This is accidental-edit protection only — not authentication or
+authorization.** The API remains unauthenticated and the Tailscale network is
+the security boundary. Anyone with network access can still open the normal
+writer app or call the normal API directly; `/view` does not enforce any
+server-side permission.
+
 ## 7. Backups (ongoing)
 
 Two layers, both inside the Backrest-covered dataset

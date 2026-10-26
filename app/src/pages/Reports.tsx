@@ -32,7 +32,7 @@ function StatCard({
 }
 
 export default function Reports() {
-  const { state } = useStore();
+  const { state, readOnly } = useStore();
   const now = useNow();
   // exact-month view for on-screen stats
   const [cursor, setCursor] = useState(() => {
@@ -335,24 +335,26 @@ export default function Reports() {
             <ChevronRight className="h-5 w-5" />
           </button>
         </div>
-        <div className="flex items-center gap-1.5">
-          <div className="flex gap-1 rounded-lg border bg-slate-900 p-1">
-            {(['3', '6', '12', 'all'] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setReportSpan(s)}
-                className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
-                  reportSpan === s ? 'bg-white text-slate-950' : 'text-slate-400 hover:bg-slate-800'
-                }`}
-              >
-                {s === 'all' ? 'All' : `${s}mo`}
-              </button>
-            ))}
+        {!readOnly && (
+          <div className="flex items-center gap-1.5">
+            <div className="flex gap-1 rounded-lg border bg-slate-900 p-1">
+              {(['3', '6', '12', 'all'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setReportSpan(s)}
+                  className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                    reportSpan === s ? 'bg-white text-slate-950' : 'text-slate-400 hover:bg-slate-800'
+                  }`}
+                >
+                  {s === 'all' ? 'All' : `${s}mo`}
+                </button>
+              ))}
+            </div>
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadReport}>
+              <Download className="h-4 w-4" /> Report
+            </Button>
           </div>
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadReport}>
-            <Download className="h-4 w-4" /> Report
-          </Button>
-        </div>
+        )}
       </div>
 
       {/* summary cards */}

@@ -202,12 +202,14 @@ function serverSnapshotToState(data: ExportShape, fallbackTz: string): Partial<T
   return snapshot;
 }
 
-// Module-level guard: React StrictMode mounts twice in dev; hydrate once.
-let hydrateStarted = false;
-
 export interface StoreApi {
   state: TrackerState;
   activeAttack: Attack | null;
+  /**
+   * true for the partner viewer: state is fetched from the server snapshot,
+   * mutations are disabled, and no localStorage/sync bookkeeping is used.
+   */
+  readOnly: boolean;
   /** true once we've confirmed a backend is reachable */
   serverMode: boolean;
   /** sync health for compact UI surfaces (Layout pill, Settings) */
@@ -298,6 +300,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** Total server-path tasks ever enqueued; identifies "newest write". */
   const genRef = useRef(0);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * Hydrate once per provider lifetime. A ref (not module-level state) keeps
+   * React StrictMode's effect double-invocation from hydrating twice while
+   * still re-hydrating when the provider genuinely remounts — e.g. returning
+   * from the `/view` route tree to the writer routes.
+   */
+  const hydrateStartedRef = useRef(false);
 
   const applyState = useCallback((updater: (s: TrackerState) => TrackerState) => {
     const next = updater(stateRef.current);
@@ -423,8 +432,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   // Hydrate from the backend on first load.
   useEffect(() => {
-    if (hydrateStarted) return;
-    hydrateStarted = true;
+    if (hydrateStartedRef.current) return;
+    hydrateStartedRef.current = true;
     (async () => {
       let data: ExportShape;
       try {
@@ -739,6 +748,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return {
       state,
       activeAttack,
+      readOnly: false,
       serverMode,
       sync,
       startAttack: (start = new Date()) => {
@@ -1024,6 +1034,135 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       resolveUseServer,
     };
   }, [state, serverMode, sync, applyState, enqueue, resolveUseServer, setPendingLatch]);
+
+  return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
+}
+
+const READ_ONLY_ERROR = 'This partner view is read-only; changes are not allowed.';
+
+/** Defensive denial shared by every mutation on the viewer contract. */
+function denyReadOnly(): never {
+  throw new Error(READ_ONLY_ERROR);
+}
+
+/** Viewer refresh cadence; must stay inside the 15-30s product window. */
+const READ_ONLY_REFRESH_MS = 20000;
+
+/**
+ * Read-only partner viewer store.
+ *
+ * Deliberately shares the `useStore()` context contract with the writer app so
+ * the existing Calendar/Reports/History pages can be reused, but it has none of
+ * `StoreProvider`'s persistence or write machinery:
+ * - starts from a fresh in-memory empty state (never `loadState`);
+ * - reads only `GET /api/export` and maps it with the canonical snapshot
+ *   conversion;
+ * - never touches `migraine-tracker-v1`, the sync metadata, or the pending
+ *   low-stock latch;
+ * - never uploads on first contact, queues writes, or changes settings;
+ * - every mutation rejects defensively (the UI should never render one).
+ *
+ * Refresh is single-flight and keeps the last successful snapshot when a later
+ * request fails, so the partner sees stale data rather than an empty screen.
+ */
+export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<TrackerState>(() => emptyState());
+  const [serverMode, setServerMode] = useState(false);
+  const [status, setStatus] = useState<SyncStatus>('syncing');
+
+  const inFlightRef = useRef(false);
+  const mountedRef = useRef(false);
+
+  const refresh = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    try {
+      const data = await backend.exportAll();
+      if (!mountedRef.current) return;
+      setState((prev) => ({ ...emptyState(), ...serverSnapshotToState(data, prev.timezone) }));
+      setServerMode(true);
+      setStatus('synced');
+    } catch {
+      // Keep the previous snapshot (stale) and never latch writer dirty/failed.
+      if (mountedRef.current) setStatus('error');
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void refresh();
+
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, READ_ONLY_REFRESH_MS);
+    const onFocus = () => {
+      void refresh();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      mountedRef.current = false;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refresh]);
+
+  const activeAttack = useMemo(
+    () => state.attacks.find((a) => a.end === null) ?? null,
+    [state.attacks],
+  );
+
+  const sync = useMemo<StoreApi['sync']>(() => ({
+    status,
+    pending: 0,
+    dirty: false,
+    failed: false,
+    diverged: false,
+  }), [status]);
+
+  const api = useMemo<StoreApi>(() => ({
+    state,
+    activeAttack,
+    readOnly: true,
+    serverMode,
+    sync,
+    startAttack: denyReadOnly,
+    endAttack: denyReadOnly,
+    updateAttack: denyReadOnly,
+    deleteAttack: denyReadOnly,
+    logPain: denyReadOnly,
+    logMed: denyReadOnly,
+    updateMed: denyReadOnly,
+    deleteMed: denyReadOnly,
+    addRefill: denyReadOnly,
+    updateRefill: denyReadOnly,
+    deleteRefill: denyReadOnly,
+    addStockBaseline: denyReadOnly,
+    updateStockBaseline: denyReadOnly,
+    deleteStockBaseline: denyReadOnly,
+    addWorkout: denyReadOnly,
+    updateWorkout: denyReadOnly,
+    deleteWorkout: denyReadOnly,
+    setDayState: denyReadOnly,
+    setTimezone: denyReadOnly,
+    setLowStockThreshold: denyReadOnly,
+    updateReminders: denyReadOnly,
+    resetLowStockAlert: denyReadOnly,
+    importData: denyReadOnly,
+    setRule: denyReadOnly,
+    setDoseDefault: denyReadOnly,
+    setPlannedDose: denyReadOnly,
+    loadDemoData: denyReadOnly,
+    resetAll: denyReadOnly,
+    resolveUseServer: () => Promise.reject(new Error(READ_ONLY_ERROR)),
+  }), [state, activeAttack, serverMode, sync]);
 
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }

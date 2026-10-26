@@ -233,8 +233,8 @@ function readPendingLatch(): { latchedAt: string } | null {
 }
 
 /**
- * Simulate a reload: fresh module instances (the store keeps a module-level
- * hydration guard) and fresh backend mocks, while localStorage survives.
+ * Simulate a reload: fresh module instances and fresh backend mocks, while
+ * localStorage survives.
  */
 async function reloadStore(): Promise<void> {
   cleanup();
@@ -356,6 +356,31 @@ describe('StoreProvider sync state and persistence', () => {
 
     // Let the new instance's hydration settle so no work leaks into later tests.
     await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('re-hydrates after a genuine unmount/remount but still only once under StrictMode', async () => {
+    // The `/view` route tree swaps providers, so returning to the writer routes
+    // must hydrate against the server again. StrictMode's simulated remount
+    // must not cause a second hydration within one provider lifetime.
+    const { StoreProvider } = storeModule;
+    const mount = () => render(
+      <StrictMode>
+        <StoreProvider>
+          <Probe capture={captureStore} />
+        </StoreProvider>
+      </StrictMode>,
+    );
+
+    const first = mount();
+    await waitFor(() => expect(currentStore().serverMode).toBe(true));
+    expect(api.exportAll).toHaveBeenCalledTimes(1);
+
+    first.unmount();
+    captured = null;
+
+    mount();
+    await waitFor(() => expect(currentStore().serverMode).toBe(true));
+    expect(api.exportAll).toHaveBeenCalledTimes(2);
   });
 
   it('reports dirty + pending until the deferred server write is confirmed', async () => {

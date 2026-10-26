@@ -129,7 +129,7 @@ function MedLimitBar({ medId }: { medId: string }) {
   );
 }
 
-function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule: (medId: string) => void }) {
+function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (medId: string) => void }) {
   const { state } = useStore();
   const now = useNow();
   const def = MED_MAP[medId];
@@ -175,14 +175,16 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule: (med
           <span className="text-sm font-bold tabular-nums" style={{ color: due ? STATUS.danger : '#94a3b8' }}>
             {days === null && !plannedDate ? 'never logged' : `${days ?? '?'}d ago`}
           </span>
-          <button
-            onClick={() => onSchedule(medId)}
-            className="rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-            title="Schedule next dose / appointment"
-            aria-label={`Schedule next ${medName(medId)}`}
-          >
-            <CalendarPlus className="h-4 w-4" />
-          </button>
+          {onSchedule && (
+            <button
+              onClick={() => onSchedule(medId)}
+              className="rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+              title="Schedule next dose / appointment"
+              aria-label={`Schedule next ${medName(medId)}`}
+            >
+              <CalendarPlus className="h-4 w-4" />
+            </button>
+          )}
         </span>
       </div>
       {nextDate !== null && (
@@ -230,7 +232,7 @@ function assignLanes(segments: Omit<BarSegment, 'lane'>[]): BarSegment[] {
 
 export default function CalendarPage() {
   const store = useStore();
-  const { state } = store;
+  const { state, readOnly } = store;
   const now = useNow();
   // Month cursor is a configured-zone local month, not a browser-local Date.
   const [cursor, setCursor] = useState<DayKey>(() => monthStartKey(localDayKey(now, state.timezone)));
@@ -407,7 +409,7 @@ export default function CalendarPage() {
             <PreventiveCard
               key={m.id}
               medId={m.id}
-              onSchedule={(id) => {
+              onSchedule={readOnly ? undefined : (id) => {
                 setScheduleMed(id);
                 setScheduleDate(state.planned[id] ?? '');
               }}
@@ -632,12 +634,8 @@ export default function CalendarPage() {
                 {selData.attacks.map((a) => {
                   const dur = (a.end ? new Date(a.end).getTime() : now) - new Date(a.start).getTime();
                   const c = painColor(a.peakPain);
-                  return (
-                    <button
-                      key={a.id}
-                      onClick={() => setEditAttack(a)}
-                      className="w-full rounded-xl border border-slate-800 bg-slate-900 p-3 text-left shadow-sm"
-                    >
+                  const body = (
+                    <>
                       <div className="flex items-center gap-2">
                         <span
                           className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-black"
@@ -664,6 +662,20 @@ export default function CalendarPage() {
                           {a.notes}
                         </p>
                       )}
+                    </>
+                  );
+                  const cardClass = 'w-full rounded-xl border border-slate-800 bg-slate-900 p-3 text-left shadow-sm';
+                  // The viewer must not expose a focusable edit control: render
+                  // the same attack summary as a plain element.
+                  return readOnly ? (
+                    <div key={a.id} className={cardClass}>{body}</div>
+                  ) : (
+                    <button
+                      key={a.id}
+                      onClick={() => setEditAttack(a)}
+                      className={cardClass}
+                    >
+                      {body}
                     </button>
                   );
                 })}
@@ -730,53 +742,57 @@ export default function CalendarPage() {
         </SheetContent>
       </Sheet>
 
-      <AttackFormDialog
-        attack={editAttack}
-        open={!!editAttack}
-        onClose={() => setEditAttack(null)}
-      />
+      {!readOnly && (
+        <>
+          <AttackFormDialog
+            attack={editAttack}
+            open={!!editAttack}
+            onClose={() => setEditAttack(null)}
+          />
 
-      {/* schedule next preventive dose / appointment */}
-      <Dialog open={!!scheduleMed} onOpenChange={(o) => !o && setScheduleMed(null)}>
-        <DialogContent className="sm:max-w-xs">
-          <DialogHeader>
-            <DialogTitle>
-              Schedule next {scheduleMed ? medName(scheduleMed) : ''}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-1.5 py-2">
-            <Label>Date</Label>
-            <Input
-              type="date"
-              value={scheduleDate}
-              onChange={(e) => setScheduleDate(e.target.value)}
-            />
-            {state.planned[scheduleMed ?? ''] && (
-              <button
-                type="button"
-                className="text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200"
-                onClick={() => {
-                  if (scheduleMed) store.setPlannedDose(scheduleMed, null);
-                  setScheduleMed(null);
-                }}
-              >
-                Clear scheduled date (back to auto)
-              </button>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setScheduleMed(null)}>Cancel</Button>
-            <Button
-              onClick={() => {
-                if (scheduleMed && scheduleDate) store.setPlannedDose(scheduleMed, scheduleDate);
-                setScheduleMed(null);
-              }}
-            >
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {/* schedule next preventive dose / appointment */}
+          <Dialog open={!!scheduleMed} onOpenChange={(o) => !o && setScheduleMed(null)}>
+            <DialogContent className="sm:max-w-xs">
+              <DialogHeader>
+                <DialogTitle>
+                  Schedule next {scheduleMed ? medName(scheduleMed) : ''}
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-1.5 py-2">
+                <Label>Date</Label>
+                <Input
+                  type="date"
+                  value={scheduleDate}
+                  onChange={(e) => setScheduleDate(e.target.value)}
+                />
+                {state.planned[scheduleMed ?? ''] && (
+                  <button
+                    type="button"
+                    className="text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200"
+                    onClick={() => {
+                      if (scheduleMed) store.setPlannedDose(scheduleMed, null);
+                      setScheduleMed(null);
+                    }}
+                  >
+                    Clear scheduled date (back to auto)
+                  </button>
+                )}
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setScheduleMed(null)}>Cancel</Button>
+                <Button
+                  onClick={() => {
+                    if (scheduleMed && scheduleDate) store.setPlannedDose(scheduleMed, scheduleDate);
+                    setScheduleMed(null);
+                  }}
+                >
+                  Save
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
     </div>
   );
 }

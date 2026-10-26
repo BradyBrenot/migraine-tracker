@@ -33,7 +33,7 @@ const NURTEC_PACK_SIZE = '8';
 
 export default function History() {
   const store = useStore();
-  const { state } = store;
+  const { state, readOnly } = store;
   const now = useNow();
   const [editAttack, setEditAttack] = useState<Attack | null>(null);
   const [newAttackOpen, setNewAttackOpen] = useState(false);
@@ -168,9 +168,11 @@ export default function History() {
         </TabsList>
 
         <TabsContent value="attacks" className="mt-4 space-y-2">
-          <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewAttackOpen(true)}>
-            <Plus className="h-4 w-4" /> Add past attack
-          </Button>
+          {!readOnly && (
+            <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewAttackOpen(true)}>
+              <Plus className="h-4 w-4" /> Add past attack
+            </Button>
+          )}
           {attacks.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No attacks logged yet.</p>
           )}
@@ -213,20 +215,24 @@ export default function History() {
                       </div>
                     )}
                   </div>
-                  <button
-                    onClick={() => setEditAttack(a)}
-                    className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
-                    aria-label="Edit"
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => setDeleteId(a.id)}
-                    className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                    aria-label="Delete"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {!readOnly && (
+                    <>
+                      <button
+                        onClick={() => setEditAttack(a)}
+                        className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                        aria-label="Edit"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => setDeleteId(a.id)}
+                        className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
+                        aria-label="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
                 </div>
                 {a.notes && (
                   <p className="mt-2 border-l-2 border-slate-700 pl-2 text-xs italic text-slate-400">
@@ -239,9 +245,11 @@ export default function History() {
         </TabsContent>
 
         <TabsContent value="meds" className="mt-4 space-y-1.5">
-          <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewMedOpen(true)}>
-            <Plus className="h-4 w-4" /> Add past medication
-          </Button>
+          {!readOnly && (
+            <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewMedOpen(true)}>
+              <Plus className="h-4 w-4" /> Add past medication
+            </Button>
+          )}
           {meds.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No medications logged yet.</p>
           )}
@@ -256,32 +264,38 @@ export default function History() {
                   {m.attackId && ' · linked to attack'}
                 </div>
               </div>
-              <button
-                onClick={() => setEditMed(m)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
-                aria-label="Edit"
-              >
-                <Pencil className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => setDeleteMedId(m.id)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                aria-label="Delete"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
+              {!readOnly && (
+                <>
+                  <button
+                    onClick={() => setEditMed(m)}
+                    className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                    aria-label="Edit"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setDeleteMedId(m.id)}
+                    className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
+                    aria-label="Delete"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </TabsContent>
 
         <TabsContent value="refills" className="mt-4 space-y-1.5">
-          <Button
-            variant="outline"
-            className="mb-2 w-full gap-2"
-            onClick={openNewRefill}
-          >
-            <Plus className="h-4 w-4" /> Add Rx pickup
-          </Button>
+          {!readOnly && (
+            <Button
+              variant="outline"
+              className="mb-2 w-full gap-2"
+              onClick={openNewRefill}
+            >
+              <Plus className="h-4 w-4" /> Add Rx pickup
+            </Button>
+          )}
           <p className="text-xs text-slate-500">
             Gepant refill pickups — refill cadence is a good historical signal for
             how bad things were, even in weeks you didn't track.
@@ -313,29 +327,35 @@ export default function History() {
                     )}
                   </div>
                 </div>
-                <button
-                  onClick={() => openEditRefill(r)}
-                  className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
-                  aria-label="Edit"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => setDeleteRefillId(r.id)}
-                  className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                  aria-label="Delete"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {!readOnly && (
+                  <>
+                    <button
+                      onClick={() => openEditRefill(r)}
+                      className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                      aria-label="Edit"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => setDeleteRefillId(r.id)}
+                      className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
+                      aria-label="Delete"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
               </div>
             );
           })}
         </TabsContent>
 
         <TabsContent value="workouts" className="mt-4 space-y-1.5">
-          <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewWorkoutOpen(true)}>
-            <Plus className="h-4 w-4" /> Add past workout
-          </Button>
+          {!readOnly && (
+            <Button variant="outline" className="mb-2 w-full gap-2" onClick={() => setNewWorkoutOpen(true)}>
+              <Plus className="h-4 w-4" /> Add past workout
+            </Button>
+          )}
           {workouts.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No workouts logged yet.</p>
           )}
@@ -355,193 +375,201 @@ export default function History() {
                   </p>
                 )}
               </div>
-              <button
-                onClick={() => setEditWorkout(w)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
-                aria-label="Edit"
-              >
-                <Pencil className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => setDeleteWorkoutId(w.id)}
-                className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                aria-label="Delete"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
+              {!readOnly && (
+                <>
+                  <button
+                    onClick={() => setEditWorkout(w)}
+                    className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-700"
+                    aria-label="Edit"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setDeleteWorkoutId(w.id)}
+                    className="rounded-lg p-2 text-slate-400 hover:bg-rose-950 hover:text-rose-400"
+                    aria-label="Delete"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </TabsContent>
       </Tabs>
 
-      {/* edit attack */}
-      <AttackFormDialog
-        attack={editAttack}
-        open={!!editAttack}
-        onClose={() => setEditAttack(null)}
-      />
+      {!readOnly && (
+        <>
+          {/* edit attack */}
+          <AttackFormDialog
+            attack={editAttack}
+            open={!!editAttack}
+            onClose={() => setEditAttack(null)}
+          />
 
-      {/* add past attack */}
-      <AttackFormDialog
-        attack={null}
-        open={newAttackOpen}
-        onClose={() => setNewAttackOpen(false)}
-      />
+          {/* add past attack */}
+          <AttackFormDialog
+            attack={null}
+            open={newAttackOpen}
+            onClose={() => setNewAttackOpen(false)}
+          />
 
-      {/* add / edit med */}
-      <MedFormDialog
-        med={editMed}
-        open={!!editMed || newMedOpen}
-        onClose={() => { setEditMed(null); setNewMedOpen(false); }}
-      />
+          {/* add / edit med */}
+          <MedFormDialog
+            med={editMed}
+            open={!!editMed || newMedOpen}
+            onClose={() => { setEditMed(null); setNewMedOpen(false); }}
+          />
 
-      {/* add / edit workout */}
-      <WorkoutFormDialog
-        workout={editWorkout}
-        open={!!editWorkout || newWorkoutOpen}
-        onClose={() => { setEditWorkout(null); setNewWorkoutOpen(false); }}
-      />
+          {/* add / edit workout */}
+          <WorkoutFormDialog
+            workout={editWorkout}
+            open={!!editWorkout || newWorkoutOpen}
+            onClose={() => { setEditWorkout(null); setNewWorkoutOpen(false); }}
+          />
 
-      {/* add / edit refill pickup */}
-      <Dialog open={refillOpen} onOpenChange={(o) => !o && closeRefill()}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>{refillEditId ? 'Edit Rx pickup' : 'Add Rx pickup'}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1.5">
-              <Label>Medication</Label>
-              {refillEditId ? (
-                <div className="text-sm font-semibold text-slate-200">{medName(refillMed)}</div>
-              ) : (
-                <div className="grid grid-cols-3 gap-1.5">
-                  {allMedIds([...state.meds, ...state.refills]).map((id) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => selectRefillMed(id)}
-                      className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
-                        refillMed === id
-                          ? 'border-transparent text-slate-950'
-                          : 'border-slate-700 text-slate-300 hover:border-slate-500'
-                      }`}
-                      style={refillMed === id ? { background: medColor(id) } : undefined}
-                    >
-                      {medName(id)}
-                    </button>
-                  ))}
+          {/* add / edit refill pickup */}
+          <Dialog open={refillOpen} onOpenChange={(o) => !o && closeRefill()}>
+            <DialogContent className="sm:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>{refillEditId ? 'Edit Rx pickup' : 'Add Rx pickup'}</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="space-y-1.5">
+                  <Label>Medication</Label>
+                  {refillEditId ? (
+                    <div className="text-sm font-semibold text-slate-200">{medName(refillMed)}</div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {allMedIds([...state.meds, ...state.refills]).map((id) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => selectRefillMed(id)}
+                          className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
+                            refillMed === id
+                              ? 'border-transparent text-slate-950'
+                              : 'border-slate-700 text-slate-300 hover:border-slate-500'
+                          }`}
+                          style={refillMed === id ? { background: medColor(id) } : undefined}
+                        >
+                          {medName(id)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label>Pickup date</Label>
-              <Input type="date" value={refillDate} onChange={(e) => setRefillDate(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>
-                Tablets <span className="font-normal text-slate-500">(blank = unknown)</span>
-              </Label>
-              <Input
-                type="number"
-                min={0}
-                step={1}
-                inputMode="numeric"
-                aria-label="Tablets"
-                aria-invalid={!refillQuantityParsed.valid}
-                placeholder="—"
-                value={refillQuantity}
-                onChange={(e) => setRefillQuantity(e.target.value)}
-              />
-              {!refillQuantityParsed.valid && (
-                <p role="alert" className="text-xs text-rose-300">
-                  Tablets must be a whole number (0 or more), or leave blank.
-                </p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label>Notes <span className="font-normal text-slate-500">(pharmacy…)</span></Label>
-              <Input value={refillNotes} onChange={(e) => setRefillNotes(e.target.value)} placeholder="e.g. CVS" />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeRefill}>Cancel</Button>
-            <Button onClick={saveRefill} disabled={!canSaveRefill}>
-              {refillEditId ? 'Save' : 'Add'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+                <div className="space-y-1.5">
+                  <Label>Pickup date</Label>
+                  <Input type="date" value={refillDate} onChange={(e) => setRefillDate(e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>
+                    Tablets <span className="font-normal text-slate-500">(blank = unknown)</span>
+                  </Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1}
+                    inputMode="numeric"
+                    aria-label="Tablets"
+                    aria-invalid={!refillQuantityParsed.valid}
+                    placeholder="—"
+                    value={refillQuantity}
+                    onChange={(e) => setRefillQuantity(e.target.value)}
+                  />
+                  {!refillQuantityParsed.valid && (
+                    <p role="alert" className="text-xs text-rose-300">
+                      Tablets must be a whole number (0 or more), or leave blank.
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Notes <span className="font-normal text-slate-500">(pharmacy…)</span></Label>
+                  <Input value={refillNotes} onChange={(e) => setRefillNotes(e.target.value)} placeholder="e.g. CVS" />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={closeRefill}>Cancel</Button>
+                <Button onClick={saveRefill} disabled={!canSaveRefill}>
+                  {refillEditId ? 'Save' : 'Add'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
-      {/* delete refill confirm */}
-      <AlertDialog open={!!deleteRefillId} onOpenChange={(o) => !o && setDeleteRefillId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this pickup?</AlertDialogTitle>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => { if (deleteRefillId) store.deleteRefill(deleteRefillId); setDeleteRefillId(null); }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          {/* delete refill confirm */}
+          <AlertDialog open={!!deleteRefillId} onOpenChange={(o) => !o && setDeleteRefillId(null)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this pickup?</AlertDialogTitle>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => { if (deleteRefillId) store.deleteRefill(deleteRefillId); setDeleteRefillId(null); }}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
-      {/* delete attack confirm */}
-      <AlertDialog open={!!deleteId} onOpenChange={(o) => !o && setDeleteId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this attack?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Linked medications will be kept but unlinked.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => { if (deleteId) store.deleteAttack(deleteId); setDeleteId(null); }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          {/* delete attack confirm */}
+          <AlertDialog open={!!deleteId} onOpenChange={(o) => !o && setDeleteId(null)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this attack?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Linked medications will be kept but unlinked.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => { if (deleteId) store.deleteAttack(deleteId); setDeleteId(null); }}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
-      {/* delete med confirm */}
-      <AlertDialog open={!!deleteMedId} onOpenChange={(o) => !o && setDeleteMedId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this medication entry?</AlertDialogTitle>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => { if (deleteMedId) store.deleteMed(deleteMedId); setDeleteMedId(null); }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          {/* delete med confirm */}
+          <AlertDialog open={!!deleteMedId} onOpenChange={(o) => !o && setDeleteMedId(null)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this medication entry?</AlertDialogTitle>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => { if (deleteMedId) store.deleteMed(deleteMedId); setDeleteMedId(null); }}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
-      {/* delete workout confirm */}
-      <AlertDialog open={!!deleteWorkoutId} onOpenChange={(o) => !o && setDeleteWorkoutId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this workout?</AlertDialogTitle>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => { if (deleteWorkoutId) store.deleteWorkout(deleteWorkoutId); setDeleteWorkoutId(null); }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          {/* delete workout confirm */}
+          <AlertDialog open={!!deleteWorkoutId} onOpenChange={(o) => !o && setDeleteWorkoutId(null)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this workout?</AlertDialogTitle>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => { if (deleteWorkoutId) store.deleteWorkout(deleteWorkoutId); setDeleteWorkoutId(null); }}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </>
+      )}
     </div>
   );
 }

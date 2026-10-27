@@ -1,4 +1,5 @@
 import type { MedRule } from '@/types';
+import { PREVENTIVE_INTERVALS } from '../../shared/reminders.ts';
 
 export interface MedDef {
   id: string;
@@ -57,7 +58,9 @@ export const MED_CATALOG: MedDef[] = [
     kindLabel: 'CGRP mAb · monthly',
     color: '#009E73', // bluish green
     defaultRule: null,
-    intervalDays: 30,
+    // Same calendar-day interval the reminder scheduler derives its
+    // Emgality/Botox due dates from (shared/reminders.ts).
+    intervalDays: PREVENTIVE_INTERVALS.emgality,
   },
   {
     id: 'botox',
@@ -67,7 +70,8 @@ export const MED_CATALOG: MedDef[] = [
     kindLabel: 'Injection · quarterly',
     color: '#F0E442', // yellow
     defaultRule: null,
-    intervalDays: 84,
+    // See emgality above: shared with the reminder scheduler.
+    intervalDays: PREVENTIVE_INTERVALS.botox,
   },
 ];
 

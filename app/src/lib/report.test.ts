@@ -26,13 +26,13 @@ function makeAttack(partial: Partial<Attack> & { start: string }): Attack {
 
 let medSeq = 0;
 
-function makeMed(ts: string, medId = 'nurtec'): MedEvent {
+function makeMed(ts: string, medId = 'nurtec', attackId: string | null = null): MedEvent {
   medSeq++;
   return {
     id: `m-${medSeq}`,
     medId,
     ts,
-    attackId: null,
+    attackId,
     notes: '',
     source: 'manual',
   };
@@ -355,5 +355,39 @@ describe('buildReportLines: robustness and span', () => {
     expect(monthHeadings(build({ attacks, span: '3' }))).toEqual([
       'April 2026', 'May 2026', 'June 2026', 'Overall',
     ]);
+  });
+});
+
+describe('buildReportLines: attack-linked medications', () => {
+  it('lists only each attack\'s linked meds, in input order, for interleaved records', () => {
+    const a1 = makeAttack({
+      start: iso('2026-06-02', '08:00:00.000'),
+      end: iso('2026-06-02', '09:00:00.000'),
+    });
+    const a2 = makeAttack({
+      start: iso('2026-06-05', '08:00:00.000'),
+      end: iso('2026-06-05', '09:00:00.000'),
+    });
+    // a2's first medication appears BEFORE a1's in the input array; the report
+    // must still attribute each medication to its own attack and keep the
+    // input order within every line.
+    const meds = [
+      makeMed(iso('2026-06-05', '08:30:00.000'), 'nurtec', a2.id),
+      makeMed(iso('2026-06-02', '08:30:00.000'), 'tylenol', a1.id),
+      makeMed(iso('2026-06-05', '09:30:00.000'), 'ibuprofen', a2.id),
+      makeMed(iso('2026-06-02', '10:00:00.000'), 'nurtec', a1.id),
+      // Unlinked medication: never shown on an attack line.
+      makeMed(iso('2026-06-04', '10:00:00.000'), 'naproxen'),
+    ];
+
+    const june = section(build({ attacks: [a1, a2], meds, nowMs: Date.UTC(2026, 5, 15) }), 'June 2026');
+    const attackLines = june.filter((line) => line.startsWith('- ') && line.includes('peak'));
+    expect(attackLines).toHaveLength(2);
+
+    expect(attackLines[0]).toContain('— meds: Tylenol, Nurtec');
+    expect(attackLines[0]).not.toContain('Ibuprofen');
+    expect(attackLines[1]).toContain('— meds: Nurtec, Ibuprofen');
+    expect(attackLines[1]).not.toContain('Tylenol');
+    expect(june.join('\n')).not.toContain('Naproxen,');
   });
 });

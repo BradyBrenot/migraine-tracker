@@ -18,7 +18,7 @@ import {
 } from './validate.js';
 import { exportEnvelope, collectSettings } from './snapshot.js';
 import { parseBackup } from '../shared/backup.ts';
-import { currentStock, classifyStock } from '../shared/inventory.ts';
+import { currentStock, classifyStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../shared/inventory.ts';
 import { isValidTimeZone } from '../shared/datetime.ts';
 import { normalizeReminderSettings, reminderSettingsErrors } from '../shared/reminders.ts';
 
@@ -31,10 +31,73 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 // fields are absent.
 const bodyObject = (req) => (isPlainObject(req.body) ? req.body : {});
 
+// ── cross-origin guard for mutating requests ─────────────────────────
+// The API has no authentication; the deployment boundary is a private
+// network. This narrow guard stops a browser on that network from having a
+// hostile page POST/PATCH/DELETE (reset, import, edits) through it. Requests
+// without an Origin/Referer (curl, scripts, partner clients) keep working.
+//
+// Deliberate conservative choice: ONLY the host:port is compared. The scheme
+// is not enforced because TLS may terminate at a reverse proxy, and
+// X-Forwarded-* headers are untrusted client input, so they are never read.
+// A proxy that preserves the original Host header (the normal case) works.
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const CROSS_ORIGIN_ERROR = { error: 'cross-origin request denied' };
+
+/** Lower-case a host[:port] and drop default ports (80/443) for comparison. */
+function normalizeHostPort(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return null;
+  let parsed;
+  try {
+    // The scheme is irrelevant here; it only lets URL normalise brackets,
+    // casing, and the default :80 port. :443 is stripped separately below.
+    parsed = new URL(`http://${trimmed}`);
+  } catch {
+    return null;
+  }
+  // Reject userinfo, paths, and query/fragment: those are not host headers.
+  if (parsed.username || parsed.password || parsed.pathname !== '/'
+    || parsed.search || parsed.hash) return null;
+  const host = parsed.host;
+  return host.endsWith(':443') ? host.slice(0, -4) : host;
+}
+
+/** Host of an Origin/Referer URL, or null when it is malformed/opaque. */
+function sourceHost(value) {
+  if (typeof value !== 'string') return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null; // includes Origin: null
+  return normalizeHostPort(url.host);
+}
+
 export async function buildApp({
   db, distDir, logger = false, onAttackChange, notificationStatus,
 } = {}) {
   const app = Fastify({ logger });
+
+  // Runs before body parsing and every route handler, so a denied destructive
+  // request never reaches the database. GET/HEAD/OPTIONS (reads and CORS
+  // preflight) are untouched, as are requests with neither Origin nor Referer.
+  app.addHook('onRequest', async (req, reply) => {
+    if (SAFE_METHODS.has(req.method)) return;
+    const source = req.headers.origin !== undefined
+      ? req.headers.origin
+      : req.headers.referer;
+    if (source === undefined) return; // non-browser client
+
+    const requestHost = normalizeHostPort(req.headers.host);
+    const origin = sourceHost(source);
+    if (origin === null || requestHost === null || origin !== requestHost) {
+      reply.code(403).send(CROSS_ORIGIN_ERROR);
+    }
+  });
 
   // ── attacks ────────────────────────────────────────────────────────
   // onAttackChange is an optional synchronous notification hook (startup
@@ -270,7 +333,7 @@ export async function buildApp({
   // pure calculation the browser uses (server is authoritative; the client
   // only mirrors it optimistically). The checkpoint 6 reminder scheduler
   // can call this domain calculation without any browser state.
-  const DEFAULT_LOW_STOCK_THRESHOLD = 2;
+  // The low-stock default itself is shared (shared/inventory.ts).
 
   function inventoryTimeZone() {
     const tz = collectSettings(db).timezone;

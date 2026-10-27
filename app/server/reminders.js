@@ -11,6 +11,7 @@
 // write time, never gated). Occurrence keys are dedup tokens, not data.
 
 import { dayKeyStartMs, isValidTimeZone, localDayKey } from '../shared/datetime.ts';
+import { DEFAULT_LOW_STOCK_THRESHOLD } from '../shared/inventory.ts';
 import { baselineFromRow } from './mappers.js';
 import { collectSettings } from './snapshot.js';
 import {
@@ -24,7 +25,6 @@ const PREVENTIVE_MEDS = [
   { id: 'emgality', name: 'Emgality' },
   { id: 'botox', name: 'Botox' },
 ];
-const DEFAULT_LOW_STOCK_THRESHOLD = 2;
 /** Bounded exponential backoff after a failed fetch or non-2xx response. */
 const BACKOFF_MINUTES = [1, 5, 15, 60, 240];
 const MAX_PER_TICK = 20;

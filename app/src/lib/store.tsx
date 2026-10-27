@@ -11,7 +11,7 @@ import { api as backend } from '@/lib/api';
 import { bumpClock } from '@/lib/clock';
 import { isValidTimeZone, systemTimeZone } from '../../shared/datetime.ts';
 import { decideHydration, deriveSyncStatus, shouldCleanOnDrain, type SyncStatus } from '../../shared/sync.ts';
-import { currentStock } from '../../shared/inventory.ts';
+import { currentStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../../shared/inventory.ts';
 import {
   DEFAULT_REMINDER_SETTINGS, normalizeReminderSettings, reminderSettingsErrors,
 } from '../../shared/reminders.ts';
@@ -101,8 +101,13 @@ const DEFAULT_DOSES: Record<string, string> = {
   naproxen: '220 mg',
 };
 
-/** Default Nurtec low-stock alert level (plan: 2 tablets). */
-export const DEFAULT_LOW_STOCK_THRESHOLD = 2;
+/**
+ * Default Nurtec low-stock alert level (plan: 2 tablets). The value lives in
+ * shared/inventory.ts so the server's authoritative inventory route and the
+ * reminder scheduler use the identical default; it is re-exported here to keep
+ * the store's existing public shape (Settings/tests import it from here).
+ */
+export { DEFAULT_LOW_STOCK_THRESHOLD };
 
 function isValidThreshold(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0;
@@ -160,6 +165,20 @@ function recomputePeak(a: Attack): number {
   const levels = a.painLog.map((p) => p.level);
   if (a.peakPain >= 0) levels.push(a.peakPain);
   return levels.length ? Math.max(...levels) : -1;
+}
+
+/**
+ * Runtime id guard for patch payloads.
+ *
+ * The store's public patch signatures already omit `id`, but JavaScript (or
+ * `any`) callers can still pass one. A body id must never reassign a record:
+ * the route/record id always wins, locally and on the wire. Returns a shallow
+ * copy, so the caller's object is never mutated.
+ */
+function withoutId<T extends { id: string }>(patch: Partial<T>): Partial<Omit<T, 'id'>> {
+  const copy: Partial<T> = { ...patch };
+  delete copy.id;
+  return copy;
 }
 
 type ExportShape = Awaited<ReturnType<typeof backend.exportAll>>;
@@ -536,12 +555,12 @@ export interface StoreApi {
   // attacks
   startAttack: (start?: Date) => Attack;
   endAttack: (id: string, end?: Date) => void;
-  updateAttack: (id: string, patch: Partial<Attack>) => void;
+  updateAttack: (id: string, patch: Partial<Omit<Attack, 'id'>>) => void;
   deleteAttack: (id: string) => void;
   logPain: (attackId: string, level: number, when?: Date) => void;
   // meds
   logMed: (medId: string, when?: Date, attackId?: string | null, dose?: string, notes?: string, quantity?: number | null) => MedEvent;
-  updateMed: (id: string, patch: Partial<MedEvent>) => void;
+  updateMed: (id: string, patch: Partial<Omit<MedEvent, 'id'>>) => void;
   deleteMed: (id: string) => void;
   // refills (pharmacy pickups)
   addRefill: (medId: string, date: string, notes?: string, quantity?: number | null) => Refill;
@@ -579,7 +598,21 @@ export interface StoreApi {
   setDoseDefault: (medId: string, dose: string) => void;
   setPlannedDose: (medId: string, date: string | null) => void;
   loadDemoData: () => void;
-  resetAll: () => void;
+  /**
+   * Destructive local + server erase.
+   *
+   * The local erase is synchronous and optimistic (state, low-stock
+   * bookkeeping and the divergence pause are cleared before the server task is
+   * queued). The returned promise resolves only once the serialized task has
+   * fully completed — `/api/reset` confirmed AND the follow-up timezone
+   * re-publication confirmed inside the same task — and after that task's
+   * queue bookkeeping (pending counter, dirty/failed latches) has run, so an
+   * awaiter that reads `sync` sees the final state. It rejects when that task
+   * fails (reset or timezone publish) or under the normal offline/diverged
+   * queue rejection; the dirty/failed latches keep their existing behaviour
+   * either way. Report success to the user only after it resolves.
+   */
+  resetAll: () => Promise<void>;
   /**
    * Conflict resolution (explicit + destructive): discard this browser's
    * unsynced state and adopt the current server snapshot. Export a local
@@ -695,7 +728,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       label: string,
       run: () => Promise<unknown>,
       opts: { force?: boolean; resolvesOfflineDrain?: boolean; resolvesServerReset?: boolean } = {},
-    ) => {
+    ): Promise<void> => {
       if (!serverRef.current || (divergedRef.current && !opts.force)) {
         // Offline/local or diverged: the change is unconfirmed AND failed —
         // no automatic path will confirm it; a full exchange is required.
@@ -710,12 +743,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const myGen = ++genRef.current;
       markDirty(); // unconfirmed until the server acknowledges
       let succeeded = false;
+      let failure: unknown;
       const task = queueRef.current.then(run);
-      task.then(
+      // `settled` carries the latches and bookkeeping and never rejects, so it
+      // is safe to use as the queue tail; the returned outcome re-raises the
+      // task failure only for callers that await this task.
+      const settled = task.then(
         () => {
           succeeded = true;
         },
         (e: unknown) => {
+          failure = e;
           const wasFailed = metaRef.current.failed;
           setSyncMeta({ dirty: true, failed: true });
           console.error(`[sync] ${label} failed:`, e);
@@ -750,8 +788,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setSyncMeta({ ...CLEAN_META });
         }
       });
-      queueRef.current = task.catch(() => undefined);
-      return task;
+      queueRef.current = settled.catch(() => undefined);
+      // Resolves AFTER `settled` (bookkeeping included); rejects with the
+      // original task failure. Fire-and-forget callers must not surface an
+      // unhandled rejection, so the internal handler below claims the
+      // rejection while awaiters still observe it.
+      const outcome = settled.then(() => {
+        if (!succeeded) throw failure;
+      });
+      outcome.catch(() => undefined);
+      return outcome;
     },
     [markDirty, setSyncMeta],
   );
@@ -1100,11 +1146,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // setState updater), so ordered save() sequences send correct data.
         const current = stateRef.current.attacks.find((x) => x.id === id);
         if (!current) return;
-        const merged: Attack = { ...current, ...patch };
-        if (typeof patch.peakPain === 'number') {
+        // The route/record id always wins over any runtime `id` in the patch.
+        const safePatch = withoutId<Attack>(patch);
+        const merged: Attack = { ...current, ...safePatch, id };
+        if (typeof safePatch.peakPain === 'number') {
           // An explicit peak (including a downward correction) wins verbatim;
           // never re-derive it from old pain-log history.
-          merged.peakPain = patch.peakPain;
+          merged.peakPain = safePatch.peakPain;
         } else if (current.peakPain >= 0) {
           // Metadata edits must not rescan history and resurrect a peak the
           // user deliberately lowered.
@@ -1155,11 +1203,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return m;
       },
       updateMed: (id, patch) => {
+        // Early return for an unknown id: no local change AND no queued PATCH
+        // (which would 404 on the server and latch `failed`).
+        const current = stateRef.current.meds.find((m) => m.id === id);
+        if (!current) return;
+        // Runtime id guard: the route/record id always wins over a body id.
+        const safePatch = withoutId<MedEvent>(patch);
         applyState((s) => ({
           ...s,
-          meds: s.meds.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+          meds: s.meds.map((m) => (m.id === id ? { ...m, ...safePatch, id } : m)),
         }));
-        enqueue('patchMed', () => backend.patchMed(id, patch));
+        // The server merges a partial patch into the existing row.
+        enqueue('patchMed', () => backend.patchMed(id, safePatch));
       },
       deleteMed: (id) => {
         applyState((s) => ({ ...s, meds: s.meds.filter((m) => m.id !== id) }));
@@ -1368,7 +1423,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // cannot silently return on a later hydration.
         divergedRef.current = false;
         setDiverged(false);
-        enqueue('reset', () => backend.resetAll(), { force: true, resolvesServerReset: true });
+        // The returned promise reports the SERVER outcome: it resolves once
+        // this task (reset + timezone publish) and its latch bookkeeping have
+        // completed, and rejects if either server call did (or on the
+        // offline/diverged early rejection above). The local erase stays
+        // synchronous/optimistic.
+        return enqueue('reset', async () => {
+          await backend.resetAll();
+          // /api/reset deletes every setting, so the server would fall back to
+          // UTC for inventory/reminders while this browser uses its local zone.
+          // Re-publish ONLY the non-secret timezone (a reset is a fresh start:
+          // rules/doses/planned/threshold/reminders keep server defaults). The
+          // write stays inside this serialized task, so it cannot race a later
+          // setTimezone and its completion still belongs to the reset exchange.
+          // A failed publish fails the whole reset task on purpose: silently
+          // reporting "synced" while the server keeps a UTC zone would leave
+          // the bug in place. The normal rejection latch (dirty+failed) then
+          // holds until a later confirmed full exchange, exactly like any
+          // other unconfirmed write.
+          const tz = stateRef.current.timezone;
+          if (isValidTimeZone(tz)) await backend.putSetting('timezone', tz);
+        }, { force: true, resolvesServerReset: true });
       },
       mergeBackup: (backup) => {
         // Compute the additive diff synchronously from the freshest state so
@@ -1436,7 +1511,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }));
 
         // Only the new records go to the existing additive endpoint; its
-        // queue/latch/offline/divergence semantics are unchanged.
+        // queue/latch/offline/divergence semantics are unchanged. `enqueue`
+        // already resolves only when the task and its bookkeeping are done.
         const synced = enqueue('import(merge)', () => backend.importAll({
           attacks: newAttacks,
           meds: newMeds,
@@ -1444,7 +1520,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           workouts: newWorkouts,
           dayStates: newDayStates,
           stockBaselines: newBaselines,
-        })).then(() => undefined);
+        }));
         return { added, synced };
       },
       replaceBackup: (backup) => {

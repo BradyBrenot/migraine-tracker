@@ -175,6 +175,19 @@ export function buildReportLines(input: ReportInput): string[] {
     times: parseAttackTimes(attack, nowMs),
   }));
 
+  // Linked medications indexed by attack id ONCE (the per-attack list below
+  // would otherwise rescan every medication for every attack). Each bucket
+  // keeps the input medication order, so the rendered line is unchanged.
+  // A non-string attackId (legacy garbage) can never equal an attack id.
+  const medsByAttack = new Map<string, MedEvent[]>();
+  for (const med of meds) {
+    const attackId = med.attackId;
+    if (typeof attackId !== 'string') continue;
+    const bucket = medsByAttack.get(attackId);
+    if (bucket) bucket.push(med);
+    else medsByAttack.set(attackId, [med]);
+  }
+
   // Earliest usable record month anchors the month list. Unparseable strings
   // and instants outside the day-key domain are ignored (Math.min over NaN
   // would poison the whole list, as would a year-275760 timestamp).
@@ -304,7 +317,7 @@ export function buildReportLines(input: ReportInput): string[] {
     for (const { attack: a, times } of monthEntries) {
       const duration = validDurationMs(times);
       const durLabel = a.end === null ? 'ongoing' : duration !== null ? fmtDuration(duration) : '—';
-      const linked = meds.filter((e) => e.attackId === a.id);
+      const linked = medsByAttack.get(a.id) ?? [];
       const when = times.startMs !== null ? formatInstant(times.startMs, timeZone) : a.start;
       lines.push(
         `- ${when} — peak ${a.peakPain >= 0 ? a.peakPain + '/10' : '?'}, ${durLabel}`

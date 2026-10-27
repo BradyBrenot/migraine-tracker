@@ -205,6 +205,31 @@ function makeDayState(day: string, overrides: Partial<DayState> = {}): DayState 
   };
 }
 
+function makeMed(id: string, overrides: Partial<MedEvent> = {}): MedEvent {
+  return {
+    id,
+    medId: 'nurtec',
+    ts: '2026-10-20T09:00:00.000Z',
+    dose: '75 mg',
+    quantity: 1,
+    attackId: null,
+    notes: '',
+    source: 'manual',
+    ...overrides,
+  };
+}
+
+/**
+ * A JavaScript (or `any`) caller can still smuggle a forbidden `id` into a
+ * patch even though the store's public signature omits it; these tests prove
+ * the runtime guard ignores it.
+ */
+function patchWithId<T extends { id: string }>(
+  patch: Partial<T> & { id: string },
+): Partial<Omit<T, 'id'>> {
+  return patch as unknown as Partial<Omit<T, 'id'>>;
+}
+
 /** Fixed offsets around the real clock keep inventory instants deterministic. */
 function daysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -773,6 +798,188 @@ describe('StoreProvider sync state and persistence', () => {
     expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
   });
 
+  it('re-publishes only the local timezone after a confirmed reset and stays clean', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    // Hydration may already have published the zone; only the reset's own
+    // settings writes are asserted here.
+    api.resetAll.mockClear();
+    api.putSetting.mockClear();
+
+    await act(async () => {
+      currentStore().resetAll();
+    });
+
+    await waitFor(() => {
+      expect(api.resetAll).toHaveBeenCalledTimes(1);
+      expect(currentStore().sync.status).toBe('synced');
+    });
+
+    // /api/reset cleared every setting, so the server now needs the browser
+    // zone back — and ONLY that: a reset keeps the server defaults for
+    // rules/doses/planned/threshold/reminders.
+    expect(api.putSetting).toHaveBeenCalledTimes(1);
+    expect(api.putSetting).toHaveBeenCalledWith(
+      'timezone', systemTimeZone(),
+    );
+    expect(currentStore().state.timezone).toBe(systemTimeZone());
+    // The publish happens inside the reset task, after the reset itself.
+    expect(api.resetAll.mock.invocationCallOrder[0])
+      .toBeLessThan(api.putSetting.mock.invocationCallOrder[0]);
+    expect(currentStore().sync.pending).toBe(0);
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('does not lose a timezone chosen after the reset (run-time, not enqueue-time)', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.resetAll.mockClear();
+    api.putSetting.mockClear();
+
+    // Hold the server reset open, change the zone while it is unconfirmed,
+    // then let the reset task finish: its timezone publish must read the
+    // CURRENT state, and the queued setTimezone write must keep the choice.
+    const deferred = createDeferred<void>();
+    api.resetAll.mockReturnValue(deferred.promise);
+
+    await act(async () => {
+      currentStore().resetAll();
+      currentStore().setTimezone('Asia/Kolkata');
+    });
+    expect(currentStore().state.timezone).toBe('Asia/Kolkata');
+
+    await act(async () => {
+      deferred.resolve();
+      await deferred.promise;
+    });
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    const timezoneWrites = api.putSetting.mock.calls
+      .filter((call) => call[0] === 'timezone');
+    // Exactly two: the reset task's own publish (which must use the zone read
+    // at run time, not the one captured when the reset was enqueued) and the
+    // later setTimezone write queued behind it.
+    expect(timezoneWrites).toHaveLength(2);
+    for (const write of timezoneWrites) expect(write).toEqual(['timezone', 'Asia/Kolkata']);
+    expect(currentStore().state.timezone).toBe('Asia/Kolkata');
+    expect(readPersistedState().timezone).toBe('Asia/Kolkata');
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('resetAll resolves only after the reset and its timezone re-publication are confirmed', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.resetAll.mockClear();
+    api.putSetting.mockClear();
+
+    // Hold ONLY the timezone re-publication open; the reset itself resolves.
+    const tzWrite = createDeferred<void>();
+    api.putSetting.mockImplementation((key: string) => (
+      key === 'timezone' ? tzWrite.promise : Promise.resolve()
+    ));
+
+    let resetResolved = false;
+    let resetPromise!: Promise<void>;
+    await act(async () => {
+      resetPromise = currentStore().resetAll();
+      resetPromise.then(() => {
+        resetResolved = true;
+      }, () => undefined);
+    });
+
+    // The local erase is synchronous/optimistic, before any server call.
+    expect(currentStore().state.attacks).toHaveLength(0);
+
+    await waitFor(() => expect(api.putSetting).toHaveBeenCalledWith(
+      'timezone', systemTimeZone(),
+    ));
+    expect(api.resetAll).toHaveBeenCalledTimes(1);
+    // The publish belongs to the reset task and runs after the reset itself.
+    expect(api.resetAll.mock.invocationCallOrder[0])
+      .toBeLessThan(api.putSetting.mock.invocationCallOrder[0]);
+
+    // Reset confirmed and the publish INVOKED, but its write is still open:
+    // the returned promise must be pending and the task still counted.
+    expect(resetResolved).toBe(false);
+    expect(currentStore().sync.pending).toBe(1);
+
+    await act(async () => {
+      tzWrite.resolve();
+      await resetPromise;
+      // Resolves only after the task's bookkeeping ran: the persisted latches
+      // are already clean at the instant the promise fulfils.
+      expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+    });
+    expect(resetResolved).toBe(true);
+    expect(currentStore().state.attacks).toHaveLength(0);
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+    expect(currentStore().sync.dirty).toBe(false);
+    expect(currentStore().sync.failed).toBe(false);
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('resetAll rejects when the server reset fails, keeping the local erase dirty + failed', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    const { toast } = await import('sonner');
+
+    await act(async () => {
+      currentStore().startAttack();
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    api.resetAll.mockRejectedValue(new Error('boom'));
+    api.putSetting.mockClear();
+
+    let resetPromise!: Promise<void>;
+    await act(async () => {
+      resetPromise = currentStore().resetAll();
+    });
+    // The local erase applied optimistically even though the task will reject.
+    expect(currentStore().state.attacks).toHaveLength(0);
+    await act(async () => {
+      await expect(resetPromise).rejects.toThrow('boom');
+    });
+
+    expect(api.resetAll).toHaveBeenCalledTimes(1);
+    // The reset failed, so the timezone re-publication never ran.
+    expect(api.putSetting).not.toHaveBeenCalled();
+    // The task's bookkeeping ran before the rejection surfaced.
+    expect(currentStore().sync.pending).toBe(0);
+    expect(currentStore().sync.dirty).toBe(true);
+    expect(currentStore().sync.failed).toBe(true);
+    expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
+    expect(currentStore().state.attacks).toHaveLength(0);
+    expect(toast.error).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it('resetAll rejects when only the timezone re-publication fails', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.putSetting.mockImplementation((key: string) => (
+      key === 'timezone' ? Promise.reject(new Error('tz boom')) : Promise.resolve()
+    ));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    let resetPromise!: Promise<void>;
+    await act(async () => {
+      resetPromise = currentStore().resetAll();
+      await expect(resetPromise).rejects.toThrow('tz boom');
+    });
+
+    expect(api.resetAll).toHaveBeenCalledTimes(1);
+    expect(api.putSetting).toHaveBeenCalledWith('timezone', systemTimeZone());
+    expect(currentStore().state.attacks).toHaveLength(0);
+    expect(currentStore().sync.pending).toBe(0);
+    expect(currentStore().sync.dirty).toBe(true);
+    expect(currentStore().sync.failed).toBe(true);
+    expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
+    consoleError.mockRestore();
+  });
+
   it('keeps an offline reset dirty + failed so a later hydration cannot resurrect server records', async () => {
     const localAttack = makeAttack('local-attack');
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState([localAttack])));
@@ -790,6 +997,9 @@ describe('StoreProvider sync state and persistence', () => {
     });
 
     expect(api.resetAll).not.toHaveBeenCalled();
+    // Offline reset behaviour is unchanged: no server calls at all, including
+    // the connected path's timezone re-publication.
+    expect(api.putSetting).not.toHaveBeenCalled();
     expect(currentStore().state.attacks).toHaveLength(0);
     const offlineSync = currentStore().sync;
     expect(offlineSync.status).toBe('local');
@@ -2735,4 +2945,78 @@ describe('peak pain correction', () => {
       expect(lastAttackPatch().painLog).toHaveLength(1);
     },
   );
+});
+
+describe('record id integrity', () => {
+  it('never lets a patch id replace an attack id locally or on the wire', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('a1')] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateAttack(
+        'a1', patchWithId<Attack>({ id: 'hijacked', notes: 'kept' }),
+      );
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    const attacks = currentStore().state.attacks;
+    expect(attacks).toHaveLength(1);
+    expect(attacks[0].id).toBe('a1');
+    expect(attacks[0].notes).toBe('kept');
+
+    expect(api.patchAttack).toHaveBeenCalledTimes(1);
+    const [routeId, payload] = api.patchAttack.mock.calls[0];
+    expect(routeId).toBe('a1');
+    expect(payload.id).toBe('a1');
+    expect(payload.notes).toBe('kept');
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('never lets a patch id replace a med id locally or on the wire', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), meds: [makeMed('m1')] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.patchMed.mockClear();
+
+    await act(async () => {
+      currentStore().updateMed(
+        'm1', patchWithId<MedEvent>({ id: 'hijacked', notes: 'edited' }),
+      );
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    const meds = currentStore().state.meds;
+    expect(meds).toHaveLength(1);
+    expect(meds[0].id).toBe('m1');
+    expect(meds[0].notes).toBe('edited');
+
+    expect(api.patchMed).toHaveBeenCalledTimes(1);
+    const [routeId, payload] = api.patchMed.mock.calls[0];
+    expect(routeId).toBe('m1');
+    // The partial patch is sent without any id: the route id is authoritative.
+    expect(payload).not.toHaveProperty('id');
+    expect(payload.notes).toBe('edited');
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('ignores updateMed for an unknown id: no local record and no queued patch', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), meds: [makeMed('m1')] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.patchMed.mockClear();
+
+    await act(async () => {
+      currentStore().updateMed('does-not-exist', { notes: 'never applied' });
+    });
+
+    expect(currentStore().state.meds.map((m) => m.id)).toEqual(['m1']);
+    expect(currentStore().state.meds[0].notes).toBe('');
+    expect(api.patchMed).not.toHaveBeenCalled();
+    expect(currentStore().sync.pending).toBe(0);
+    expect(currentStore().sync.dirty).toBe(false);
+  });
 });

@@ -31,6 +31,16 @@
 
 import { dayKeyStartMs } from './datetime.ts';
 
+/**
+ * Default Nurtec low-stock alert level (tablets).
+ *
+ * Single source of truth for a browser with no stored threshold, the
+ * authoritative GET /api/inventory/nurtec fallback, and the reminder
+ * scheduler's own fallback: a server without a valid `lowStockThreshold`
+ * setting must classify stock exactly like a fresh browser state.
+ */
+export const DEFAULT_LOW_STOCK_THRESHOLD = 2;
+
 /** An absolute stock baseline/correction record (medication-scoped). */
 export interface StockBaselineLike {
   id: string;

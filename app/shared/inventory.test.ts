@@ -3,7 +3,7 @@
 // these scenarios through the real API in server/test/inventory.test.js.
 
 import { describe, expect, it } from 'vitest';
-import { classifyStock, currentStock } from './inventory.ts';
+import { classifyStock, currentStock, DEFAULT_LOW_STOCK_THRESHOLD } from './inventory.ts';
 
 const TZ = 'America/New_York';
 
@@ -226,5 +226,13 @@ describe('classifyStock', () => {
     expect(classifyStock(2, 2)).toBe('low');
     expect(classifyStock(0, 2)).toBe('low');
     expect(classifyStock(-1, 2)).toBe('negative');
+  });
+});
+
+describe('DEFAULT_LOW_STOCK_THRESHOLD', () => {
+  it('is the documented 2-tablet plan default for every consumer', () => {
+    // Browser default, server inventory fallback, and reminder scheduler all
+    // import this single value; a silent change here changes all three.
+    expect(DEFAULT_LOW_STOCK_THRESHOLD).toBe(2);
   });
 });

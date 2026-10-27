@@ -318,3 +318,113 @@ test('app.close() releases the database handle', async () => {
   // using a closed node:sqlite database must throw
   assert.throws(() => h.db.prepare('SELECT 1').all());
 });
+
+// -- cross-origin guard for mutating requests --------------------------
+// No auth: a hostile page must not be able to POST/PATCH/DELETE through a
+// browser on the private network. Non-browser clients (no Origin/Referer)
+// and reads are deliberately untouched.
+
+test('cross-origin mutating requests are denied before handlers run', async (t) => {
+  const h = await makeApp({ label: 'migraine-origin-deny' });
+  t.after(() => h.close());
+
+  const evil = { host: 'tracker.local:8097', origin: 'https://evil.example' };
+
+  const importDenied = await h.app.inject({
+    method: 'POST', url: '/api/import', headers: evil,
+    payload: { attacks: [{ id: 'evil1', start: '2026-01-01T00:00:00Z' }] },
+  });
+  assert.equal(importDenied.statusCode, 403);
+  assert.deepEqual(importDenied.json(), { error: 'cross-origin request denied' });
+
+  const resetDenied = await h.app.inject({ method: 'POST', url: '/api/reset', headers: evil });
+  assert.equal(resetDenied.statusCode, 403);
+  assert.equal((await h.app.inject({ method: 'GET', url: '/api/attacks' })).json().length, 0);
+
+  // a legitimately created record must stay unchanged on a denied PATCH
+  const created = await h.app.inject({ method: 'POST', url: '/api/attacks', payload: sampleAttack });
+  assert.equal(created.statusCode, 201);
+  const patchDenied = await h.app.inject({
+    method: 'PATCH', url: `/api/attacks/${created.json().id}`, headers: evil,
+    payload: { notes: 'hijacked' },
+  });
+  assert.equal(patchDenied.statusCode, 403);
+  assert.equal((await h.app.inject({ method: 'GET', url: '/api/attacks' })).json()[0].notes, 'first');
+
+  // Referer is the fallback when Origin is absent
+  const refererDenied = await h.app.inject({
+    method: 'POST', url: '/api/reset',
+    headers: { host: 'tracker.local:8097', referer: 'https://evil.example/attack' },
+  });
+  assert.equal(refererDenied.statusCode, 403);
+
+  // opaque/malformed origins are denied, never echoed
+  for (const origin of ['null', 'not a url']) {
+    const res = await h.app.inject({
+      method: 'POST', url: '/api/reset',
+      headers: { host: 'tracker.local:8097', origin },
+    });
+    assert.equal(res.statusCode, 403, `origin ${origin}`);
+    assert.equal(res.body.includes(origin), false, 'source must not be echoed');
+  }
+  // nothing above mutated the database
+  assert.equal((await h.app.inject({ method: 'GET', url: '/api/attacks' })).json().length, 1);
+});
+
+test('same-origin and origin-less mutations allowed; reads ignore Origin', async (t) => {
+  const h = await makeApp({ label: 'migraine-origin-allow' });
+  t.after(() => h.close());
+
+  // host casing and the ignored scheme (TLS may terminate at a proxy) match
+  const created = await h.app.inject({
+    method: 'POST', url: '/api/attacks',
+    headers: { host: 'tracker.local:8097', origin: 'http://TRACKER.local:8097' },
+    payload: sampleAttack,
+  });
+  assert.equal(created.statusCode, 201);
+  const patched = await h.app.inject({
+    method: 'PATCH', url: `/api/attacks/${created.json().id}`,
+    headers: { host: 'TRACKER.local:8097', origin: 'https://tracker.local:8097' },
+    payload: { notes: 'same origin' },
+  });
+  assert.equal(patched.statusCode, 200);
+  assert.equal(patched.json().notes, 'same origin');
+
+  // default ports normalise on either side
+  const defaultPort = await h.app.inject({
+    method: 'POST', url: '/api/attacks',
+    headers: { host: 'localhost:80', origin: 'http://localhost:80' },
+    payload: { start: '2026-01-04T00:00:00Z' },
+  });
+  assert.equal(defaultPort.statusCode, 201);
+
+  // bracketed IPv6 Host headers
+  const ipv6 = await h.app.inject({
+    method: 'POST', url: '/api/attacks',
+    headers: { host: '[::1]:3000', origin: 'http://[::1]:3000' },
+    payload: { start: '2026-01-05T00:00:00Z' },
+  });
+  assert.equal(ipv6.statusCode, 201);
+
+  // Referer-only same-origin (path/query ignored for the host compare)
+  const refererOnly = await h.app.inject({
+    method: 'POST', url: '/api/attacks',
+    headers: { host: 'tracker.local:8097', referer: 'http://tracker.local:8097/settings?tab=data' },
+    payload: { start: '2026-01-06T00:00:00Z' },
+  });
+  assert.equal(refererOnly.statusCode, 201);
+
+  // no Origin/Referer: non-browser clients keep working
+  const noHeaders = await h.app.inject({
+    method: 'POST', url: '/api/attacks', payload: { start: '2026-01-07T00:00:00Z' },
+  });
+  assert.equal(noHeaders.statusCode, 201);
+
+  // reads (health/export/records) are never blocked, even cross-origin
+  for (const url of ['/api/health', '/api/export', '/api/attacks']) {
+    const res = await h.app.inject({
+      method: 'GET', url, headers: { origin: 'https://evil.example' },
+    });
+    assert.equal(res.statusCode, 200, url);
+  }
+});

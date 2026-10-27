@@ -22,7 +22,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from './db.js';
 import { buildApp } from './app.js';
-import { dumpBackup } from './backup.js';
+import { safeDumpBackup } from './backup.js';
 import { attackViewUrl, resolveAttackConfig, resolveReminderConfig } from './reminder-config.js';
 import { createNtfyTransport } from './ntfy.js';
 import { createReminderEngine } from './reminders.js';
@@ -113,7 +113,9 @@ const app = await buildApp({
 // per day, keeping ~31 days of history. The dataset is bind-mounted, so
 // Backrest picks these files up on its normal schedule.
 const BACKUP_DIR = join(DATA_DIR, 'backups');
-const runBackup = () => dumpBackup({ db, backupDir: BACKUP_DIR });
+// safeDumpBackup catches write/rotate failures (logging one fixed message) so
+// a broken backup can never crash startup or the hourly timer.
+const runBackup = () => safeDumpBackup({ db, backupDir: BACKUP_DIR });
 
 runBackup(); // on startup if today's dump doesn't exist yet
 setInterval(runBackup, 3600_000).unref(); // then check hourly

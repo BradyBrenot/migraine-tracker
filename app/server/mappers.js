@@ -2,10 +2,38 @@
 // API/frontend shapes. Extracted verbatim from the original server so the
 // wire format stays identical.
 
+const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Defensive read of a legacy JSON column. A hand-edited/damaged row must not
+ * throw inside GET /api/export, the nightly backup, or restore's post-commit
+ * snapshot read; malformed JSON falls back to `[]` instead. Raw column text is
+ * never exposed or logged.
+ */
+function parseArrayColumn(raw, isValidItem) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  // Do not partially preserve an invalid array: one bad item means the whole
+  // field is untrustworthy, so the documented empty shape wins.
+  return Array.isArray(parsed) && parsed.every(isValidItem) ? parsed : [];
+}
+
+// painLog items: plain objects with a string ts and finite numeric level.
+const isPainLogItem = (p) => isPlainObject(p)
+  && typeof p.ts === 'string'
+  && typeof p.level === 'number' && Number.isFinite(p.level);
+
+const isStringItem = (v) => typeof v === 'string';
+
 export const attackFromRow = (r) => ({
   id: r.id, start: r.start, end: r.end,
-  painLog: JSON.parse(r.pain_log), peakPain: r.peak_pain,
-  symptoms: JSON.parse(r.symptoms), triggers: JSON.parse(r.triggers),
+  painLog: parseArrayColumn(r.pain_log, isPainLogItem), peakPain: r.peak_pain,
+  symptoms: parseArrayColumn(r.symptoms, isStringItem),
+  triggers: parseArrayColumn(r.triggers, isStringItem),
   aura: r.aura === null || r.aura === undefined ? null : !!r.aura,
   notes: r.notes, source: r.source,
 });

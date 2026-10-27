@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
-import type { Attack, DayState, TrackerState, Workout } from '@/types';
-import { dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
+import type { Attack, DayState, MedEvent, TrackerState, Workout } from '@/types';
+import { dayKeyStartMs, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 
 vi.mock('@/lib/api', () => ({
@@ -185,6 +185,19 @@ function clickDay(key: string): void {
   fireEvent.click(cell);
 }
 
+/**
+ * Move the month cursor from the current configured-zone month to
+ * `targetMonth` ('YYYY-MM') using the header arrows, so the test does not
+ * depend on the machine's real date.
+ */
+function goToMonth(targetMonth: string, timeZone: string): void {
+  const monthIndex = (key: string) => Number(key.slice(0, 4)) * 12 + Number(key.slice(5, 7));
+  const currentMonth = localDayKey(Date.now(), timeZone).slice(0, 7);
+  const delta = monthIndex(targetMonth) - monthIndex(currentMonth);
+  const label = delta < 0 ? 'Previous month' : 'Next month';
+  for (let i = 0; i < Math.abs(delta); i++) fireEvent.click(screen.getByLabelText(label));
+}
+
 function makeWorkout(performedAt: number): Workout {
   return {
     id: 'seed-workout',
@@ -328,6 +341,41 @@ describe('CalendarPage configured-timezone day identity', () => {
   });
 });
 
+describe('CalendarPage medication day buckets', () => {
+  it('shows valid meds on their configured-zone day and skips invalid timestamps', async () => {
+    const TZ = 'UTC';
+    const day = midMonthDay(TZ);
+    const startMs = dayKeyStartMs(day, TZ) + 9 * 60 * 60 * 1000;
+    const meds: MedEvent[] = [
+      {
+        id: 'valid-med', medId: 'tylenol', ts: new Date(startMs).toISOString(),
+        dose: '500 mg', quantity: null, attackId: null, notes: '', source: 'manual',
+      },
+      {
+        id: 'invalid-med', medId: 'nurtec', ts: 'not-a-date',
+        dose: '', quantity: null, attackId: null, notes: '', source: 'manual',
+      },
+    ];
+    seedState({ timezone: TZ, meds });
+
+    mountCalendar();
+    await waitForSync();
+
+    const cell = document.querySelector<HTMLButtonElement>(`[data-day="${day}"]`);
+    if (!cell) throw new Error(`calendar cell not found for ${day}`);
+    // The day cell carries the valid dose's letter chip and nothing for the
+    // unparseable row (which the old per-cell bucket also skipped).
+    expect(cell.querySelector('[title="Tylenol"]')).toBeTruthy();
+    expect(cell.querySelector('[title="Nurtec"]')).toBeNull();
+
+    clickDay(day);
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('500 mg')).toBeTruthy());
+    expect(within(sheet).getByText('Tylenol')).toBeTruthy();
+    expect(within(sheet).queryByText('Nurtec')).toBeNull();
+  });
+});
+
 describe('CalendarPage out-of-month cells', () => {
   it('uses a darker in-month fill and a distinct out-of-month fill without dimming text', async () => {
     const TZ = 'UTC';
@@ -404,6 +452,49 @@ describe('CalendarPage ongoing attacks', () => {
     const sheet = await screen.findByRole('dialog');
     await waitFor(() => expect(sheet.textContent).toContain('ongoing'));
     expect(within(sheet).getByText('2h')).toBeTruthy();
+  });
+});
+
+describe('CalendarPage multi-day attacks across DST', () => {
+  const TZ = 'America/New_York';
+
+  it('keeps every configured-zone day of a DST-crossing attack and matches monthStats', async () => {
+    const startMs = zonedDateTimeToMs('2026-03-07', '23:30', TZ);
+    const endMs = zonedDateTimeToMs('2026-03-09', '01:00', TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [{ ...makeTimedAttack('dst-attack', startMs, endMs), symptoms: ['nausea'] }],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    goToMonth('2026-03', TZ);
+    await waitFor(() => {
+      expect(document.querySelector('[data-day="2026-03-07"]')).not.toBeNull();
+    });
+
+    // Spring-forward loses an hour, but the attack still covers Mar 7, 8, and
+    // 9. The header's monthStats and the per-day grid must agree.
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe('3 attack days of 31 · 1 attack');
+    });
+
+    for (const day of ['2026-03-07', '2026-03-08', '2026-03-09']) {
+      clickDay(day);
+      const sheet = await screen.findByRole('dialog');
+      await waitFor(() => expect(within(sheet).getByText('nausea')).toBeTruthy());
+    }
+
+    // 23:30 Mar 7 EST to 01:00 Mar 9 EDT is 24h30m elapsed (25h30m on the
+    // wall clock): the DST transition must not inflate the duration.
+    expect(within(await screen.findByRole('dialog')).getByText('24h 30m')).toBeTruthy();
+
+    // The day before the interval and the day after it have no attack.
+    clickDay('2026-03-06');
+    await waitFor(() => expect(screen.getByText(/Nothing logged this day/)).toBeTruthy());
+    clickDay('2026-03-10');
+    await waitFor(() => expect(screen.getByText(/Nothing logged this day/)).toBeTruthy());
   });
 });
 

@@ -47,9 +47,29 @@ export default function Reports() {
   const [cursor, setCursor] = useState<DayKey>(() => monthStartKey(localDayKey(now, timeZone)));
   const [reportSpan, setReportSpan] = useState<'3' | '6' | '12' | 'all'>('12');
 
-  const monthLabel = new Intl.DateTimeFormat(undefined, {
-    month: 'long', year: 'numeric', timeZone,
-  }).format(new Date(dayKeyStartMs(cursor, timeZone)));
+  // An ongoing attack's end is `now`; every finished attack ignores the render
+  // clock. Anchoring finished-only derivations to a stable instant keeps the
+  // chart/stat data identical across 15s ticks while ongoing attacks still
+  // track `now` exactly.
+  const hasOngoingAttack = useMemo(
+    () => state.attacks.some((attack) => attack.end === null),
+    [state.attacks],
+  );
+
+  const monthLabelFormatter = useMemo(
+    () => new Intl.DateTimeFormat(undefined, {
+      month: 'long', year: 'numeric', timeZone,
+    }),
+    [timeZone],
+  );
+  const monthLabel = monthLabelFormatter.format(new Date(dayKeyStartMs(cursor, timeZone)));
+
+  // Selected-month start, stable for as long as the picker stays put.
+  const cursorStartMs = useMemo(
+    () => dayKeyStartMs(cursor, timeZone),
+    [cursor, timeZone],
+  );
+  const dataNow = hasOngoingAttack ? now : cursorStartMs;
 
   const data = useMemo(() => {
     const monthPrefix = cursor.slice(0, 7);
@@ -58,7 +78,7 @@ export default function Reports() {
 
     const parsed = state.attacks.map((a) => ({
       attack: a,
-      times: parseAttackTimes(a, now),
+      times: parseAttackTimes(a, dataNow),
     }));
     // attacks counted by overlap (multi-day attacks count into this month),
     // but listed/counted once by their start month
@@ -101,17 +121,30 @@ export default function Reports() {
       if (a.peakPain >= 1) painDist[a.peakPain - 1].count++;
     }
 
-    // med usage days (catalog + custom imported meds)
-    const medUsage = allMedIds(meds).map((id) => ({
-      id,
-      name: medName(id),
-      days: new Set(
-        meds.filter((e) => e.medId === id)
-          .map((e) => localDayKey(Date.parse(e.ts), timeZone)),
-      ).size,
-      doses: meds.filter((e) => e.medId === id).length,
-      color: medColor(id),
-    })).filter((m) => m.doses > 0);
+    // med usage days (catalog + custom imported meds): one pass over this
+    // month's medications instead of one full scan per med id.
+    const perMed = new Map<string, { days: Set<string>; doses: number }>();
+    for (const med of meds) {
+      const entry = perMed.get(med.medId) ?? { days: new Set<string>(), doses: 0 };
+      entry.days.add(localDayKey(Date.parse(med.ts), timeZone));
+      entry.doses++;
+      perMed.set(med.medId, entry);
+    }
+    const medUsage = allMedIds(meds)
+      .map((id) => {
+        const entry = perMed.get(id);
+        return {
+          id,
+          name: medName(id),
+          days: entry ? entry.days.size : 0,
+          doses: entry ? entry.doses : 0,
+          color: medColor(id),
+        };
+      })
+      .filter((m) => m.doses > 0);
+    // Longest bar in the med-usage panel, so the render loop does not rebuild
+    // the max for every row.
+    const medUsageMax = medUsage.reduce((max, m) => Math.max(max, m.days), 0);
 
     // top triggers / symptoms
     const count = (items: string[][]) => {
@@ -127,19 +160,30 @@ export default function Reports() {
     const hasData = attacks.length > 0 || meds.length > 0;
 
     return {
-      attacks, meds, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist, medUsage, triggers, symptoms,
+      attacks, meds, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist,
+      medUsage, medUsageMax, triggers, symptoms,
     };
-  }, [state.attacks, state.meds, cursor, timeZone, now]);
+  }, [state.attacks, state.meds, cursor, timeZone, dataNow]);
 
   // Monthly trend buckets — last 12 configured-zone calendar months, independent
   // of the month picker. This is the view that matches "how many migraine days
   // per month" from medical questionnaires.
+  //
+  // Only the current month and ongoing attacks depend on the clock, so anchor
+  // the finished-history chart to the current month's first instant: the chart
+  // data keeps its identity across 15s ticks and rebuilds at month rollover.
+  const currentMonthKey = monthStartKey(localDayKey(now, timeZone));
+  const currentMonthStartMs = useMemo(
+    () => dayKeyStartMs(currentMonthKey, timeZone),
+    [currentMonthKey, timeZone],
+  );
+  const trendNow = hasOngoingAttack ? now : currentMonthStartMs;
   const monthly = useMemo(() => buildMonthlyTrend({
     attacks: state.attacks,
     meds: state.meds,
     timeZone,
-    nowMs: now,
-  }), [state.attacks, state.meds, timeZone, now]);
+    nowMs: trendNow,
+  }), [state.attacks, state.meds, timeZone, trendNow]);
 
   /** Build a month-by-month Markdown report. */
   function downloadReport() {
@@ -334,7 +378,7 @@ export default function Reports() {
                         className="h-full rounded-full"
                         style={{
                           background: m.color,
-                          width: `${Math.min(100, (m.days / Math.max(1, ...data.medUsage.map((x) => x.days))) * 100)}%`,
+                          width: `${Math.min(100, (m.days / Math.max(1, data.medUsageMax)) * 100)}%`,
                         }}
                       />
                     </div>

@@ -31,17 +31,30 @@ import { weekBarGeometry } from '@/lib/calendar-bars';
 
 const DAY_MS = 86400000;
 
+/**
+ * Configured-zone day-label formatters, keyed by zone + year flag. The keys are
+ * bounded by the timezones actually configured, so this replaces the 42
+ * `new Intl.DateTimeFormat` constructions per grid redraw without leaking
+ * per-cell keys.
+ */
+const dayLabelFormatters = new Map<string, Intl.DateTimeFormat>();
+
 /** Configured-zone calendar date label for a day key (never browser-local ISO). */
 function formatDayLabel(key: DayKey, timeZone: string, withYear = false): string {
-  const options: Intl.DateTimeFormatOptions = {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    timeZone,
-  };
-  if (withYear) options.year = 'numeric';
-  return new Intl.DateTimeFormat(undefined, options)
-    .format(new Date(dayKeyStartMs(key, timeZone)));
+  const cacheKey = `${withYear ? 'y' : 'n'}\u0000${timeZone}`;
+  let formatter = dayLabelFormatters.get(cacheKey);
+  if (formatter === undefined) {
+    const options: Intl.DateTimeFormatOptions = {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      timeZone,
+    };
+    if (withYear) options.year = 'numeric';
+    formatter = new Intl.DateTimeFormat(undefined, options);
+    dayLabelFormatters.set(cacheKey, formatter);
+  }
+  return formatter.format(new Date(dayKeyStartMs(key, timeZone)));
 }
 
 const WORKOUT_KIND_LABEL: Record<WorkoutKind, string> = {
@@ -74,6 +87,8 @@ interface BarSegment {
   lane: number; // vertical stacking lane
   continuesLeft: boolean;
   continuesRight: boolean;
+  /** True when a finished attack's usable end precedes its start. */
+  endBeforeStart: boolean;
 }
 
 function MedLimitBar({ medId }: { medId: string }) {
@@ -140,11 +155,12 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (me
   const due = dueInfo.status === 'due';
   const plannedDate = dueInfo.planned ? dueInfo.dueDay : null;
   const pct = days === null ? 0 : Math.min(100, (days / interval) * 100);
-  const dueLabel = dueInfo.dueDay === null
-    ? ''
-    : new Intl.DateTimeFormat(undefined, {
+  const dueLabel = useMemo(() => {
+    if (dueInfo.dueDay === null) return '';
+    return new Intl.DateTimeFormat(undefined, {
       month: 'short', day: 'numeric', timeZone: state.timezone,
     }).format(new Date(dayKeyStartMs(dueInfo.dueDay, state.timezone)));
+  }, [dueInfo.dueDay, state.timezone]);
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
@@ -232,9 +248,52 @@ export default function CalendarPage() {
   const year = Number(cursor.slice(0, 4));
   const month = Number(cursor.slice(5, 7));
   const monthKey = cursor.slice(0, 7);
+  const todayKey = localDayKey(now, state.timezone);
+
+  // Valid medications bucketed by configured-zone day ONCE per data/timezone
+  // change. Previously each of the 42 cells rescanned every medication and
+  // rebuilt its day key. Invalid timestamps are skipped exactly as before and
+  // every bucket keeps the input (state) order.
+  const medsByDay = useMemo(() => {
+    const byDay = new Map<DayKey, MedEvent[]>();
+    for (const med of state.meds) {
+      const ms = Date.parse(med.ts);
+      if (!Number.isFinite(ms)) continue;
+      const key = localDayKey(ms, state.timezone);
+      const bucket = byDay.get(key);
+      if (bucket) bucket.push(med);
+      else byDay.set(key, [med]);
+    }
+    return byDay;
+  }, [state.meds, state.timezone]);
+
+  // An ongoing attack's end instant is `now`, so finished history does not
+  // depend on the render clock at all (`parseAttackTimes` only consults it for
+  // `end === null`). Anchoring finished-only grids to today's configured
+  // midnight keeps the 42 cells and month stats memoized across 15s ticks and
+  // rebuilds them only at day rollover (isToday) or when data changes. Ongoing
+  // attacks still track `now` on every tick.
+  const hasOngoingAttack = useMemo(
+    () => state.attacks.some((attack) => attack.end === null),
+    [state.attacks],
+  );
+  const todayStartMs = useMemo(
+    () => dayKeyStartMs(todayKey, state.timezone),
+    [todayKey, state.timezone],
+  );
+  const gridNowMs = hasOngoingAttack ? now : todayStartMs;
+
+  // Parse every attack interval ONCE per data/anchor change instead of once per
+  // grid cell, week filter, bar, and month-stat scan.
+  const parsedAttacks = useMemo(
+    () => state.attacks.map((attack) => ({
+      attack,
+      times: parseAttackTimes(attack, gridNowMs),
+    })),
+    [state.attacks, gridNowMs],
+  );
 
   const weeks = useMemo(() => {
-    const todayKey = localDayKey(now, state.timezone);
     const startOffset = (weekdayOf(cursor) + 6) % 7; // Monday-first
     const gridStartKey = addDays(cursor, -startOffset);
     const out: {
@@ -255,42 +314,43 @@ export default function CalendarPage() {
         const key = addDays(weekStartKey, d);
         const dayStart = dayKeyStartMs(key, state.timezone);
         const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
-        const attacks = state.attacks.filter((a) => {
-          const { startMs, endMs } = parseAttackTimes(a, now);
-          // Degenerate (zero/negative-duration) attacks count on their start
-          // day instead of vanishing; half-open otherwise.
-          return attackOverlapsRange(startMs, endMs, dayStart, dayEnd);
-        });
+        const attacks = parsedAttacks
+          .filter(({ times }) => (
+            // Degenerate (zero/negative-duration) attacks count on their start
+            // day instead of vanishing; half-open otherwise.
+            attackOverlapsRange(times.startMs, times.endMs, dayStart, dayEnd)
+          ))
+          .map(({ attack }) => attack);
         days.push({
           key,
           inMonth: key.slice(0, 7) === monthKey,
           isToday: key === todayKey,
           attacks,
-          meds: state.meds.filter((m) => {
-            const t = Date.parse(m.ts);
-            return Number.isFinite(t) && localDayKey(t, state.timezone) === key;
-          }),
+          meds: medsByDay.get(key) ?? [],
           maxPain: attacks.length ? Math.max(...attacks.map((a) => a.peakPain)) : -1,
         });
       }
 
       // continuous bars for attacks overlapping this week
-      const overlapping = state.attacks
-        .filter((a) => {
-          const { startMs, endMs } = parseAttackTimes(a, now);
-          return attackOverlapsRange(startMs, endMs, weekStartMs, weekEndMs);
-        })
-        .sort((a, b) => a.start.localeCompare(b.start));
+      const overlapping = parsedAttacks
+        .filter(({ times }) => attackOverlapsRange(times.startMs, times.endMs, weekStartMs, weekEndMs))
+        .sort((a, b) => a.attack.start.localeCompare(b.attack.start));
       const weekEndKey = addDays(weekStartKey, 7);
-      const raw = overlapping.map((a) => {
-        const { startMs, endMs } = parseAttackTimes(a, now);
+      const raw = overlapping.map(({ attack, times }) => {
         // Overlap filtering guarantees a usable start.
-        const s = startMs as number;
+        const s = times.startMs as number;
         return {
-          attack: a,
+          attack,
+          // An ongoing attack has no end: `now` before a future start is not
+          // an inconsistent finished interval. Evaluated here from the parsed
+          // interval so the bar render never re-parses.
+          endBeforeStart: attack.end !== null
+            && times.startMs !== null
+            && times.endMs !== null
+            && times.endMs < times.startMs,
           ...weekBarGeometry({
             startMs: s,
-            endMs: endMs ?? s,
+            endMs: times.endMs ?? s,
             weekStartKey,
             weekEndKey,
             timeZone: state.timezone,
@@ -301,7 +361,7 @@ export default function CalendarPage() {
       out.push({ days, bars: assignLanes(raw), weekStartMs, weekEndMs });
     }
     return out;
-  }, [cursor, monthKey, state.attacks, state.meds, state.timezone, now]);
+  }, [cursor, monthKey, parsedAttacks, medsByDay, state.timezone, todayKey]);
 
   const selData = useMemo(() => {
     if (!selected) return null;
@@ -315,10 +375,9 @@ export default function CalendarPage() {
     const record = state.dayStates.find((d) => d.day === selected) ?? null;
     const dayStart = dayKeyStartMs(selected, state.timezone);
     const dayEnd = dayKeyStartMs(addDays(selected, 1), state.timezone);
-    const hasAttack = state.attacks.some((a) => {
-      const { startMs, endMs } = parseAttackTimes(a, now);
-      return attackOverlapsRange(startMs, endMs, dayStart, dayEnd);
-    });
+    const hasAttack = parsedAttacks.some(({ times }) => (
+      attackOverlapsRange(times.startMs, times.endMs, dayStart, dayEnd)
+    ));
     const workouts = state.workouts
       .filter((w) => {
         const ms = Date.parse(w.performedAt);
@@ -326,11 +385,15 @@ export default function CalendarPage() {
       })
       .sort((a, b) => b.performedAt.localeCompare(a.performedAt));
     return { record, status: effectiveDayState(record, hasAttack), workouts };
-  }, [selected, state.dayStates, state.timezone, state.attacks, state.workouts, now]);
+  }, [selected, state.dayStates, state.timezone, parsedAttacks, state.workouts]);
 
-  const monthName = new Intl.DateTimeFormat(undefined, {
-    month: 'long', year: 'numeric', timeZone: state.timezone,
-  }).format(new Date(dayKeyStartMs(cursor, state.timezone)));
+  const monthNameFormatter = useMemo(
+    () => new Intl.DateTimeFormat(undefined, {
+      month: 'long', year: 'numeric', timeZone: state.timezone,
+    }),
+    [state.timezone],
+  );
+  const monthName = monthNameFormatter.format(new Date(dayKeyStartMs(cursor, state.timezone)));
 
   const overuseFlags = Object.entries(state.rules).filter(
     ([id, r]) => usageDaysInWindow(state.meds, id, r.windowDays, now, state.timezone) >= r.limit - 3,
@@ -346,10 +409,9 @@ export default function CalendarPage() {
   // bucketed with the same local-midnight bounds as the grid cells.
   const monthStats = useMemo(() => {
     const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    const intervals = state.attacks.map((a) => parseAttackTimes(a, now));
-    const attackCount = intervals
-      .filter(({ startMs, endMs }) => attackOverlapsRange(
-        startMs, endMs, monthBounds.startMs, monthBounds.endMs,
+    const attackCount = parsedAttacks
+      .filter(({ times }) => attackOverlapsRange(
+        times.startMs, times.endMs, monthBounds.startMs, monthBounds.endMs,
       ))
       .length;
     let attackDays = 0;
@@ -357,12 +419,12 @@ export default function CalendarPage() {
       const key = addDays(cursor, d);
       const dayStart = dayKeyStartMs(key, state.timezone);
       const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
-      if (intervals.some(({ startMs, endMs }) => attackOverlapsRange(
-        startMs, endMs, dayStart, dayEnd,
+      if (parsedAttacks.some(({ times }) => attackOverlapsRange(
+        times.startMs, times.endMs, dayStart, dayEnd,
       ))) attackDays++;
     }
     return { attackDays, daysInMonth, attackCount };
-  }, [state.attacks, cursor, year, month, monthBounds, state.timezone, now]);
+  }, [parsedAttacks, cursor, year, month, monthBounds, state.timezone]);
 
   return (
     <div className="space-y-6">
@@ -503,13 +565,6 @@ export default function CalendarPage() {
                 {week.bars.map((bar) => {
                   const color = painColor(bar.attack.peakPain);
                   const widthPct = ((bar.to - bar.from) / 7) * 100;
-                  const barTimes = parseAttackTimes(bar.attack, now);
-                  // An ongoing attack has no end: `now` before a future start is
-                  // not an inconsistent finished interval.
-                  const barEndBeforeStart = bar.attack.end !== null
-                    && barTimes.startMs !== null
-                    && barTimes.endMs !== null
-                    && barTimes.endMs < barTimes.startMs;
                   return (
                     <div
                       key={bar.attack.id + wi}
@@ -523,7 +578,7 @@ export default function CalendarPage() {
                         background: color,
                       }}
                       title={`Attack, peak ${bar.attack.peakPain >= 0 ? `${bar.attack.peakPain}/10` : '?'}${
-                        barEndBeforeStart ? ' — end before start' : ''
+                        bar.endBeforeStart ? ' — end before start' : ''
                       }`}
                     >
                       {widthPct >= 4 && bar.attack.peakPain >= 0 && (

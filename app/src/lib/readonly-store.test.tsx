@@ -365,6 +365,44 @@ describe('ReadOnlyStoreProvider', () => {
     expect(api.exportAll).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps every snapshot identity when a refresh returns identical data', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('stable')] });
+    mountViewer();
+    await waitFor(() => expect(captured?.sync.status).toBe('synced'));
+
+    const initialState = captured!.state;
+    const initialAttack = initialState.attacks[0];
+    const initialSync = captured!.sync;
+
+    // A refresh whose payload is byte-identical (but a fresh object graph) must
+    // not replace the snapshot identities the pages memoize on.
+    const second = createDeferred<ReturnType<typeof emptyExport>>();
+    api.exportAll.mockReturnValueOnce(second.promise);
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(api.exportAll).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      second.resolve({ ...emptyExport(), attacks: [makeAttack('stable')] });
+    });
+
+    expect(captured!.state).toBe(initialState);
+    expect(captured!.state.attacks[0]).toBe(initialAttack);
+    expect(captured!.sync).toBe(initialSync);
+    expect(captured!.sync.status).toBe('synced');
+    expect(captured!.serverMode).toBe(true);
+    expectNoWriterApiCalls();
+
+    // A genuinely changed payload still replaces the snapshot.
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('changed')] });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(captured!.state.attacks.map((a) => a.id)).toEqual(['changed']));
+    expect(captured!.state).not.toBe(initialState);
+  });
+
   it('keeps the last successful snapshot (without writer latches) when a later refresh fails', async () => {
     api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('kept')] });
     mountViewer();

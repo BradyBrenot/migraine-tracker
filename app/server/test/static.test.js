@@ -212,6 +212,41 @@ test('with dist/ lacking view.html: /view falls back to the writer shell', async
   });
 });
 
+test('with dist/: a missing /assets file is a JSON 404, never the SPA shell', async () => {
+  await withDb('migraine-static-assets', async (dir, db) => {
+    const distDir = join(dir, 'dist');
+    mkdirSync(join(distDir, 'assets'), { recursive: true });
+    writeFileSync(join(distDir, 'index.html'), INDEX_FIXTURE);
+    writeFileSync(join(distDir, 'view.html'), VIEW_FIXTURE);
+    writeFileSync(join(distDir, 'assets', 'main-abc123.js'), 'console.log("asset")');
+
+    const app = await buildApp({ db, distDir });
+
+    // A stale lazy-chunk request must not receive index.html as "JavaScript".
+    const missingJs = await app.inject({ method: 'GET', url: '/assets/History-def456.js' });
+    assert.equal(missingJs.statusCode, 404);
+    assert.equal(missingJs.headers['content-type'], 'application/json; charset=utf-8');
+    assert.deepEqual(missingJs.json(), { error: 'not found' });
+    assert.doesNotMatch(missingJs.body, /<title>app<\/title>/);
+
+    // Query strings are ignored and nested asset paths follow the same rule.
+    const missingCss = await app.inject({ method: 'GET', url: '/assets/index-0.css?v=1' });
+    assert.equal(missingCss.statusCode, 404);
+    const missingNested = await app.inject({ method: 'GET', url: '/assets/chunks/Reports-abc.js' });
+    assert.equal(missingNested.statusCode, 404);
+
+    // Existing assets keep being served, and both shells keep deep links.
+    const asset = await app.inject({ method: 'GET', url: '/assets/main-abc123.js' });
+    assert.equal(asset.statusCode, 200);
+    assert.equal(asset.body, 'console.log("asset")');
+    assertWriterShell(await app.inject({ method: 'GET', url: '/' }), '/');
+    assertWriterShell(await app.inject({ method: 'GET', url: '/reports' }), '/reports');
+    assertPartnerShell(await app.inject({ method: 'GET', url: '/view/reports' }), '/view/reports');
+
+    await app.close();
+  });
+});
+
 // @fastify/static guards its wildcard route against path traversal. These
 // encoded forms are the historical bypass shapes (encoded dots, encoded
 // separators, double encoding, and case variants for case-insensitive

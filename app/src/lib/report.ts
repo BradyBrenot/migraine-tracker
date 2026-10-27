@@ -31,20 +31,41 @@ export interface ReportInput {
 /** Safety cap on the month list; real data never spans centuries. */
 const MAX_MONTHS = 2400;
 
+/**
+ * Report formatters keyed by style + zone. Called once per month/attack line
+ * during an export, and the key set is bounded by the timezones configured on
+ * this device.
+ */
+const reportFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function reportFormatter(
+  style: string,
+  timeZone: string,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  const key = `${style}\u0000${timeZone}`;
+  let formatter = reportFormatters.get(key);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat(undefined, options);
+    reportFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 function formatMonth(key: DayKey, timeZone: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return reportFormatter('month', timeZone, {
     month: 'long', year: 'numeric', timeZone,
   }).format(new Date(dayKeyStartMs(key, timeZone)));
 }
 
 function formatInstant(ms: number, timeZone: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return reportFormatter('instant', timeZone, {
     dateStyle: 'medium', timeStyle: 'short', timeZone,
   }).format(new Date(ms));
 }
 
 function formatDay(ms: number, timeZone: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return reportFormatter('day', timeZone, {
     year: 'numeric', month: 'short', day: 'numeric', timeZone,
   }).format(new Date(ms));
 }
@@ -139,19 +160,23 @@ export function buildMonthlyTrend(input: {
     }
 
     const monthMeds = parsedMeds.filter(({ ts }) => ts >= mStart && ts < mEnd);
+    // One pass over this month's doses fills every med bucket; the row still
+    // exposes every known med id (0 when unused) in `allMedIds` order.
+    const daySets = new Map<string, Set<DayKey>>();
+    for (const { med, ts } of monthMeds) {
+      const days = daySets.get(med.medId) ?? new Set<DayKey>();
+      days.add(localDayKey(ts, timeZone));
+      daySets.set(med.medId, days);
+    }
     const medDays: Record<string, number> = {};
     for (const id of medIds) {
-      medDays[id] = new Set(
-        monthMeds
-          .filter(({ med }) => med.medId === id)
-          .map(({ ts }) => localDayKey(ts, timeZone)),
-      ).size;
+      medDays[id] = daySets.get(id)?.size ?? 0;
     }
 
     // No attack overlap and no medication = unknown month, not a clear one.
     const hasData = attackCount > 0 || monthMeds.length > 0;
     rows.push({
-      month: new Intl.DateTimeFormat(undefined, { month: 'short', timeZone })
+      month: reportFormatter('monthShort', timeZone, { month: 'short', timeZone })
         .format(new Date(mStart)),
       attackDays: hasData ? days.size : null,
       attacks: attackCount,
@@ -188,6 +213,12 @@ export function buildReportLines(input: ReportInput): string[] {
     else medsByAttack.set(attackId, [med]);
   }
 
+  // Parse medication timestamps once instead of per month and for the anchor.
+  // Invalid stamps are skipped everywhere they would affect output.
+  const parsedMeds = meds
+    .map((med) => ({ med, ts: Date.parse(med.ts) }))
+    .filter(({ ts }) => Number.isFinite(ts));
+
   // Earliest usable record month anchors the month list. Unparseable strings
   // and instants outside the day-key domain are ignored (Math.min over NaN
   // would poison the whole list, as would a year-275760 timestamp).
@@ -197,10 +228,8 @@ export function buildReportLines(input: ReportInput): string[] {
     const key = monthKeyOf(times.startMs, timeZone);
     if (key !== null && key < firstMonthKey) firstMonthKey = key;
   }
-  for (const med of meds) {
-    const t = Date.parse(med.ts);
-    if (!Number.isFinite(t)) continue;
-    const key = monthKeyOf(t, timeZone);
+  for (const { ts } of parsedMeds) {
+    const key = monthKeyOf(ts, timeZone);
     if (key !== null && key < firstMonthKey) firstMonthKey = key;
   }
 
@@ -243,10 +272,9 @@ export function buildReportLines(input: ReportInput): string[] {
       }
     }
 
-    const monthMeds = meds.filter((m) => {
-      const t = Date.parse(m.ts);
-      return Number.isFinite(t) && t >= monthStartMs && t < monthEndMs;
-    });
+    const monthMeds = parsedMeds
+      .filter(({ ts }) => ts >= monthStartMs && ts < monthEndMs)
+      .map(({ med }) => med);
 
     // A month is "known" when anything was recorded in it: an attack that
     // starts or spans into it, or any medication. Only then is 0 attack days

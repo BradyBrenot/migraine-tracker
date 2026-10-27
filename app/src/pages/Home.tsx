@@ -131,12 +131,27 @@ export default function Home() {
   // medId. Recomputed on clock ticks and after optimistic log/undo so the hint
   // appears/disappears without delaying the one-tap log. Preventive cards are
   // excluded — this context belongs to the acute grid only.
+  //
+  // One pass over the medication history builds the latest usable instant per
+  // medId (previously each acute card rescanned the whole history). Invalid
+  // timestamps are ignored rather than compared; the latest usable event wins
+  // regardless of attackId, notes, or dose.
   const recentDoseHints = useMemo(() => {
+    const latestByMed = new Map<string, number>();
+    for (const med of state.meds) {
+      const ms = Date.parse(med.ts);
+      if (!Number.isFinite(ms)) continue;
+      const latest = latestByMed.get(med.medId);
+      if (latest === undefined || ms > latest) latestByMed.set(med.medId, ms);
+    }
     const hints = new Map<string, string>();
     for (const m of MED_CATALOG) {
       if (m.kind === 'preventive') continue;
-      const ageMs = recentDoseAgeMs(state.meds, m.id, now);
-      if (ageMs !== null) hints.set(m.id, `Last ${doseAgeText(ageMs)} ago`);
+      const latest = latestByMed.get(m.id);
+      if (latest === undefined) continue;
+      const ageMs = now - latest;
+      if (ageMs > RECENT_DOSE_WINDOW_MS || ageMs < -CLOCK_SKEW_TOLERANCE_MS) continue;
+      hints.set(m.id, `Last ${doseAgeText(Math.max(0, ageMs))} ago`);
     }
     return hints;
   }, [state.meds, now]);

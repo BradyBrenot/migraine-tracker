@@ -4,7 +4,7 @@ import type { Mock } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type {
-  Attack, DayState, Refill, StockBaseline, TrackerState, Workout,
+  Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout,
 } from '@/types';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 
@@ -165,6 +165,18 @@ function makeAttack(partial: Partial<Attack> & { id: string; start: string }): A
   };
 }
 
+function makeMed(partial: Partial<MedEvent> & { id: string; ts: string }): MedEvent {
+  return {
+    medId: 'nurtec',
+    dose: '',
+    quantity: null,
+    attackId: null,
+    notes: '',
+    source: 'manual',
+    ...partial,
+  };
+}
+
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -182,6 +194,44 @@ afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
   captured = null;
+});
+
+describe('History attack-linked medication grouping', () => {
+  it('attributes meds per attack newest-first and ignores unlinked or non-string links', async () => {
+    seedState({
+      attacks: [
+        makeAttack({ id: 'a', start: '2026-05-10T08:00:00.000Z', end: '2026-05-10T10:00:00.000Z' }),
+        makeAttack({ id: 'b', start: '2026-05-12T08:00:00.000Z', end: '2026-05-12T10:00:00.000Z' }),
+      ],
+      meds: [
+        // Newest overall, linked to the newer attack.
+        makeMed({ id: 'b-med', medId: 'ibuprofen', ts: '2026-05-11T12:00:00.000Z', attackId: 'b' }),
+        // Older attack: newest dose first inside its row.
+        makeMed({ id: 'a-new', medId: 'tylenol', ts: '2026-05-10T12:00:00.000Z', attackId: 'a' }),
+        makeMed({ id: 'a-old', medId: 'nurtec', ts: '2026-05-10T08:00:00.000Z', attackId: 'a' }),
+        // Unlinked and legacy non-string links match no attack id.
+        makeMed({ id: 'unlinked', medId: 'naproxen', ts: '2026-05-13T12:00:00.000Z', attackId: null }),
+        {
+          ...makeMed({ id: 'garbage-link', medId: 'naproxen', ts: '2026-05-14T12:00:00.000Z' }),
+          attackId: 42 as unknown as string,
+        },
+      ],
+    });
+
+    mountHistory();
+    await waitForSync();
+
+    // Both attack rows render (the writer tree exposes edit controls).
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(2));
+
+    // Rows are newest-first; each row's chips keep the newest-first meds order.
+    const chipNames = screen
+      .getAllByText(/^(Tylenol|Nurtec|Ibuprofen)$/)
+      .map((element) => element.textContent);
+    expect(chipNames).toEqual(['Ibuprofen', 'Tylenol', 'Nurtec']);
+    // The unlinked and legacy non-string links never attach to a row.
+    expect(screen.queryByText('Naproxen')).toBeNull();
+  });
 });
 
 describe('History attack rows with inconsistent durations', () => {

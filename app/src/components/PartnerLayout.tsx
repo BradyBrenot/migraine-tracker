@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router';
 import { BarChart3, CalendarDays, Home, List, Lock } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import RouteBoundary from '@/components/RouteBoundary';
 import type { SyncStatus } from '../../shared/sync.ts';
 
 const tabs = [
@@ -107,7 +108,9 @@ export default function PartnerLayout() {
       </header>
 
       <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 sm:pt-6">
-        <Outlet />
+        <RouteBoundary>
+          <Outlet />
+        </RouteBoundary>
       </main>
 
       {/* mobile bottom nav */}

@@ -1,16 +1,48 @@
+/**
+ * Browser-locale display helpers.
+ *
+ * `Intl.DateTimeFormat` construction is comparatively expensive and these
+ * helpers run inside list rows and the 42-cell Calendar grid, so each style is
+ * built once at module load. The output is identical to the previous
+ * `Date#toLocale*String([], { ... })` calls.
+ *
+ * An unparseable date must stay non-throwing: the `toLocale*` methods return
+ * the literal "Invalid Date", whereas `Intl.DateTimeFormat#format` would throw
+ * a RangeError. Invalid instants are surfaced as that same text.
+ */
+
+const INVALID_DATE = 'Invalid Date';
+
+const TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+const DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+});
+
+const DATE_FULL_FORMAT = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+});
+
+function formatWith(d: Date, formatter: Intl.DateTimeFormat): string {
+  return Number.isNaN(d.getTime()) ? INVALID_DATE : formatter.format(d);
+}
+
 export function fmtTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return formatWith(new Date(iso), TIME_FORMAT);
 }
 
 export function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return formatWith(new Date(iso), DATE_FORMAT);
 }
 
 export function fmtDateFull(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  return formatWith(new Date(iso), DATE_FULL_FORMAT);
 }
 
 /** "2h 15m" / "45m" / "3d 2h" */

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout } from '@/types';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
@@ -186,6 +186,14 @@ function statCard(label: string): HTMLElement {
   return screen.getByText(label).parentElement as HTMLElement;
 }
 
+/** Inline width of the medication-days bar row for a "<n> days · <n> doses" label. */
+function medUsageBarWidth(label: string): string {
+  const labelEl = screen.getByText(label);
+  const row = labelEl.parentElement?.parentElement;
+  const bar = row?.lastElementChild?.firstElementChild as HTMLElement | null | undefined;
+  return bar?.style.width ?? '';
+}
+
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -279,5 +287,33 @@ describe('Reports selected-month cards', () => {
     expect(statCard('Days affected').textContent).toContain('Days affected3');
     // ...but is excluded from the denominator: (0 + 4) / 2 = 2.0, not 1.3.
     expect(statCard('Avg peak pain').textContent).toContain('2.0');
+  });
+
+  it('aggregates selected-month med days per med and scales bars to the busiest med', async () => {
+    seedState({
+      meds: [
+        // Two Nurtec doses on one day plus one on another: 2 distinct days.
+        makeMed({ id: 'nurtec-1', ts: '2026-10-05T08:00:00.000Z' }),
+        makeMed({ id: 'nurtec-2', ts: '2026-10-05T18:00:00.000Z' }),
+        makeMed({ id: 'nurtec-3', ts: '2026-10-07T08:00:00.000Z' }),
+        makeMed({ id: 'tylenol-1', medId: 'tylenol', ts: '2026-10-06T08:00:00.000Z' }),
+        // Unparseable legacy timestamps never create a usage row.
+        makeMed({ id: 'bad', medId: 'ibuprofen', ts: 'not-a-date' }),
+      ],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    await waitFor(() => expect(screen.getByText('2 days · 3 doses')).toBeTruthy());
+    expect(screen.getByText('1 days · 1 doses')).toBeTruthy();
+
+    const medSection = screen.getByText('Medication days').closest('section');
+    if (!medSection) throw new Error('medication days section not found');
+    expect(within(medSection).queryByText('Ibuprofen')).toBeNull();
+
+    // Nurtec has the most distinct days this month: full width; Tylenol 1/2.
+    expect(medUsageBarWidth('2 days · 3 doses')).toBe('100%');
+    expect(medUsageBarWidth('1 days · 1 doses')).toBe('50%');
   });
 });

@@ -61,6 +61,20 @@ export default function History() {
     () => [...state.meds].sort((a, b) => b.ts.localeCompare(a.ts)),
     [state.meds],
   );
+  // Medications grouped by linked attack ONCE (newest-first, matching the meds
+  // list). Previously every attack row rescanned the whole medication history.
+  // A null/non-string attackId can never equal an attack id and is skipped.
+  const medsByAttack = useMemo(() => {
+    const byAttack = new Map<string, MedEvent[]>();
+    for (const med of meds) {
+      const attackId = med.attackId;
+      if (typeof attackId !== 'string') continue;
+      const bucket = byAttack.get(attackId);
+      if (bucket) bucket.push(med);
+      else byAttack.set(attackId, [med]);
+    }
+    return byAttack;
+  }, [meds]);
   const refills = useMemo(
     () => [...state.refills].sort((a, b) => b.date.localeCompare(a.date)),
     [state.refills],
@@ -206,7 +220,7 @@ export default function History() {
             const durLabel = elapsed !== null && elapsed >= 0 && !endBeforeStart
               ? fmtDuration(elapsed)
               : '—';
-            const attackMeds = meds.filter((m) => m.attackId === a.id);
+            const attackMeds = medsByAttack.get(a.id) ?? [];
             return (
               <div key={a.id} className="rounded-xl border border-slate-800/70 bg-slate-900/70 p-3">
                 <div className="flex items-center gap-3">

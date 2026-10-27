@@ -110,11 +110,48 @@ describe('App route provider composition', () => {
     renderAt('/view/calendar');
 
     await waitFor(() => expect(screen.getByText('Live')).toBeTruthy());
-    expect(screen.getByText('Medication limits')).toBeTruthy();
+    // Calendar is a lazy chunk; wait for it inside the already-mounted shell.
+    await waitFor(
+      () => expect(screen.getByText('Medication limits')).toBeTruthy(),
+      { timeout: 5000 },
+    );
     // The viewer has no schedule control and no writer navigation.
     expect(screen.queryByRole('button', { name: /Schedule next/ })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it('resolves a lazily loaded partner page inside the mounted viewer shell', async () => {
+    renderAt('/view/history');
+
+    // The shell (nav + freshness) renders while the page chunk loads.
+    await waitFor(() => expect(screen.getByText('Live')).toBeTruthy());
+    expect(screen.getByText('Partner view')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+
+    // History is a lazy chunk: its tab list appears without unmounting the shell.
+    await waitFor(
+      () => expect(screen.getByRole('tab', { name: /Attacks/ })).toBeTruthy(),
+      { timeout: 5000 },
+    );
+    expect(screen.getAllByRole('link', { name: 'History' })).toHaveLength(2);
+    expect(screen.getByText('Partner view')).toBeTruthy();
+  });
+
+  it('resolves a lazily loaded writer page with the writer chrome mounted', async () => {
+    renderAt('/calendar');
+
+    // Navigation renders immediately; only the page body is a lazy chunk.
+    await waitFor(() =>
+      expect(screen.getAllByRole('link', { name: 'Settings' }).length).toBeGreaterThan(0));
+    await waitFor(
+      () => expect(screen.getByText('Medication limits')).toBeTruthy(),
+      { timeout: 5000 },
+    );
+
+    expect(screen.getByText(/Migraine Tracker/)).toBeTruthy();
+    expect(screen.getAllByRole('link', { name: 'Calendar' })).toHaveLength(2);
+    await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull());
   });
 
   it('still mounts the normal writer store with Settings outside /view', async () => {

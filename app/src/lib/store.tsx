@@ -1761,6 +1761,11 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
 
   const inFlightRef = useRef(false);
   const mountedRef = useRef(false);
+  // Exact JSON text of the last successfully applied export payload. A refresh
+  // that returns byte-identical data must not replace the snapshot identities
+  // (every consuming page memoizes on those arrays); a heuristic comparison is
+  // deliberately avoided.
+  const lastPayloadJsonRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -1768,7 +1773,11 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
     try {
       const data = await backend.exportAll();
       if (!mountedRef.current) return;
-      setState((prev) => ({ ...emptyState(), ...serverSnapshotToState(data, prev.timezone) }));
+      const payloadJson = JSON.stringify(data);
+      if (payloadJson !== lastPayloadJsonRef.current) {
+        lastPayloadJsonRef.current = payloadJson;
+        setState((prev) => ({ ...emptyState(), ...serverSnapshotToState(data, prev.timezone) }));
+      }
       setServerMode(true);
       setStatus('synced');
     } catch {

@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router';
 import { Home, CalendarDays, BarChart3, List, Settings } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import RouteBoundary from '@/components/RouteBoundary';
 import type { SyncStatus } from '../../shared/sync.ts';
 import { Toaster } from '@/components/ui/sonner';
 
@@ -84,7 +85,9 @@ export default function Layout() {
       </header>
 
       <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 sm:pt-6">
-        <Outlet />
+        <RouteBoundary>
+          <Outlet />
+        </RouteBoundary>
       </main>
 
       {/* mobile bottom nav */}

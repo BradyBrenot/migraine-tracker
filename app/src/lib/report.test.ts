@@ -358,6 +358,86 @@ describe('buildReportLines: robustness and span', () => {
   });
 });
 
+describe('buildMonthlyTrend: single-pass medication aggregation', () => {
+  it('counts distinct days per med, keeps unused ids at zero, and skips invalid stamps', () => {
+    const rows = buildMonthlyTrend({
+      attacks: [],
+      meds: [
+        makeMed(iso('2026-06-02', '08:00:00.000'), 'nurtec'),
+        makeMed(iso('2026-06-02', '09:00:00.000'), 'nurtec'),
+        makeMed(iso('2026-06-03', '09:00:00.000'), 'tylenol'),
+        makeMed(iso('2026-06-03', '10:00:00.000'), 'custom-med'),
+        // Unparseable legacy rows are ignored rather than counted or thrown on.
+        makeMed('not-a-date', 'nurtec'),
+        makeMed('also-garbage', 'custom-med'),
+      ],
+      timeZone: UTC,
+      nowMs: Date.UTC(2026, 5, 15),
+    });
+
+    const june = rows[rows.length - 1];
+    expect(june).toMatchObject({
+      attackDays: 0,
+      attacks: 0,
+      nurtec: 1,
+      tylenol: 1,
+      'custom-med': 1,
+      ibuprofen: 0,
+      naproxen: 0,
+      emgality: 0,
+      botox: 0,
+    });
+    // Shape and key order are unchanged: all known ids, then custom ids.
+    expect(Object.keys(june)).toEqual([
+      'month', 'attackDays', 'attacks', 'avgPain',
+      'nurtec', 'tylenol', 'ibuprofen', 'naproxen', 'emgality', 'botox', 'custom-med',
+    ]);
+  });
+
+  it('still counts a multi-day attack and a med-only month in one pass', () => {
+    const rows = buildMonthlyTrend({
+      attacks: [makeAttack({
+        start: iso('2026-05-30', '22:00:00.000'),
+        end: iso('2026-06-02', '03:00:00.000'),
+      })],
+      meds: [
+        makeMed(iso('2026-06-04', '08:00:00.000'), 'nurtec'),
+        makeMed(iso('2026-06-05', '08:00:00.000'), 'tylenol'),
+      ],
+      timeZone: UTC,
+      nowMs: Date.UTC(2026, 5, 15),
+    });
+
+    const may = rows[rows.length - 2];
+    const june = rows[rows.length - 1];
+    expect(may).toMatchObject({ attackDays: 2, attacks: 1, nurtec: 0, tylenol: 0 });
+    expect(june).toMatchObject({
+      attackDays: 2, attacks: 1, nurtec: 1, tylenol: 1,
+    });
+  });
+});
+
+describe('buildReportLines: month medication section', () => {
+  it('lists medications in input order with per-med day and dose counts', () => {
+    // Two Nurtec doses on different days plus one Tylenol dose; input order is
+    // Tylenol first, so the section must keep that order.
+    const june = section(build({
+      meds: [
+        makeMed(iso('2026-06-03', '08:00:00.000'), 'tylenol'),
+        makeMed(iso('2026-06-02', '08:00:00.000'), 'nurtec'),
+        makeMed(iso('2026-06-04', '08:00:00.000'), 'nurtec'),
+      ],
+      nowMs: Date.UTC(2026, 5, 15),
+    }), 'June 2026');
+
+    const medLines = june.filter((line) => line.startsWith('- '));
+    expect(medLines).toEqual([
+      '- Tylenol: 1 days, 1 doses',
+      '- Nurtec: 2 days, 2 doses',
+    ]);
+  });
+});
+
 describe('buildReportLines: attack-linked medications', () => {
   it('lists only each attack\'s linked meds, in input order, for interleaved records', () => {
     const a1 = makeAttack({

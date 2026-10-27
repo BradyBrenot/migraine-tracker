@@ -654,6 +654,13 @@ export async function buildApp({
     app.setNotFoundHandler((req, reply) => {
       if (req.method === 'GET' && !req.url.startsWith('/api/')) {
         const path = req.url.split('?')[0];
+        // Hashed build assets are content-addressed: one that is missing (e.g.
+        // a cached document from before a redeploy) must be a plain 404, never
+        // the HTML shell, or the browser parses index.html as JS/CSS and lazy
+        // chunk loads fail with a confusing MIME/parse error.
+        if (path === '/assets' || path.startsWith('/assets/')) {
+          return reply.code(404).send({ error: 'not found' });
+        }
         const partner = partnerEntry && (path === '/view' || path.startsWith('/view/'));
         return reply.sendFile(partner ? partnerEntry : 'index.html');
       }

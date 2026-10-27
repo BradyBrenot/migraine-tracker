@@ -102,6 +102,17 @@ function readPersisted(): TrackerState {
   return JSON.parse(raw) as TrackerState;
 }
 
+/**
+ * The start CTA also opens the pain dialog, which hides the page behind
+ * `aria-hidden`. Close it before querying page roles.
+ */
+async function closePainDialog(): Promise<void> {
+  const close = screen.queryByRole('button', { name: 'Close' });
+  if (!close) return;
+  fireEvent.click(close);
+  await waitFor(() => expect(screen.queryByText('How bad is the pain right now?')).toBeNull());
+}
+
 function seedState(partial: Partial<TrackerState>): void {
   const state: TrackerState = {
     attacks: [],
@@ -482,32 +493,32 @@ describe('Home wellness logging', () => {
     expect(screen.getByRole('button', { name: 'Strength' })).toBeTruthy();
   });
 
-  it('infers attack rest from an ended attack overlapping today when no record exists', async () => {
+  it('infers an Off day from an ended attack overlapping today when no record exists', async () => {
     const now = Date.now();
     seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
 
     mountHome();
     await waitForSync();
 
-    // Collapsed inferred Attack state: display pill + guidance, but no choices.
-    // Movement stays available because it is never inferred as impossible.
-    expect(screen.getByText('Attack')).toBeTruthy();
+    // Attack days are Off days. The record-less day shows Off with no choices,
+    // and movement stays available because it is never inferred as impossible.
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText('Attack')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+    expect(screen.getByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
 
-    // Change offers Well/Off only, and an explicit recovery choice wins.
+    // Change still offers Well/Off, and an explicit recovery choice wins.
     fireEvent.click(screen.getByRole('button', { name: 'Change' }));
     expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Well' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy());
-    expect(screen.getByText('Normal routine today.')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('Normal routine today.')).toBeTruthy());
   });
 
   it('keeps an active attack over an earlier Well record and retains wellness + movement', async () => {
@@ -516,7 +527,7 @@ describe('Home wellness logging', () => {
     seedState({
       timezone: 'UTC',
       attacks: [makeAttack(now)],
-      dayStates: [{ ...makeDayState(todayKey), status: 'well' }],
+      dayStates: [{ ...makeDayState(todayKey), status: 'well', notes: 'kept note' }],
     });
 
     mountHome();
@@ -526,8 +537,10 @@ describe('Home wellness logging', () => {
     // no longer flip the pill to "Well" while the banner says otherwise.
     expect(screen.getAllByText('Rest if you need to — movement is optional.')).toHaveLength(1);
     expect(screen.queryByText('Well')).toBeNull();
-    // The wellness controls and movement stay on screen during an attack.
-    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+    // Locked while the attack is active: Note stays, Change and Well/Off do not.
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Note' })).toBeTruthy();
     expect(screen.getByText('This week:')).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
@@ -536,14 +549,35 @@ describe('Home wellness logging', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
 
     await waitFor(() => expect(screen.queryByText('Attack in progress')).toBeNull());
-    // The explicit Well record wins over the ended attack's inferred Attack day.
-    expect(screen.getByText('Well')).toBeTruthy();
-    expect(screen.getByText('Normal routine today.')).toBeTruthy();
+    // Ending a restored active attack applies the attack-day rule too: the day
+    // becomes Off (Change enabled), never Well, with the note preserved.
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText('Well')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
     expect(screen.queryByText('Rest if you need to — movement is optional.')).toBeNull();
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'off',
+      notes: 'kept note',
+    }));
+    expect(api.putDayState).toHaveBeenCalledWith(
+      todayKey,
+      { status: 'off', notes: 'kept note' },
+    );
+
+    // A Well chosen after the attack is explicit and persists untouched.
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Well' }));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'well',
+      notes: 'kept note',
+    }));
+    expect(screen.getByText('Normal routine today.')).toBeTruthy();
   });
 
-  it('latches an Attack day record when a note is saved on an inferred attack day', async () => {
+  it('latches an Off day state when a note is saved on an inferred attack day', async () => {
     const now = Date.now();
     const todayKey = localDayKey(now, 'UTC');
     seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
@@ -551,7 +585,7 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+    expect(screen.getByText('Off')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
 
@@ -565,12 +599,12 @@ describe('Home wellness logging', () => {
     const persisted = readPersisted();
     expect(persisted.dayStates[0]).toMatchObject({
       day: todayKey,
-      status: 'attack',
+      status: 'off',
       notes: 'postdrome, low energy',
     });
     expect(api.putDayState).toHaveBeenCalledWith(
       todayKey,
-      { status: 'attack', notes: 'postdrome, low energy' },
+      { status: 'off', notes: 'postdrome, low energy' },
     );
 
     // Change to Well keeps the latched note (store notes-preservation path).
@@ -592,16 +626,16 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+    expect(screen.getByText('Off')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Note' }));
     fireEvent.change(screen.getByLabelText('Day note'), { target: { value: '   ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     // A blank draft has nothing to persist: the editor closes and no
-    // valueless Attack record is latched.
+    // valueless record is latched.
     expect(screen.queryByLabelText('Day note')).toBeNull();
-    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.getByText('Off')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
     expect(readPersisted().dayStates).toHaveLength(0);
@@ -636,12 +670,13 @@ describe('Home wellness logging', () => {
       mountHome();
       await waitForSync();
 
-      // Started yesterday but ended today: collapsed inferred Attack day.
-      expect(screen.getByText('Attack')).toBeTruthy();
+      // Started yesterday but ended today: record-less attack day infers Off.
+      expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.queryByText('Attack')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-      expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+      expect(screen.getByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeTruthy();
       expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
       expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
     } finally {
@@ -1532,6 +1567,51 @@ describe('Home attack undo and configured Nurtec rule', () => {
     expect(api.deleteAttack).not.toHaveBeenCalled();
   });
 
+  it('reopening via end-Undo writes no day state, and the later real end leaves the day Off', async () => {
+    const now = Date.now();
+    const todayKey = localDayKey(now, 'UTC');
+    seedState({
+      timezone: 'UTC',
+      attacks: [makeAttack(now)],
+      dayStates: [{ ...makeDayState(todayKey), status: 'well', notes: 'kept' }],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    // First real end: the restored active attack leaves today Off.
+    fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
+    await waitFor(() => expect(captured!.state.attacks[0].end).not.toBeNull());
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      status: 'off',
+      notes: 'kept',
+    }));
+    expect(api.putDayState).toHaveBeenCalledTimes(1);
+
+    const endCall = (sonner.toast.success as Mock).mock.calls.find(
+      ([message]) => String(message) === 'Attack ended — logged.',
+    );
+    expect(endCall).toBeTruthy();
+    const undoEnd = endCall![1].action as { label: string; onClick: () => void };
+
+    // The user goes back to an explicit Well after the attack.
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Well' }));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({ status: 'well' }));
+    const writesBeforeReopen = api.putDayState.mock.calls.length;
+
+    // Reopening is a history edit: today's Well must survive untouched.
+    act(() => undoEnd.onClick());
+    await waitFor(() => expect(captured!.state.attacks[0].end).toBeNull());
+    expect(api.putDayState).toHaveBeenCalledTimes(writesBeforeReopen);
+    expect(readPersisted().dayStates[0]).toMatchObject({ status: 'well', notes: 'kept' });
+
+    // The later REAL end enforces Off again, with Change available.
+    fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({ status: 'off' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy());
+  });
+
   it('derives the Nurtec badge from the configured rule and window', async () => {
     const now = Date.now();
     seedState({
@@ -1555,6 +1635,84 @@ describe('Home attack undo and configured Nurtec rule', () => {
     const badge = screen.getByText('2/10');
     expect(badge.getAttribute('title')).toContain('2 of 10 allowed days');
     expect(badge.getAttribute('title')).toContain('last 14 days');
+  });
+});
+
+describe('Home combined painkiller usage chip', () => {
+  it('shows the same combined Painkillers chip on all three acute analgesics', async () => {
+    const now = Date.now();
+    const daysAgo = (n: number) => new Date(now - n * 86400000).toISOString();
+    seedState({
+      timezone: 'UTC',
+      // Mismatched rules resolve conservatively: lowest limit (8), widest
+      // window (45) across Tylenol, Ibuprofen and Naproxen.
+      rules: {
+        tylenol: { limit: 8, windowDays: 45 },
+        ibuprofen: { limit: 15, windowDays: 30 },
+        naproxen: { limit: 10, windowDays: 30 },
+      },
+      meds: [
+        // Two painkillers on one day count once; Naproxen on another day is
+        // only inside the wider 45-day window.
+        {
+          id: 'pk-1', medId: 'tylenol', ts: daysAgo(3), dose: '', quantity: null,
+          attackId: null, notes: '', source: 'manual',
+        },
+        {
+          id: 'pk-2', medId: 'ibuprofen', ts: daysAgo(3), dose: '', quantity: null,
+          attackId: null, notes: '', source: 'manual',
+        },
+        {
+          id: 'pk-3', medId: 'naproxen', ts: daysAgo(35), dose: '', quantity: null,
+          attackId: null, notes: '', source: 'manual',
+        },
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    // One aggregate chip, identical on every painkiller card.
+    const chips = screen.getAllByText('2/8');
+    expect(chips).toHaveLength(3);
+    for (const chip of chips) {
+      expect(chip.getAttribute('title')).toContain('Painkillers combined');
+      expect(chip.getAttribute('title')).toContain('2 of 8 allowed days');
+      expect(chip.getAttribute('title')).toContain('last 45 days');
+      expect(chip.getAttribute('aria-label')).toContain('Painkillers combined');
+      expect(chip.getAttribute('aria-label')).toContain('last 45 days');
+      expect(chip.getAttribute('aria-label')).toContain('within limit');
+      expect(chip.className).toContain('bg-slate-800');
+    }
+
+    // Nurtec keeps its own independent rolling count.
+    expect(screen.getAllByText('0/15')).toHaveLength(1);
+  });
+
+  it('names the over-limit state in the combined painkiller accessible label', async () => {
+    seedState({
+      timezone: 'UTC',
+      rules: {
+        tylenol: { limit: 2, windowDays: 30 },
+        ibuprofen: { limit: 2, windowDays: 30 },
+        naproxen: { limit: 2, windowDays: 30 },
+      },
+      meds: [1, 2, 3].map((n) => ({
+        id: `pk-over-${n}`, medId: 'tylenol' as const,
+        ts: new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString(), dose: '',
+        quantity: null, attackId: null, notes: '', source: 'manual' as const,
+      })),
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const chips = screen.getAllByText('3/2');
+    expect(chips).toHaveLength(3);
+    for (const chip of chips) {
+      expect(chip.getAttribute('aria-label')).toContain('over limit');
+      expect(chip.className).toContain('bg-red-950');
+    }
   });
 });
 
@@ -1583,6 +1741,21 @@ describe('Home content order (approved design)', () => {
     expect(isBefore(movement, preventive)).toBe(true);
     expect(screen.getByRole('button', { name: /Emgality/ })).toBeTruthy();
     expect(screen.getByText('How was today?')).toBeTruthy();
+  });
+
+  it('keeps the Movement label and controls on one compact wrapping row', async () => {
+    seedState({ timezone: 'UTC' });
+    mountHome();
+    await waitForSync();
+
+    const label = screen.getByText('Movement');
+    const row = label.parentElement as HTMLElement;
+    expect(row.className).toContain('flex-wrap');
+    // Label and both controls share the row container (one line when it fits).
+    expect(row.contains(screen.getByRole('button', { name: /^Strength/ }))).toBe(true);
+    expect(row.contains(screen.getByRole('button', { name: /^Cardio/ }))).toBe(true);
+    // Weekly progress is still rendered in the same compact block.
+    expect(row.contains(screen.getByText('This week:'))).toBe(true);
   });
 
   it('keeps the same order while an attack is active (nothing hidden)', async () => {
@@ -1652,26 +1825,18 @@ describe('Home attack undo safety', () => {
 });
 
 describe('Home acknowledgement and low-limit warnings', () => {
-  it('acknowledges an explicit day choice made while an attack is active', async () => {
-    const todayKey = localDayKey(Date.now(), 'UTC');
+  it('shows Attack with no Change, choices, or day-marked text while an attack is active', async () => {
     seedState({ timezone: 'UTC', attacks: [makeAttack(Date.now())] });
     mountHome();
     await waitForSync();
 
-    // Attack status stays primary under the banner.
+    // Attack status stays primary under the banner, and the day check-in is
+    // locked for the attack: no Well/Off and no Change, anywhere.
     expect(screen.getByText('Attack')).toBeTruthy();
     expect(screen.queryByText(/day marked/)).toBeNull();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Off' }));
-
-    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
-      day: todayKey,
-      status: 'off',
-    }));
-    // Immediate, visible feedback for the recorded choice.
-    expect(screen.getByText('day marked Off')).toBeTruthy();
-    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
   });
 
   it('does not warn for an unused low limit but warns once a day is used', async () => {
@@ -1707,5 +1872,220 @@ describe('Home acknowledgement and low-limit warnings', () => {
     const used = within(screen.getByRole('button', { name: /Nurtec/ })).getByText('1/2');
     expect(used.className).toContain('bg-amber-950');
     expect(used.className).not.toContain('bg-red-950');
+  });
+});
+
+describe('Home attack-day rule', () => {
+  it('turns a prior Well day Off for the active attack and restores Choice after it ends', async () => {
+    const now = Date.now();
+    const todayKey = localDayKey(now, 'UTC');
+    seedState({
+      timezone: 'UTC',
+      dayStates: [{
+        ...makeDayState(todayKey),
+        status: 'well',
+        notes: 'good day',
+      }],
+    });
+
+    mountHome();
+    await waitForSync();
+    expect(screen.getByText('Well')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
+    await waitFor(() => expect(screen.getByText('Attack in progress')).toBeTruthy());
+    await closePainDialog();
+
+    // Attack is displayed, with no Change and no "day marked …" announcement.
+    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+    expect(screen.queryByText(/day marked/)).toBeNull();
+
+    // The real transition rewrote today's existing record to Off, notes intact.
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'off',
+      notes: 'good day',
+    }));
+    expect(api.putDayState).toHaveBeenCalledWith(
+      todayKey,
+      { status: 'off', notes: 'good day' },
+    );
+
+    // Ending the attack keeps the day Off but returns Change and the choices.
+    fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
+    await waitFor(() => expect(screen.queryByText('Attack in progress')).toBeNull());
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Well' }));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'well',
+      notes: 'good day',
+    }));
+    expect(screen.getByText('Normal routine today.')).toBeTruthy();
+  });
+
+  it('starts a real attack without creating a day-state row when none exists', async () => {
+    seedState({ timezone: 'UTC' });
+
+    mountHome();
+    await waitForSync();
+    expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(1));
+    await closePainDialog();
+
+    // Inference covers record-less attack days: no row is written, so an
+    // unperformed check-in stays unperformed.
+    expect(captured!.state.dayStates).toHaveLength(0);
+    expect(readPersisted().dayStates).toHaveLength(0);
+    expect(api.putDayState).not.toHaveBeenCalled();
+    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+  });
+
+  it('writes nothing when a mount restores an already-active attack', async () => {
+    const now = Date.now();
+    const todayKey = localDayKey(now, 'UTC');
+    seedState({
+      timezone: 'UTC',
+      attacks: [makeAttack(now)],
+      dayStates: [{
+        ...makeDayState(todayKey),
+        status: 'well',
+        notes: 'kept',
+      }],
+    });
+
+    mountHome();
+    await waitForSync();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // No hydration/mount effect applies the attack-day rule: the restored
+    // active attack must not rewrite the day or diverge from the server.
+    expect(api.putDayState).not.toHaveBeenCalled();
+    expect(readPersisted().dayStates[0]).toMatchObject({ status: 'well', notes: 'kept' });
+    expect(screen.getByText('Attack')).toBeTruthy();
+  });
+
+  it('restores the prior Well day when undoing an accidental attack start', async () => {
+    const now = Date.now();
+    const todayKey = localDayKey(now, 'UTC');
+    seedState({
+      timezone: 'UTC',
+      dayStates: [{
+        ...makeDayState(todayKey),
+        status: 'well',
+        notes: 'good day',
+      }],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({ status: 'off' }));
+
+    const startCall = (sonner.toast.success as Mock).mock.calls.find(
+      ([message]) => String(message).startsWith('Attack started'),
+    );
+    expect(startCall).toBeTruthy();
+    const action = startCall![1].action as { label: string; onClick: () => void };
+    expect(action.label).toBe('Undo');
+
+    act(() => action.onClick());
+
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(0));
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'well',
+      notes: 'good day',
+    }));
+    // Undo is a plain delete; the store's provenance restores the day in the
+    // same state update (one Off write, one restore write — no double write).
+    expect(api.putDayState).toHaveBeenLastCalledWith(
+      todayKey,
+      { status: 'well', notes: 'good day' },
+    );
+    expect(api.putDayState).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes an open Change editor when an attack locks the day', async () => {
+    seedState({ timezone: 'UTC' });
+
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
+    await waitFor(() => expect(screen.getByText('Attack in progress')).toBeTruthy());
+    await closePainDialog();
+
+    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.getByText('Attack')).toBeTruthy();
+  });
+
+  it('rolls the active attack into the next day without writing a record', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-06-15T23:59:50.000Z').getTime());
+      vi.resetModules();
+      captured = null;
+      localStorage.clear();
+      seedState({
+        timezone: 'UTC',
+        attacks: [{ ...makeAttack(Date.now()), id: 'crosses-midnight' }],
+        dayStates: [{
+          day: '2026-06-15', status: 'off', notes: 'rough day',
+          updatedAt: new Date(Date.now()).toISOString(),
+        }],
+      });
+      api = (await import('@/lib/api')).api as unknown as MockedBackend;
+      applyApiDefaults(api);
+      homeModule = await import('@/pages/Home');
+      storeModule = await import('@/lib/store');
+      const clock = await import('@/lib/clock');
+
+      mountHome();
+      await waitForSync();
+      expect(screen.getByText('Attack in progress')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+
+      // Cross midnight: the keyed check-in remounts for the new day, which has
+      // no record of its own and stays Attack while the attack is active.
+      act(() => {
+        vi.setSystemTime(new Date('2026-06-16T00:00:10.000Z').getTime());
+        clock.bumpClock();
+      });
+
+      await waitFor(() => expect(screen.getByText('Attack in progress')).toBeTruthy());
+      expect(screen.getByText('Attack')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+
+      // Yesterday's record is untouched and the new day was never backfilled.
+      const persisted = readPersisted();
+      expect(persisted.dayStates).toHaveLength(1);
+      expect(persisted.dayStates[0]).toMatchObject({ day: '2026-06-15', status: 'off' });
+      expect(api.putDayState).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

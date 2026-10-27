@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { useNow } from '@/lib/clock';
 import { localDayKey } from '../../shared/datetime.ts';
@@ -12,8 +12,9 @@ const STATUS_META: Record<DayStateStatus, { label: string; pill: string }> = {
 
 /**
  * Choices offered to the user: Well and Off only. Attack is display-only — it
- * comes from real attack records (via `effectiveStatus`) or a legacy explicit
- * Attack day record, never from this check-in.
+ * comes from a real active attack (via `displayOverride`), the shared
+ * attack-day inference (which is Off), or a legacy explicit Attack day record,
+ * never from this check-in.
  */
 const CHOICES: DayStateStatus[] = ['well', 'off'];
 
@@ -23,12 +24,14 @@ const CHOICES: DayStateStatus[] = ['well', 'off'];
  * right-aligned Note/Change actions.
  *
  * The product model separates the day check-in from attacks:
- * - an explicit `record` always wins for display and Change offers Well/Off;
+ * - an active attack `displayOverride` shows Attack and `locked` removes
+ *   Well/Off and Change entirely for its duration;
+ * - otherwise an explicit `record` wins and Change offers Well/Off;
  * - with no record, `effectiveStatus` — computed by the parent from real
- *   attacks — may render a collapsed inferred Attack day (pill + Note/Change);
- * - saving a NON-EMPTY note on such an inferred day latches an explicit Attack
- *   record so the note has somewhere to live (Change then preserves it via the
- *   store); a blank draft just closes the editor without latching.
+ *   attacks — renders the day (attack days are Off), collapsed with Note/Change;
+ * - saving a NON-EMPTY note on a record-less day latches that effective status
+ *   so the note has somewhere to live (never Attack); a blank draft just closes
+ *   the editor without latching.
  *
  * `guidance` — computed by the parent from the effective day state — is shown
  * on collapsed and record-less days and hidden while actively re-choosing.
@@ -37,6 +40,7 @@ export default function DayCheckIn({
   guidance,
   effectiveStatus,
   displayOverride,
+  locked = false,
 }: {
   guidance?: string;
   /**
@@ -51,6 +55,12 @@ export default function DayCheckIn({
    * later choice or note saves.
    */
   displayOverride?: DayStateStatus | null;
+  /**
+   * true while an attack is active: the day follows the attack, so neither a
+   * Well/Off choice nor Change is offered. A Change editor that was already
+   * open is closed so the controls cannot outlive the attack.
+   */
+  locked?: boolean;
 }) {
   const { state, setDayState } = useStore();
   const now = useNow();
@@ -61,18 +71,19 @@ export default function DayCheckIn({
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState('');
 
-  // Inferred Attack is display-only: no record, but real attacks cover today.
-  const inferredAttack = !record && effectiveStatus === 'attack';
+  // Locking is driven by an external event (an attack starting), so a stale
+  // re-choose editor must be discarded. This is a controlled reset, not
+  // render-derived state.
+  useEffect(() => {
+    if (locked && editing) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEditing(false);
+    }
+  }, [locked, editing]);
+
   const displayStatus: DayStateStatus | null =
-    displayOverride ?? record?.status ?? (inferredAttack ? 'attack' : null);
-  // An active-attack display override keeps Attack primary, but an explicit
-  // Well/Off choice made during the attack must still be acknowledged here so
-  // the user sees that their choice was recorded.
-  const overrideNotice =
-    displayOverride && record && record.status !== displayOverride
-      ? `day marked ${STATUS_META[record.status].label}`
-      : null;
-  const showChoices = editing || displayStatus === null;
+    displayOverride ?? record?.status ?? effectiveStatus ?? null;
+  const showChoices = !locked && (editing || displayStatus === null);
 
   function choose(status: DayStateStatus) {
     setDayState(todayKey, status);
@@ -81,12 +92,13 @@ export default function DayCheckIn({
   }
 
   function saveNote() {
-    // Inferred Attack days have no record yet: saving a note latches an
-    // explicit Attack record so the note is persisted like any other day.
-    const status = record?.status ?? displayStatus;
+    // A record-less day (including an attack day, which infers Off) has no
+    // record yet: saving a note latches the effective status so the note is
+    // persisted like any other day. It is never latched as Attack.
+    const status = record?.status ?? effectiveStatus;
     if (!status) return;
-    // A record-less inferred Attack day has no note to clear: an empty draft
-    // just closes the editor instead of latching a valueless Attack record.
+    // A record-less day has no note to clear: an empty draft just closes the
+    // editor instead of latching a valueless record.
     if (!record && !noteDraft.trim()) {
       setNoteOpen(false);
       return;
@@ -133,11 +145,6 @@ export default function DayCheckIn({
             </span>
           )
         )}
-        {overrideNotice && !showChoices && (
-          <span role="status" className="text-xs font-medium text-slate-300">
-            {overrideNotice}
-          </span>
-        )}
         {!showChoices && displayStatus ? (
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <button
@@ -151,18 +158,20 @@ export default function DayCheckIn({
             >
               Note
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setNoteOpen(false);
-                setEditing(true);
-              }}
-              className="inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:min-h-10"
-            >
-              Change
-            </button>
+            {!locked && (
+              <button
+                type="button"
+                onClick={() => {
+                  setNoteOpen(false);
+                  setEditing(true);
+                }}
+                className="inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:min-h-10"
+              >
+                Change
+              </button>
+            )}
           </div>
-        ) : editing ? (
+        ) : editing && !locked ? (
           <button
             type="button"
             onClick={() => setEditing(false)}

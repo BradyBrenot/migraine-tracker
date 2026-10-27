@@ -201,14 +201,16 @@ describe('CalendarPage in the read-only viewer', () => {
 });
 
 describe('Reports in the read-only viewer', () => {
-  it('keeps month navigation and charts but omits the span selector and Report download', async () => {
+  it('keeps month navigation and charts but omits the span selector and export toolbar', async () => {
     const Reports = reportsModule.default;
     mountPage(<Reports />);
     await waitForSync();
 
     expect(screen.getByText('Attack days per month')).toBeTruthy();
     expect(screen.getByText('Medication days per month')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Report' })).toBeNull();
+    // No export UI at all in the read-only viewer.
+    expect(screen.queryByRole('button', { name: 'Download .md report' })).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Report range' })).toBeNull();
 
     // The span selector only feeds the omitted download, so the whole group is hidden.
     for (const name of ['3mo', '6mo', '12mo', 'All']) {

@@ -9,7 +9,7 @@ import { uid } from '@/lib/format';
 import { buildSeedData } from '@/lib/seed';
 import { api as backend } from '@/lib/api';
 import { bumpClock } from '@/lib/clock';
-import { isValidTimeZone, systemTimeZone } from '../../shared/datetime.ts';
+import { addDays, dayKeyStartMs, isValidTimeZone, localDayKey, systemTimeZone } from '../../shared/datetime.ts';
 import { decideHydration, deriveSyncStatus, shouldCleanOnDrain, type SyncStatus } from '../../shared/sync.ts';
 import { currentStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../../shared/inventory.ts';
 import {
@@ -219,6 +219,90 @@ function changedFields<T extends object>(current: T, next: T): Partial<T> {
 
 function hasChanges(patch: object): boolean {
   return Object.keys(patch).length > 0;
+}
+
+/**
+ * Attack-day rule helper: the day state that must replace `dayKey` when an
+ * attack really becomes active on that day, or null when no write is needed.
+ *
+ * - no record → null: inference (shared/daystate.ts) already renders the day as
+ *   Off, and creating a record here would change day-check-in reminder
+ *   presence semantics for a check-in the user never made;
+ * - already Off → null: nothing to change and no second write;
+ * - otherwise the record becomes Off with its notes preserved.
+ *
+ * Callers apply this only for a real current-day transition (starting an
+ * attack now, or ending a currently-open attack now), never on mount/
+ * hydration and never for backfilled/reopened history, so a restored active
+ * attack cannot rewrite the day or diverge from the server snapshot.
+ */
+function replacedOffDayState(states: readonly DayState[], dayKey: string): DayState | null {
+  const current = states.find((d) => d.day === dayKey);
+  if (!current || current.status === 'off') return null;
+  return { ...current, status: 'off', updatedAt: new Date().toISOString() };
+}
+
+/**
+ * Provenance for a day-state record replaced by a real current-day attack
+ * start or end.
+ *
+ * In-memory only (a reload loses it — accepted, and deliberately not persisted
+ * so no schema/API change is needed): while it exists, deleting that attack
+ * (Home toast Undo OR History delete) can restore the status the user actually
+ * chose instead of leaving an Off they never picked.
+ */
+interface DayOffProvenance {
+  day: string;
+  /** The record exactly as it was before the start rewrote it. */
+  previous: DayState;
+  /** `updatedAt` of the Off row the start wrote — the only row Undo may revert. */
+  offUpdatedAt: string;
+}
+
+/** Does any attack (active or ended) overlap this configured-zone local day? */
+function attackOverlapsDay(
+  attacks: readonly Attack[],
+  dayKey: string,
+  timeZone: string,
+  nowMs: number,
+): boolean {
+  const dayStart = dayKeyStartMs(dayKey, timeZone);
+  const dayEnd = dayKeyStartMs(addDays(dayKey, 1), timeZone);
+  return attacks.some((a) => {
+    const start = Date.parse(a.start);
+    if (!Number.isFinite(start)) return false;
+    const end = a.end ? Date.parse(a.end) : nowMs;
+    return Number.isFinite(end) && start < dayEnd && end > dayStart;
+  });
+}
+
+/**
+ * The day state to restore when the attack that rewrote it is deleted, or null.
+ *
+ * Restoration is only safe when nothing else explains the Off day:
+ * - no other attack is active;
+ * - no remaining attack of any kind still overlaps that day;
+ * - the record is still EXACTLY the Off row this start wrote (same `updatedAt`),
+ *   so a later manual Well/Off or note edit is never overwritten by an Undo.
+ */
+function restorableDayState(
+  state: TrackerState,
+  remainingAttacks: readonly Attack[],
+  provenance: DayOffProvenance,
+  nowMs: number,
+): DayState | null {
+  if (remainingAttacks.some((a) => a.end === null)) return null;
+  if (attackOverlapsDay(remainingAttacks, provenance.day, state.timezone, nowMs)) return null;
+  const current = state.dayStates.find((d) => d.day === provenance.day);
+  if (!current || current.status !== 'off' || current.updatedAt !== provenance.offUpdatedAt) {
+    return null;
+  }
+  return {
+    ...current,
+    status: provenance.previous.status,
+    notes: provenance.previous.notes,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
 }
 
 type ExportShape = Awaited<ReturnType<typeof backend.exportAll>>;
@@ -604,9 +688,29 @@ export interface StoreApi {
     diverged: boolean;
   };
   // attacks
-  startAttack: (start?: Date) => Attack;
-  endAttack: (id: string, end?: Date) => void;
+  /**
+   * Start a real attack. `markDayOff` applies the attack-day product rule to
+   * THIS transition only: when the attack is starting now, today's existing
+   * non-Off day-state record is replaced by Off (notes preserved). It never
+   * creates a record — inference already covers record-less attack days — and
+   * it is never applied for backfilled/past or future starts.
+   */
+  startAttack: (start?: Date, markDayOff?: boolean) => Attack;
+  /**
+   * End a real attack. `markDayOff` applies the attack-day rule to this
+   * transition too: when the attack is ending now, today's existing non-Off
+   * record (a restored active attack may still carry an earlier Well) becomes
+   * Off, notes preserved. Never creates a record, and a backfilled end or a
+   * default (false) caller changes nothing.
+   */
+  endAttack: (id: string, end?: Date, markDayOff?: boolean) => void;
   updateAttack: (id: string, patch: Partial<Omit<Attack, 'id'>>) => void;
+  /**
+   * Delete an attack. When that attack's real start had replaced today's
+   * check-in, the prior status/notes are restored through the same state
+   * update + one day-state write, but only if nothing else explains the Off
+   * day and the user has not changed it since.
+   */
   deleteAttack: (id: string) => void;
   logPain: (attackId: string, level: number, when?: Date) => void;
   // meds
@@ -726,6 +830,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** Total server-path tasks ever enqueued; identifies "newest write". */
   const genRef = useRef(0);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * Attack id → the day-state row a real current start replaced. Deliberately
+   * in-memory only: it exists solely to power Undo of that same action (Home
+   * toast or History delete). A reload drops it, which is acceptable — the day
+   * simply stays Off (the product rule) and nothing is written back.
+   */
+  const dayOffProvenanceRef = useRef<Map<string, DayOffProvenance>>(new Map());
   /**
    * Hydrate once per provider lifetime. A ref (not module-level state) keeps
    * React StrictMode's effect double-invocation from hydrating twice while
@@ -1204,23 +1315,93 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       readOnly: false,
       serverMode,
       sync,
-      startAttack: (start = new Date()) => {
+      startAttack: (start = new Date(), markDayOff = false) => {
         const a: Attack = {
           id: uid(), start: start.toISOString(), end: null,
           painLog: [], peakPain: -1,
           symptoms: [], triggers: [], aura: null, notes: '', source: 'manual',
         };
-        applyState((s) => ({ ...s, attacks: [...s.attacks, a] }));
+        // Attack-day rule: only a real current start converts TODAY's existing
+        // record to Off. A backfilled (earlier day) or future start must not
+        // rewrite the day it happens to touch, and no record is ever created
+        // here.
+        const startMs = start.getTime();
+        const todayKey = localDayKey(Date.now(), stateRef.current.timezone);
+        const offRecord =
+          markDayOff && Number.isFinite(startMs) && startMs <= Date.now()
+            && localDayKey(startMs, stateRef.current.timezone) === todayKey
+            ? replacedOffDayState(stateRef.current.dayStates, todayKey)
+            : null;
+        if (offRecord) {
+          const previous = stateRef.current.dayStates.find((d) => d.day === offRecord.day);
+          // Only an actual replacement has something to restore; a record-less
+          // start needs no provenance (inference covers the day).
+          if (previous) {
+            dayOffProvenanceRef.current.set(a.id, {
+              day: offRecord.day,
+              previous,
+              offUpdatedAt: offRecord.updatedAt,
+            });
+          }
+        }
+        applyState((s) => ({
+          ...s,
+          attacks: [...s.attacks, a],
+          ...(offRecord
+            ? { dayStates: s.dayStates.map((d) => (d.day === offRecord.day ? offRecord : d)) }
+            : {}),
+        }));
         enqueue('addAttack', () => backend.addAttack(a));
+        if (offRecord) {
+          enqueue('putDayState', () =>
+            backend.putDayState(offRecord.day, { status: 'off', notes: offRecord.notes }));
+        }
         return a;
       },
-      endAttack: (id, end = new Date()) => {
+      endAttack: (id, end = new Date(), markDayOff = false) => {
+        // Unknown ids change nothing and queue nothing (a PATCH would 404 and
+        // latch `failed`); never write a day state for them either.
+        const current = stateRef.current.attacks.find((x) => x.id === id);
+        if (!current) return;
         const endIso = end.toISOString();
+        // Attack-day rule for the end of a real attack: when a currently-open
+        // attack ends now, today becomes Off too. A repeated end (the attack is
+        // already closed) or a backfilled end must not rewrite a manual
+        // post-attack choice, and no record is ever created here — inference
+        // covers record-less attack days.
+        const endMs = end.getTime();
+        const todayKey = localDayKey(Date.now(), stateRef.current.timezone);
+        const offRecord =
+          markDayOff && current.end === null
+            && Number.isFinite(endMs) && endMs <= Date.now()
+            && localDayKey(endMs, stateRef.current.timezone) === todayKey
+            ? replacedOffDayState(stateRef.current.dayStates, todayKey)
+            : null;
+        if (offRecord) {
+          const previous = stateRef.current.dayStates.find((d) => d.day === offRecord.day);
+          // Same guarded-restoration provenance as a real start, so a later
+          // History delete can put the user's status back. No new Off write
+          // (already Off) keeps any existing start provenance untouched.
+          if (previous) {
+            dayOffProvenanceRef.current.set(id, {
+              day: offRecord.day,
+              previous,
+              offUpdatedAt: offRecord.updatedAt,
+            });
+          }
+        }
         applyState((s) => ({
           ...s,
           attacks: s.attacks.map((x) => (x.id === id ? { ...x, end: endIso } : x)),
+          ...(offRecord
+            ? { dayStates: s.dayStates.map((d) => (d.day === offRecord.day ? offRecord : d)) }
+            : {}),
         }));
         enqueue('patchAttack(end)', () => backend.patchAttack(id, { end: endIso }));
+        if (offRecord) {
+          enqueue('putDayState', () =>
+            backend.putDayState(offRecord.day, { status: 'off', notes: offRecord.notes }));
+        }
       },
       updateAttack: (id, patch) => {
         // Payload computed synchronously from the state ref (never inside a
@@ -1255,12 +1436,32 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         enqueue('patchAttack(update)', () => backend.patchAttack(id, diff));
       },
       deleteAttack: (id) => {
+        // A real start/end that rewrote the day check-in leaves provenance so
+        // Undo (Home toast or History delete) can put the user's original
+        // status back. The entry is consumed either way.
+        const provenance = dayOffProvenanceRef.current.get(id);
+        dayOffProvenanceRef.current.delete(id);
+        const before = stateRef.current;
+        const remaining = before.attacks.filter((x) => x.id !== id);
+        const restored = provenance
+          ? restorableDayState(before, remaining, provenance, Date.now())
+          : null;
         applyState((s) => ({
           ...s,
           attacks: s.attacks.filter((x) => x.id !== id),
           meds: s.meds.map((m) => (m.attackId === id ? { ...m, attackId: null } : m)),
+          ...(restored
+            ? { dayStates: s.dayStates.map((d) => (d.day === restored.day ? restored : d)) }
+            : {}),
         }));
         enqueue('deleteAttack', () => backend.deleteAttack(id));
+        if (restored) {
+          enqueue('putDayState', () =>
+            backend.putDayState(restored.day, {
+              status: restored.status,
+              notes: restored.notes,
+            }));
+        }
       },
       logPain: (attackId, level, when = new Date()) => {
         const current = stateRef.current.attacks.find((x) => x.id === attackId);

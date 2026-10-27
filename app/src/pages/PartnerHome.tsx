@@ -74,7 +74,8 @@ export default function PartnerHome() {
   // Display precedence only: while an attack is actually active, the partner
   // "Now" page must never read "Well" or "Normal routine today." even if an
   // explicit day record for today says so. `effectiveDayState` keeps its own
-  // explicit-wins semantics for every other consumer.
+  // explicit-wins semantics for every other consumer, and infers Off for a
+  // record-less attack day.
   const todayState: DayStateStatus | null = activeAttack
     ? 'attack'
     : effectiveDayState(todayRecord, attackOverlapsToday);

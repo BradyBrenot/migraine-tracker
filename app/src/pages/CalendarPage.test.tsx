@@ -335,10 +335,54 @@ describe('CalendarPage configured-timezone day identity', () => {
     await waitForSync();
 
     clickDay(dayKey);
-    await waitFor(() => expect(screen.getByText('attack (from attacks)')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Off (from attacks)')).toBeTruthy());
     expect(screen.getByText('nausea')).toBeTruthy();
     expect(screen.getByText('Cardio · medium')).toBeTruthy();
     expect(screen.getByRole('heading', { name: formatDayTitle(dayKey, timeZone) })).toBeTruthy();
+  });
+});
+
+describe('CalendarPage attack-day rule', () => {
+  it('shows Attack for today while an attack is active, even over a Well record', async () => {
+    const TZ = 'UTC';
+    const today = localDayKey(Date.now(), TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('active', Date.now() - 60 * 60 * 1000, null)],
+      dayStates: [{
+        day: today, status: 'well', notes: '', updatedAt: new Date().toISOString(),
+      }],
+    });
+
+    mountCalendar();
+    await waitForSync();
+    clickDay(today);
+
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('Day state')).toBeTruthy());
+    expect(within(sheet).getByText('Attack')).toBeTruthy();
+    expect(within(sheet).queryByText('Well')).toBeNull();
+  });
+
+  it('shows Off for a record-less day overlapped by an ended attack', async () => {
+    const TZ = 'UTC';
+    const today = localDayKey(Date.now(), TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack(
+        'ended',
+        Date.now() - 2 * 60 * 60 * 1000,
+        Date.now() - 60 * 1000,
+      )],
+    });
+
+    mountCalendar();
+    await waitForSync();
+    clickDay(today);
+
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('Off (from attacks)')).toBeTruthy());
+    expect(within(sheet).queryByText('Attack')).toBeNull();
   });
 });
 
@@ -605,14 +649,18 @@ describe('CalendarPage decision cards and aggregate painkillers', () => {
     };
   }
 
-  /** Nurtec + Painkillers cards, exactly two in one row, before the grid. */
+  /** Nurtec + Painkillers cards, exactly two in one row, below the grid. */
   function renderWithCards(): { nurtec: HTMLElement; painkillers: HTMLElement } {
     const nurtec = screen.getByTitle(/^Nurtec:/);
     const painkillers = screen.getByTitle(/^Painkillers/);
     const grid = document.querySelector('[data-day]') as HTMLElement;
-    // Both cards precede the first day cell.
-    expect(nurtec.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(painkillers.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Both cards follow the month grid...
+    expect(grid.compareDocumentPosition(nurtec) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(grid.compareDocumentPosition(painkillers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // ...and stay above the preventive schedule.
+    const schedule = screen.getByRole('heading', { name: 'Preventive schedule' });
+    expect(nurtec.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(painkillers.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // One row at every width: a two-column grid with no responsive stacking.
     const row = nurtec.parentElement as HTMLElement;
     expect(row.className).toContain('grid-cols-2');
@@ -620,7 +668,7 @@ describe('CalendarPage decision cards and aggregate painkillers', () => {
     return { nurtec, painkillers };
   }
 
-  it('keeps both cards above the grid and promotes them during an attack', async () => {
+  it('keeps both cards below the grid and promotes them during an attack', async () => {
     seedState({ timezone: TZ });
     mountCalendar();
     await waitForSync();
@@ -791,14 +839,17 @@ describe('CalendarPage decision cards and aggregate painkillers', () => {
     expect(partner).toContain('lowest limit (8)');
   });
 
-  it('renders the preventive schedule below the month grid', async () => {
+  it('renders the preventive schedule below the month grid and medication limits', async () => {
     seedState({ timezone: TZ });
     mountCalendar();
     await waitForSync();
 
     const grid = document.querySelector('[data-day]') as HTMLElement;
+    const painkillers = screen.getByTitle(/^Painkillers/);
     const schedule = screen.getByRole('button', { name: 'Schedule next Emgality' });
-    expect(grid.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Newest decision: grid -> medication limits -> preventive schedule.
+    expect(grid.compareDocumentPosition(painkillers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(painkillers.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

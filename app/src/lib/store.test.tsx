@@ -6,7 +6,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout } from '@/types';
 import { currentStock } from '../../shared/inventory.ts';
-import { systemTimeZone } from '../../shared/datetime.ts';
+import { localDayKey, systemTimeZone } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 import { parseBackup } from '../../shared/backup.ts';
 import type { ParsedBackup } from '../../shared/backup.ts';
@@ -1130,6 +1130,397 @@ describe('workouts and day states', () => {
 
     await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
     expect(readPersistedState().dayStates).toHaveLength(2);
+  });
+
+  it('replaces an existing non-Off record with Off when an attack starts now', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'good day' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().startAttack(new Date(), true);
+    });
+
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+    expect(api.putDayState).toHaveBeenCalledWith(today, { status: 'off', notes: 'good day' });
+    expect(currentStore().state.attacks).toHaveLength(1);
+    expect(currentStore().state.dayStates).toEqual([
+      expect.objectContaining({ day: today, status: 'off', notes: 'good day' }),
+    ]);
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('creates no day-state row for a record-less current attack start', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().startAttack(new Date(), true);
+    });
+
+    expect(currentStore().state.attacks).toHaveLength(1);
+    expect(currentStore().state.dayStates).toHaveLength(0);
+    expect(api.putDayState).not.toHaveBeenCalled();
+    // No extra write means the sync bookkeeping is exactly one addAttack.
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(api.addAttack).toHaveBeenCalledTimes(1);
+  });
+
+  it('never rewrites the day for a plain startAttack (compatibility default)', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [makeDayState(today, { status: 'well' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().startAttack(new Date());
+    });
+
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'well' });
+    expect(api.putDayState).not.toHaveBeenCalled();
+  });
+
+  it('does not rewrite the day for a backfilled or future start', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const yesterday = localDayKey(Date.now() - 24 * 60 * 60 * 1000, 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [
+        makeDayState(yesterday, { status: 'well', notes: 'yesterday' }),
+        makeDayState(today, { status: 'well', notes: 'today' }),
+      ],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().startAttack(new Date(Date.now() - 24 * 60 * 60 * 1000), true);
+    });
+    await act(async () => {
+      currentStore().startAttack(new Date(Date.now() + 60 * 60 * 1000), true);
+    });
+
+    expect(currentStore().state.dayStates).toEqual([
+      expect.objectContaining({ day: yesterday, status: 'well', notes: 'yesterday' }),
+      expect.objectContaining({ day: today, status: 'well', notes: 'today' }),
+    ]);
+    expect(api.putDayState).not.toHaveBeenCalled();
+  });
+
+  it('writes no day state when a historical attack is reopened', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const startedBeforeToday: Attack = {
+      ...makeAttack('historical-reopened'),
+      start: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
+      end: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([startedBeforeToday]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'unrelated today' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateAttack(startedBeforeToday.id, { end: null });
+    });
+
+    // Reopening is a history edit, not a current transition: today's unrelated
+    // check-in must never be overwritten by it.
+    expect(currentStore().state.attacks[0].end).toBeNull();
+    expect(currentStore().state.dayStates).toEqual([
+      expect.objectContaining({ day: today, status: 'well', notes: 'unrelated today' }),
+    ]);
+    expect(api.putDayState).not.toHaveBeenCalled();
+    expect(api.patchAttack).toHaveBeenCalledWith(startedBeforeToday.id, { end: null });
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('replaces today with Off when a restored active attack is ended now', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const active: Attack = {
+      ...makeAttack('active'),
+      start: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      end: null,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([active]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'kept' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().endAttack(active.id, new Date(), true);
+    });
+
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+    expect(api.putDayState).toHaveBeenCalledWith(today, { status: 'off', notes: 'kept' });
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'kept' });
+    expect(currentStore().state.attacks[0].end).not.toBeNull();
+    expect(api.patchAttack).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('writes no day state for a default or backfilled end', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const first: Attack = {
+      ...makeAttack('ended-default'),
+      start: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      end: null,
+    };
+    const second: Attack = {
+      ...makeAttack('ended-backfill'),
+      start: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      end: null,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([first, second]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'today' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().endAttack(first.id);
+    });
+    await act(async () => {
+      // A backfilled end on an earlier day must not rewrite today.
+      currentStore().endAttack(second.id, new Date(Date.now() - 24 * 60 * 60 * 1000), true);
+    });
+
+    expect(currentStore().state.dayStates).toEqual([
+      expect.objectContaining({ day: today, status: 'well', notes: 'today' }),
+    ]);
+    expect(api.putDayState).not.toHaveBeenCalled();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('restores the replaced day when the just-started attack is deleted (History path)', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const unrelated: Attack = {
+      ...makeAttack('unrelated'),
+      start: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+      end: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000).toISOString(),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([unrelated]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'good day' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    let startedId = '';
+    await act(async () => {
+      startedId = currentStore().startAttack(new Date(), true).id;
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'good day' });
+
+    // History deletes through the same store API — no Home closure involved.
+    await act(async () => {
+      currentStore().deleteAttack(startedId);
+    });
+
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(2));
+    expect(api.putDayState).toHaveBeenLastCalledWith(
+      today, { status: 'well', notes: 'good day' },
+    );
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'well', notes: 'good day' });
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual([unrelated.id]);
+    expect(api.deleteAttack).toHaveBeenCalledWith(startedId);
+
+    // Provenance is consumed: deleting an unrelated attack never restores again.
+    await act(async () => {
+      currentStore().deleteAttack(unrelated.id);
+    });
+    expect(api.putDayState).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('does not restore when the day was changed after the start rewrite', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'good day' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    let startedId = '';
+    await act(async () => {
+      startedId = currentStore().startAttack(new Date(), true).id;
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+
+    // The user makes an explicit choice during/after the attack: Undo must
+    // never overwrite it.
+    await act(async () => {
+      currentStore().setDayState(today, 'well', 'manual choice');
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      currentStore().deleteAttack(startedId);
+    });
+
+    expect(api.putDayState).toHaveBeenCalledTimes(2);
+    expect(currentStore().state.dayStates[0]).toMatchObject({
+      status: 'well',
+      notes: 'manual choice',
+    });
+  });
+
+  it('does not restore while another attack is active', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'good day' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    let startedId = '';
+    await act(async () => {
+      startedId = currentStore().startAttack(new Date(), true).id;
+      currentStore().startAttack(new Date(), false);
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      currentStore().deleteAttack(startedId);
+    });
+
+    // Another open attack still explains the Off day.
+    expect(api.putDayState).toHaveBeenCalledTimes(1);
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'good day' });
+  });
+
+  it('does not restore while a remaining ended attack still overlaps today', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'good day' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    let startedId = '';
+    await act(async () => {
+      startedId = currentStore().startAttack(new Date(), true).id;
+      const earlier = currentStore().startAttack(
+        new Date(Date.now() - 2 * 60 * 60 * 1000), false,
+      );
+      currentStore().endAttack(earlier.id, new Date(), false);
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      currentStore().deleteAttack(startedId);
+    });
+
+    expect(api.putDayState).toHaveBeenCalledTimes(1);
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'good day' });
+  });
+
+  it('does nothing for an unknown attack id on end', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().endAttack('missing-attack', new Date(), true);
+    });
+
+    expect(currentStore().state.attacks).toHaveLength(0);
+    expect(currentStore().state.dayStates).toHaveLength(0);
+    expect(api.patchAttack).not.toHaveBeenCalled();
+    expect(api.putDayState).not.toHaveBeenCalled();
+  });
+
+  it('does not rewrite a manual post-attack Well on a repeated end', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const active: Attack = {
+      ...makeAttack('repeat-end'),
+      start: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      end: null,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([active]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'kept' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().endAttack(active.id, new Date(), true);
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'kept' });
+
+    // The user chooses Well after the attack.
+    await act(async () => {
+      currentStore().setDayState(today, 'well', 'manual');
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(2));
+
+    // A repeated end of the already-closed attack is not a transition.
+    await act(async () => {
+      currentStore().endAttack(active.id, new Date(), true);
+    });
+
+    expect(api.putDayState).toHaveBeenCalledTimes(2);
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'well', notes: 'manual' });
+  });
+
+  it('restores the prior day when an ended restored active attack is deleted', async () => {
+    const today = localDayKey(Date.now(), 'UTC');
+    const active: Attack = {
+      ...makeAttack('ended-then-deleted'),
+      start: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      end: null,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([active]),
+      dayStates: [makeDayState(today, { status: 'well', notes: 'kept' })],
+    }));
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().endAttack(active.id, new Date(), true);
+    });
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(1));
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'off', notes: 'kept' });
+
+    // The end created the same provenance a start would: a History delete can
+    // restore the status the user had before the attack.
+    await act(async () => {
+      currentStore().deleteAttack(active.id);
+    });
+
+    await waitFor(() => expect(api.putDayState).toHaveBeenCalledTimes(2));
+    expect(api.putDayState).toHaveBeenLastCalledWith(today, { status: 'well', notes: 'kept' });
+    expect(currentStore().state.dayStates[0]).toMatchObject({ status: 'well', notes: 'kept' });
+    expect(currentStore().state.attacks).toHaveLength(0);
   });
 
   it('latches dirty + failed when setDayState runs offline', async () => {

@@ -113,7 +113,10 @@ export default function AttackFormDialog({
     const startDate = new Date(startMs);
     const endDate = !ongoing && Number.isFinite(endMs) ? new Date(endMs) : null;
     if (isNew) {
-      const a = startAttack(startDate);
+      // The attack-day rule applies only to a current ongoing attack: a
+      // backfilled ended attack or a future start must never rewrite today.
+      const currentOngoing = endDate === null && startMs <= Date.now();
+      const a = currentOngoing ? startAttack(startDate, true) : startAttack(startDate);
       if (endDate) endAttack(a.id, endDate);
       if (painSet) logPain(a.id, pain, startDate);
       updateAttack(a.id, { symptoms, triggers, aura, notes });

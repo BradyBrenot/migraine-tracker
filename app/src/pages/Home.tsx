@@ -3,7 +3,8 @@ import { toast } from 'sonner';
 import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import {
-  NURTEC_DEFAULT_RULE, limitState, resolveRule, usageDaysInWindow,
+  NURTEC_DEFAULT_RULE, PAINKILLER_MED_IDS, limitState, medUnionDaysInWindow,
+  resolveRule, resolveSharedPainkillerRule, usageDaysInWindow, type LimitState,
 } from '@/lib/usage';
 import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
@@ -53,6 +54,20 @@ function nurtecStockBadge(stock: NurtecInventory): {
       stock.level === 'low' ? 'bg-amber-950 text-amber-300' : 'bg-slate-800 text-slate-300',
     title: 'Optimistic count from this device — the server inventory count is authoritative.',
   };
+}
+
+/**
+ * Rolling-use pill shared by the Nurtec and combined-painkiller chips, so both
+ * groups carry the same ok/near/over colours.
+ */
+function usagePillClass(usage: LimitState): string {
+  return `whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums ${
+    usage === 'over'
+      ? 'bg-red-950 text-red-300'
+      : usage === 'near'
+        ? 'bg-amber-950 text-amber-300'
+        : 'bg-slate-800 text-slate-200'
+  }`;
 }
 
 /**
@@ -152,11 +167,28 @@ export default function Home() {
   // Shared severity rule: over only past the limit; near needs a used day, so
   // an untouched low limit never warns.
   const nurtecUsage = limitState(nurtecDays, nurtecRule.limit);
-  const nurtecOver = nurtecUsage === 'over';
-  const nurtecNear = nurtecUsage === 'near';
   // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
   const nurtecStock = nurtecInventory(state, now);
   const nurtecBadge = nurtecStockBadge(nurtecStock);
+
+  // Tylenol, Ibuprofen and Naproxen share ONE MOH day budget, so all three
+  // cards show the same combined chip (distinct configured-zone days across the
+  // three). Nurtec keeps its own independent rule.
+  const painkillerRule = resolveSharedPainkillerRule(state.rules);
+  const painkillerDays = medUnionDaysInWindow(
+    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
+  );
+  const painkillerUsage = limitState(painkillerDays, painkillerRule.limit);
+  const painkillerUsageText =
+    painkillerUsage === 'over'
+      ? 'over limit'
+      : painkillerUsage === 'near'
+        ? 'near limit'
+        : 'within limit';
+  const painkillerChipLabel =
+    `Painkillers combined: ${painkillerDays} of ${painkillerRule.limit} allowed days in the last ${painkillerRule.windowDays} days, ${painkillerUsageText}`;
+  const painkillerChipTitle =
+    `Painkillers combined (Tylenol, Ibuprofen, Naproxen): ${painkillerDays} of ${painkillerRule.limit} allowed days in the last ${painkillerRule.windowDays} days`;
 
   // Informational "last dose" hints for the acute quick-log cards, keyed by
   // medId. Recomputed on clock ticks and after optimistic log/undo so the hint
@@ -203,8 +235,9 @@ export default function Home() {
     });
   }, [todayKey, state.timezone, state.attacks, activeAttack, now]);
 
-  // An explicit Well/Off record still wins over an inferred (or ended) attack
-  // day; without a record, an attack overlapping today means Attack/Rest.
+  // An explicit Well/Off record still wins over the attack-day inference; with
+  // no record an attack overlapping today infers Off (attack days are days off).
+  // While an attack is active the card's display override shows Attack instead.
   const todayState = useMemo(
     () => effectiveDayState(todayRecord, attackOverlapsToday),
     [todayRecord, attackOverlapsToday],
@@ -225,7 +258,11 @@ export default function Home() {
           : 'How was today?';
 
   function handleStart() {
-    const attack = store.startAttack();
+    // `markDayOff` is the real current-attack transition (event-driven, never a
+    // mount effect): today becomes Off while an active attack is displayed.
+    // The store keeps in-memory provenance for the replaced record, so the
+    // toast Undo (a plain deleteAttack) can restore it exactly once.
+    const attack = store.startAttack(new Date(), true);
     toast.success('Attack started — hang in there 💜', {
       description: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       action: {
@@ -239,7 +276,9 @@ export default function Home() {
   function handleEnd() {
     if (!activeAttack) return;
     const { id } = activeAttack;
-    store.endAttack(id);
+    // `markDayOff` covers attacks that were already active without rewriting
+    // today (a restored session): ending them now still leaves the day Off.
+    store.endAttack(id, new Date(), true);
     toast.success('Attack ended — logged.', {
       description: `Duration: ${fmtDuration(Date.now() - new Date(activeAttack.start).getTime())}`,
       action: {
@@ -422,13 +461,7 @@ export default function Home() {
               {m.id === 'nurtec' && (
                 <span className="mt-auto flex flex-wrap items-center gap-1 pt-1.5">
                   <span
-                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums ${
-                      nurtecOver
-                        ? 'bg-red-950 text-red-300'
-                        : nurtecNear
-                          ? 'bg-amber-950 text-amber-300'
-                          : 'bg-slate-800 text-slate-200'
-                    }`}
+                    className={usagePillClass(nurtecUsage)}
                     title={`Nurtec: ${nurtecDays} of ${nurtecRule.limit} allowed days in the last ${nurtecRule.windowDays} days`}
                   >
                     {nurtecDays}/{nurtecRule.limit}
@@ -441,6 +474,18 @@ export default function Home() {
                   </span>
                 </span>
               )}
+              {PAINKILLER_MED_IDS.includes(m.id as (typeof PAINKILLER_MED_IDS)[number]) && (
+                <span className="mt-auto flex items-center pt-1.5">
+                  <span
+                    role="img"
+                    aria-label={painkillerChipLabel}
+                    title={painkillerChipTitle}
+                    className={usagePillClass(painkillerUsage)}
+                  >
+                    {painkillerDays}/{painkillerRule.limit}
+                  </span>
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -448,18 +493,23 @@ export default function Home() {
 
       {/* ── Today's wellness + movement (kept during an attack, never hidden) */}
       <section className="rounded-xl border border-slate-800 bg-slate-900">
-        <div className="p-3">
+        <div className="p-2.5">
           <DayCheckIn
+            key={todayKey}
             guidance={wellnessGuidance}
             effectiveStatus={todayState}
             displayOverride={activeAttack ? 'attack' : null}
+            locked={!!activeAttack}
           />
         </div>
-        <div className="border-t border-slate-800/70 px-3 py-2.5">
-          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+        {/* Movement stays on one compact wrapping row: label + controls. */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-slate-800/70 px-2.5 py-2">
+          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
             Movement
-          </p>
-          <WorkoutQuickLog />
+          </span>
+          <div className="min-w-0 flex-1">
+            <WorkoutQuickLog />
+          </div>
         </div>
       </section>
 

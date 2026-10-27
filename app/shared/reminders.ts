@@ -285,9 +285,14 @@ export interface ExerciseAssessmentInput {
 }
 
 export interface ExerciseAssessment {
-  /** 'attack' or 'goals-met'; null means a reminder is still appropriate. */
+  /**
+   * Reminder-suppression label, not the UI day state: 'attack' means "do not
+   * nudge exercise today" (an explicit Attack record, an attack overlapping the
+   * day, or an attack active now). `shared/daystate.ts` still renders a
+   * record-less attack day as Off; suppression here is deliberate.
+   */
   suppressed: 'attack' | 'goals-met' | null;
-  /** Effective day state, including an inferred attack day. */
+  /** Assessment state (an overlapping attack reports 'attack' here by design). */
   state: DayStateStatus | 'unknown';
   counts: WorkoutWeekCounts;
   strengthMet: boolean;
@@ -315,6 +320,13 @@ export interface ExerciseAssessment {
  * - Goals met suppresses the reminder; the attack override still wins over
  *   goals-met, matching the explicit-attack precedence.
  * - Mobility is tracked but never satisfies strength/cardio (shared counts).
+ *
+ * IMPORTANT: the 'attack' state/suppression produced here is a
+ * reminder-suppression label, not the app's day-state display. The UI (via
+ * `shared/daystate.ts`) shows a record-less attack day as Off, while this
+ * assessment intentionally keeps suppressing the exercise reminder on such a
+ * day. The two modules deliberately differ; do not "fix" the suppression to
+ * follow the Off display.
  *
  * `state` always prefers an explicit record (display/wording), falling back to
  * an inferred attack day, and is not itself changed by the active-at-now rule.

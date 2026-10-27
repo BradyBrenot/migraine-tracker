@@ -13,7 +13,7 @@ import {
   painColor, painTint, textOn, STATUS,
 } from '@/lib/meds';
 import { fmtTime, fmtDuration } from '@/lib/format';
-import type { Attack, MedEvent, WorkoutKind } from '@/types';
+import type { Attack, DayStateStatus, MedEvent, WorkoutKind } from '@/types';
 import {
   addDays, addMonths, dayKeyStartMs, localDayKey, monthStartKey, weekdayOf, type DayKey,
 } from '../../shared/datetime.ts';
@@ -132,7 +132,7 @@ function dayCellLabel(day: DayData, timeZone: string): string {
 const MAX_DAY_CHIPS = 4;
 
 /**
- * The two compact decision cards that sit above the month grid. They are always
+ * The two compact decision cards that sit below the month grid. They are always
  * side by side in ONE row (even at 360px) and are promoted with a coral ring
  * while an attack is active.
  */
@@ -466,8 +466,19 @@ export default function CalendarPage() {
         return Number.isFinite(ms) && localDayKey(ms, state.timezone) === selected;
       })
       .sort((a, b) => b.performedAt.localeCompare(a.performedAt));
-    return { record, status: effectiveDayState(record, hasAttack), workouts };
-  }, [selected, state.dayStates, state.timezone, parsedAttacks, state.workouts]);
+    // Today while an attack is active reads Attack, even over an earlier
+    // explicit Well/Off record (same display override as Home/partner view).
+    // Every other day follows the shared helper, where a record-less attack day
+    // infers Off.
+    const status: DayStateStatus | null =
+      selected === todayKey && store.activeAttack
+        ? 'attack'
+        : effectiveDayState(record, hasAttack);
+    return { record, status, workouts };
+  }, [
+    selected, state.dayStates, state.timezone, parsedAttacks, state.workouts,
+    todayKey, store.activeAttack,
+  ]);
 
   const monthNameFormatter = useMemo(
     () => new Intl.DateTimeFormat(undefined, {
@@ -534,52 +545,6 @@ export default function CalendarPage() {
   return (
     <div className="space-y-4">
       <h1 className="sr-only">Calendar</h1>
-      {/* ── two compact decision cards, one row, above the grid ── */}
-      <section>
-        <div className="mb-1.5 flex flex-wrap items-center gap-2">
-          <h2 className="text-xs font-bold uppercase tracking-wide text-slate-400">
-            Medication limits
-          </h2>
-          {intakeWatch && (
-            <span
-              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold normal-case"
-              style={{ background: '#E69F0022', color: STATUS.warn }}
-            >
-              <AlertTriangle className="h-3 w-3" /> watch your intake
-            </span>
-          )}
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <DecisionCard
-            medId="nurtec"
-            name="Nurtec"
-            used={nurtecUsed}
-            rule={nurtecRule}
-            detail={`last ${nurtecRule.windowDays}d · rolling`}
-            over={nurtecOver}
-            near={nurtecNear}
-            promoted={!!store.activeAttack}
-            title={`Nurtec: ${nurtecUsed} of ${nurtecRule.limit} allowed days in the last ${nurtecRule.windowDays} days`}
-          />
-          <DecisionCard
-            medId={null}
-            name="Painkillers"
-            used={painkillerUsed}
-            rule={painkillerRule}
-            detail={painkillerDetail}
-            over={painkillerOver}
-            near={painkillerNear}
-            promoted={!!store.activeAttack}
-            title={`Painkillers (Tylenol, Ibuprofen, Naproxen): ${painkillerUsed} of ${painkillerRule.limit} allowed days in the last ${painkillerRule.windowDays} days`}
-          />
-        </div>
-        {painkillerRulesMismatch && (
-          <p className="mt-1.5 text-[11px] leading-snug text-slate-400">
-            {painkillerMismatchNote(readOnly, painkillerRule)}
-          </p>
-        )}
-      </section>
-
       {/* ── month grid ──────────────────────────────────────── */}
       <section className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm sm:p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -788,7 +753,53 @@ export default function CalendarPage() {
         </div>
       </section>
 
-      {/* ── preventive schedule (below the grid, not collapsible) ── */}
+      {/* ── two compact decision cards, one row, below the grid ── */}
+      <section>
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <h2 className="text-xs font-bold uppercase tracking-wide text-slate-400">
+            Medication limits
+          </h2>
+          {intakeWatch && (
+            <span
+              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold normal-case"
+              style={{ background: '#E69F0022', color: STATUS.warn }}
+            >
+              <AlertTriangle className="h-3 w-3" /> watch your intake
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <DecisionCard
+            medId="nurtec"
+            name="Nurtec"
+            used={nurtecUsed}
+            rule={nurtecRule}
+            detail={`last ${nurtecRule.windowDays}d · rolling`}
+            over={nurtecOver}
+            near={nurtecNear}
+            promoted={!!store.activeAttack}
+            title={`Nurtec: ${nurtecUsed} of ${nurtecRule.limit} allowed days in the last ${nurtecRule.windowDays} days`}
+          />
+          <DecisionCard
+            medId={null}
+            name="Painkillers"
+            used={painkillerUsed}
+            rule={painkillerRule}
+            detail={painkillerDetail}
+            over={painkillerOver}
+            near={painkillerNear}
+            promoted={!!store.activeAttack}
+            title={`Painkillers (Tylenol, Ibuprofen, Naproxen): ${painkillerUsed} of ${painkillerRule.limit} allowed days in the last ${painkillerRule.windowDays} days`}
+          />
+        </div>
+        {painkillerRulesMismatch && (
+          <p className="mt-1.5 text-[11px] leading-snug text-slate-400">
+            {painkillerMismatchNote(readOnly, painkillerRule)}
+          </p>
+        )}
+      </section>
+
+      {/* ── preventive schedule (below the grid and limits, not collapsible) ── */}
       <section>
         <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-400">
           Preventive schedule
@@ -835,8 +846,8 @@ export default function CalendarPage() {
                         {selectedWellness.status === null
                           ? '—'
                           : selectedWellness.record
-                            ? DAY_STATE_LABEL[selectedWellness.record.status]
-                            : 'attack (from attacks)'}
+                            ? DAY_STATE_LABEL[selectedWellness.status]
+                            : `${DAY_STATE_LABEL[selectedWellness.status]} (from attacks)`}
                       </span>
                     </div>
                     {selectedWellness.record?.notes && (

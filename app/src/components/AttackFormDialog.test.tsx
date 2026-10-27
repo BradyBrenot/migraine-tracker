@@ -112,7 +112,9 @@ describe('AttackFormDialog peak-pain edits', () => {
     fireEvent.click(saveButton());
 
     expect(store.startAttack).toHaveBeenCalledTimes(1);
-    expect(store.startAttack).toHaveBeenCalledWith(expect.any(Date));
+    // The default form state is a current ongoing attack, so the attack-day
+    // rule flag applies.
+    expect(store.startAttack).toHaveBeenCalledWith(expect.any(Date), true);
     expect(store.logPain).toHaveBeenCalledTimes(1);
     expect(store.logPain).toHaveBeenCalledWith('new-attack', 7, expect.any(Date));
     expect(store.updateAttack).toHaveBeenCalledTimes(1);
@@ -130,6 +132,54 @@ describe('AttackFormDialog peak-pain edits', () => {
 
     expect(store.logPain).toHaveBeenCalledTimes(1);
     expect(store.logPain).toHaveBeenCalledWith('new-attack', 0, expect.any(Date));
+  });
+});
+
+describe('AttackFormDialog attack-day rule flag', () => {
+  function startInput(): HTMLInputElement {
+    return screen.getByLabelText('Started') as HTMLInputElement;
+  }
+
+  function endInput(): HTMLInputElement {
+    return screen.getByLabelText('Ended') as HTMLInputElement;
+  }
+
+  it('marks the day Off only for a current ongoing attack', () => {
+    openDialog(null);
+
+    fireEvent.click(saveButton());
+
+    expect(store.startAttack).toHaveBeenCalledWith(expect.any(Date), true);
+  });
+
+  it('does not mark the day for a backfilled ended attack', () => {
+    openDialog(null);
+
+    // Turn the default ongoing form into an ended attack earlier today.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'ongoing' }));
+    fireEvent.change(startInput(), { target: { value: '2026-05-01T09:00' } });
+    fireEvent.change(endInput(), { target: { value: '2026-05-01T10:00' } });
+    fireEvent.click(saveButton());
+
+    // Only the start argument: no attack-day rewrite for a past record.
+    expect(store.startAttack).toHaveBeenCalledWith(expect.any(Date));
+    expect(store.startAttack.mock.calls[0]).toHaveLength(1);
+    expect(store.endAttack).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mark the day for a future ongoing start', () => {
+    openDialog(null);
+
+    const future = new Date(Date.now() + 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const local = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
+    fireEvent.change(startInput(), { target: { value: local } });
+
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    expect(store.startAttack).toHaveBeenCalledWith(expect.any(Date));
+    expect(store.startAttack.mock.calls[0]).toHaveLength(1);
   });
 });
 

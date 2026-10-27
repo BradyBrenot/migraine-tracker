@@ -372,7 +372,7 @@ describe('Reports rolling medication window', () => {
     expect(count.className).toContain('text-red-400');
   });
 
-  it('labels the export range as download-only and keeps it separate from the charts', async () => {
+  it('keeps the compact export toolbar in the monthly summary header, separate from the charts', async () => {
     seedState({});
     mountReports();
     await waitForSync();
@@ -380,14 +380,43 @@ describe('Reports rolling medication window', () => {
     const group = screen.getByRole('group', { name: 'Report range' });
     expect(group).toBeTruthy();
     expect(within(group).getByRole('button', { name: '12mo' })).toBeTruthy();
-    // The three areas are clearly separated; the month section is a historical
-    // summary, not "this month".
-    expect(screen.getByRole('heading', { name: 'Monthly summary' })).toBeTruthy();
+
+    // The download is a compact, borderless toolbar in the Monthly summary
+    // header area (Markdown is obvious from the visible label), not its own box.
+    const download = screen.getByRole('button', { name: 'Download .md report' });
+    expect(download.textContent).toContain('Download .md');
+    expect(screen.queryByRole('heading', { name: 'Report download' })).toBeNull();
+
+    // Range + download share one labelled export group (semantics, not a box).
+    const toolbar = screen.getByRole('group', { name: 'Report download' });
+    expect(toolbar.contains(group)).toBe(true);
+    expect(toolbar.contains(download)).toBe(true);
+    // The group stays one visual unit but may wrap at narrow widths/zoom.
+    expect(toolbar.className).toContain('flex-wrap');
+    // Touch floor on every control while the group stays visually compact.
+    expect(screen.getByRole('button', { name: '12mo' }).className).toContain('min-h-10');
+    expect(screen.getByRole('button', { name: '12mo' }).className).toContain('min-w-10');
+    expect(download.className).toContain('h-10');
+
+    const monthly = screen.getByRole('heading', { name: 'Monthly summary' });
+    expect(monthly.closest('section')!.contains(group)).toBe(true);
+    expect(monthly.closest('section')!.contains(download)).toBe(true);
+    // Range + download share one compact group above month navigation and stats.
+    expect(group.parentElement).toBe(download.parentElement);
+    const previousMonth = screen.getByRole('button', { name: 'Previous month' });
+    expect(
+      Boolean(download.compareDocumentPosition(previousMonth) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true);
+    expect(
+      Boolean(
+        download.compareDocumentPosition(statCard('Attacks')) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+
+    // The month section is a historical summary, not "this month".
     expect(screen.queryByRole('heading', { name: 'This month' })).toBeNull();
     expect(screen.getByRole('heading', { name: '12-month trends' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Report download' })).toBeTruthy();
     // Triggers/symptoms are scoped to the monthly summary, above the trends.
-    const monthly = screen.getByRole('heading', { name: 'Monthly summary' });
     const trends = screen.getByRole('heading', { name: '12-month trends' });
     const triggers = screen.getByRole('heading', { name: 'Top triggers' });
     const symptoms = screen.getByRole('heading', { name: 'Top symptoms' });

@@ -204,8 +204,27 @@ describe('PartnerHome (read-only Now)', () => {
     expect(screen.getByText('No active attack')).toBeTruthy();
     expect(screen.queryByText('Attack in progress')).toBeNull();
     expect(screen.getByText(/Last attack ended/)).toBeTruthy();
-    // The ended attack still drives today's inferred Attack day.
-    expect(screen.getByText('Attack (from attacks)')).toBeTruthy();
+    // The ended attack still makes today an Off day (inferred, no record).
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText('Well')).toBeNull();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('shows Attack while an attack is active even over an explicit Well record', async () => {
+    const today = localDayKey(NOW, TZ);
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack()],
+      dayStates: [{ day: today, status: 'well', notes: '', updatedAt: at(-4 * 60 * 60 * 1000) }],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getByText('Attack in progress')).toBeTruthy();
+    // Explicit record exists, so the plain label is used — never Well.
+    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.queryByText('Well')).toBeNull();
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 

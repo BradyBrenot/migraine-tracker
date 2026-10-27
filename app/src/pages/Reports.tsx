@@ -235,70 +235,73 @@ export default function Reports() {
     <div className="space-y-5">
       <h1 className="sr-only">Reports</h1>
 
-      {/* ── Report download ── */}
-      {!readOnly && (
-        <section
-          aria-labelledby="report-download-title"
-          className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm"
-        >
-          <div className="flex flex-wrap items-center gap-3">
-            <h2 id="report-download-title" className="text-sm font-bold">
-              Report download
-            </h2>
-            <div
-              role="group"
-              aria-label="Report range"
-              className="flex gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1"
-            >
-              {(['3', '6', '12', 'all'] as const).map((s) => (
-                <button
-                  key={s}
-                  aria-pressed={reportSpan === s}
-                  onClick={() => setReportSpan(s)}
-                  className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2.5 text-xs font-semibold transition-colors ${
-                    reportSpan === s
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-slate-300 hover:bg-slate-800'
-                  }`}
-                >
-                  {s === 'all' ? 'All' : `${s}mo`}
-                </button>
-              ))}
-            </div>
-            <Button size="sm" className="h-10 gap-1.5" onClick={downloadReport}>
-              <Download className="h-4 w-4" /> Download report
-            </Button>
-          </div>
-        </section>
-      )}
-
       {/* ── Monthly summary ────────────────────────────────────── */}
       <section aria-labelledby="report-month-title" className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2
-            id="report-month-title"
-            className="text-sm font-bold uppercase tracking-wide text-slate-400"
-          >
-            Monthly summary
-          </h2>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setCursor((c) => addMonths(c, -1))}
-              className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
-              aria-label="Previous month"
+        <div className="space-y-2">
+          {/* One compact export group, visually separate from month navigation. */}
+          {!readOnly && (
+            <div
+              role="group"
+              aria-label="Report download"
+              className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-slate-900 p-1"
             >
-              <ChevronLeft className="h-5 w-5" />
-            </button>
-            <span className="min-w-32 text-center text-base font-bold text-slate-100">
-              {monthLabel}
-            </span>
-            <button
-              onClick={() => setCursor((c) => addMonths(c, 1))}
-              className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
-              aria-label="Next month"
+              <div
+                role="group"
+                aria-label="Report range"
+                className="flex gap-0.5"
+              >
+                {(['3', '6', '12', 'all'] as const).map((s) => (
+                  <button
+                    key={s}
+                    aria-pressed={reportSpan === s}
+                    onClick={() => setReportSpan(s)}
+                    className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-1.5 text-xs font-semibold transition-colors ${
+                      reportSpan === s
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    {s === 'all' ? 'All' : `${s}mo`}
+                  </button>
+                ))}
+              </div>
+              <Button
+                size="sm"
+                aria-label="Download .md report"
+                className="h-10 gap-1 px-2 text-xs font-semibold"
+                onClick={downloadReport}
+              >
+                <Download className="h-3.5 w-3.5" /> Download .md
+              </Button>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2
+              id="report-month-title"
+              className="text-sm font-bold uppercase tracking-wide text-slate-400"
             >
-              <ChevronRight className="h-5 w-5" />
-            </button>
+              Monthly summary
+            </h2>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCursor((c) => addMonths(c, -1))}
+                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
+                aria-label="Previous month"
+              >
+                <ChevronLeft className="h-5 w-5" />
+              </button>
+              <span className="min-w-32 text-center text-base font-bold text-slate-100">
+                {monthLabel}
+              </span>
+              <button
+                onClick={() => setCursor((c) => addMonths(c, 1))}
+                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
+                aria-label="Next month"
+              >
+                <ChevronRight className="h-5 w-5" />
+              </button>
+            </div>
           </div>
         </div>
 

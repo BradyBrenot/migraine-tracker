@@ -34,6 +34,29 @@ describe('weekBarGeometry: same-day minimum width', () => {
     expect(to - from).toBeLessThanOrEqual(1 + EPS);
   });
 
+  it('pads a short late-evening attack backwards without touching midnight', () => {
+    const { from, to } = geometry(at('2026-10-13', '19:59'), at('2026-10-13', '22:59'));
+
+    expect(to).toBeCloseTo(1 + 22.9833333333 / 24, 6);
+    expect(to).toBeLessThan(2);
+    expect(to - from).toBeCloseTo(MIN_BAR_WIDTH_DAYS, 6);
+  });
+
+  it('does not change a late attack that already exceeds the minimum width', () => {
+    const { from, to } = geometry(at('2026-10-13', '16:59'), at('2026-10-13', '22:59'));
+
+    expect(from).toBeCloseTo(1 + 16.9833333333 / 24, 6);
+    expect(to).toBeCloseTo(1 + 22.9833333333 / 24, 6);
+  });
+
+  it('extends an early-day short attack forward only when needed', () => {
+    const { from, to } = geometry(at('2026-10-13', '01:00'), at('2026-10-13', '02:00'));
+
+    expect(from).toBeCloseTo(1 + 1 / 24, 6);
+    expect(to).toBeCloseTo(1 + 1 / 24 + MIN_BAR_WIDTH_DAYS, 6);
+    expect(to).toBeLessThan(2);
+  });
+
   it('pads a very short attack without crossing midnight', () => {
     // 23:59-00:00 would be ~0.0007 columns: pad backwards inside Oct 13.
     const { from, to } = geometry(at('2026-10-13', '23:59'), at('2026-10-14', '00:00'));

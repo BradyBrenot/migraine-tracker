@@ -82,11 +82,20 @@ export function weekBarGeometry({
   // attack is allowed to cross; padding an attack is not.
   const crossesIntoNextDay = barEndMs > barStartMs && position(barEndMs) > startDayEnd;
   if (!crossesIntoNextDay && to - from < minWidth) {
-    to = Math.min(from + minWidth, startDayEnd);
-    // Floating-point slack: an exact fit must not trigger the backwards pull.
-    if (to - from < minWidth - 1e-9) {
-      // Very late start: grow backwards so the whole bar stays in the day.
+    // Prefer the real start for early bars and the real end for late bars.
+    // Degenerate attacks keep the established backward-only padding behavior.
+    if (barEndMs > barStartMs && startDayEnd - to >= minWidth) {
+      to = from + minWidth;
+    } else if (barEndMs <= barStartMs) {
+      to = Math.min(from + minWidth, startDayEnd);
+      if (to - from < minWidth - 1e-9) {
+        from = Math.max(startDayIndex, to - minWidth);
+      }
+    } else {
       from = Math.max(startDayIndex, to - minWidth);
+      if (to - from < minWidth - 1e-9) {
+        to = Math.min(from + minWidth, startDayEnd);
+      }
     }
   }
 

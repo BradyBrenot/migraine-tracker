@@ -367,6 +367,18 @@ test('cross-origin mutating requests are denied before handlers run', async (t) 
     assert.equal(res.statusCode, 403, `origin ${origin}`);
     assert.equal(res.body.includes(origin), false, 'source must not be echoed');
   }
+  // A valid same-origin Origin is still denied when the Host itself is empty or
+  // malformed (a proxy/rewrite symptom): an unparseable request Host can never
+  // be proven same-origin. (A truly omitted Host cannot be exercised through
+  // inject — Node always supplies one — so empty/malformed stand in for it.)
+  for (const host of ['', 'tracker.local:8097/extra', 'not a host']) {
+    const res = await h.app.inject({
+      method: 'POST', url: '/api/reset',
+      headers: { host, origin: 'https://tracker.local:8097' },
+    });
+    assert.equal(res.statusCode, 403, `host ${JSON.stringify(host)}`);
+    assert.deepEqual(res.json(), { error: 'cross-origin request denied' });
+  }
   // nothing above mutated the database
   assert.equal((await h.app.inject({ method: 'GET', url: '/api/attacks' })).json().length, 1);
 });

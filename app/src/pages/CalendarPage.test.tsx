@@ -327,6 +327,37 @@ describe('CalendarPage configured-timezone day identity', () => {
   });
 });
 
+describe('CalendarPage out-of-month cells', () => {
+  it('uses a darker in-month fill and a distinct out-of-month fill without dimming text', async () => {
+    const TZ = 'UTC';
+    seedState({ timezone: TZ });
+    mountCalendar();
+    await waitForSync();
+
+    const cells = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-day]'));
+    expect(cells.length).toBe(42);
+    const monthPrefix = midMonthDay(TZ).slice(0, 7);
+    const inMonth = cells.find((cell) => cell.dataset.day?.slice(0, 7) === monthPrefix);
+    const outMonth = cells.find((cell) => cell.dataset.day?.slice(0, 7) !== monthPrefix);
+    if (!inMonth || !outMonth) throw new Error('expected in- and out-of-month cells');
+
+    expect(inMonth.className).toContain('bg-slate-950');
+    expect(outMonth.className).toContain('bg-slate-900');
+
+    // De-emphasis is a background choice, not opacity on the number.
+    const outNumber = outMonth.querySelector('span');
+    expect(outNumber?.className).toContain('text-slate-400');
+    expect(outNumber?.className ?? '').not.toMatch(/(^|\s)opacity-/);
+
+    // No cell may carry a border utility: the grid's gap-px + slate-800
+    // background already draws the seams, and a per-cell border made them
+    // uneven (3px vs 1px). This fails if the border is reintroduced.
+    for (const cell of cells) {
+      expect(cell.className).not.toMatch(/(^|\s)border($|\s|-)/);
+    }
+  });
+});
+
 describe('CalendarPage ongoing attacks', () => {
   const TZ = 'UTC';
 

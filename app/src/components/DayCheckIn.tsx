@@ -167,7 +167,7 @@ export default function DayCheckIn({
               }
             }}
             placeholder="Optional note…"
-            className="min-h-[32px] min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-slate-500 focus:outline-none"
+            className="min-h-10 min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-slate-500 focus:outline-none"
           />
           <button
             type="button"

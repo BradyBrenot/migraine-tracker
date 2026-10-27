@@ -611,6 +611,11 @@ export interface StoreApi {
    * fails (reset or timezone publish) or under the normal offline/diverged
    * queue rejection; the dirty/failed latches keep their existing behaviour
    * either way. Report success to the user only after it resolves.
+   *
+   * The generic "Server sync failed" toast is suppressed for this task
+   * (`suppressSyncErrorToast`): Settings shows its own specific
+   * "Erased in this browser — server erase unconfirmed" error instead. The
+   * console log and dirty/failed latches are unchanged.
    */
   resetAll: () => Promise<void>;
   /**
@@ -722,12 +727,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    *   `resolvesServerReset` confirmed reset) resolves earlier failures: if
    *   later writes remain queued it clears only `failed`; if it is the newest
    *   write and the queue drains cleanly it clears both latches.
+   *
+   * Failure feedback: a rejection always logs and latches dirty+failed, and
+   * shows the generic "Server sync failed" toast when the failure latch was
+   * not already set. `suppressSyncErrorToast` suppresses ONLY that generic
+   * toast — it is for callers that surface their own specific failure feedback
+   * (resetAll → Settings' "Erased in this browser — server erase unconfirmed")
+   * so the user does not get two overlapping errors. Console logging, latches
+   * and queue bookkeeping are never affected.
    */
   const enqueue = useCallback(
     (
       label: string,
       run: () => Promise<unknown>,
-      opts: { force?: boolean; resolvesOfflineDrain?: boolean; resolvesServerReset?: boolean } = {},
+      opts: {
+        force?: boolean;
+        resolvesOfflineDrain?: boolean;
+        resolvesServerReset?: boolean;
+        suppressSyncErrorToast?: boolean;
+      } = {},
     ): Promise<void> => {
       if (!serverRef.current || (divergedRef.current && !opts.force)) {
         // Offline/local or diverged: the change is unconfirmed AND failed —
@@ -757,7 +775,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           const wasFailed = metaRef.current.failed;
           setSyncMeta({ dirty: true, failed: true });
           console.error(`[sync] ${label} failed:`, e);
-          if (!wasFailed) {
+          if (!wasFailed && opts.suppressSyncErrorToast !== true) {
             toast.error('Server sync failed', {
               description: 'Your change is saved on this device and marked unsynced.',
             });
@@ -1443,7 +1461,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           // other unconfirmed write.
           const tz = stateRef.current.timezone;
           if (isValidTimeZone(tz)) await backend.putSetting('timezone', tz);
-        }, { force: true, resolvesServerReset: true });
+        }, { force: true, resolvesServerReset: true, suppressSyncErrorToast: true });
       },
       mergeBackup: (backup) => {
         // Compute the additive diff synchronously from the freshest state so

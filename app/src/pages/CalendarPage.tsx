@@ -447,7 +447,9 @@ export default function CalendarPage() {
                       data-day={key}
                       aria-label={formatDayLabel(key, state.timezone, true)}
                       onClick={() => setSelected(key)}
-                      className={`relative flex min-h-[70px] flex-col bg-slate-950 p-1 text-left transition-colors hover:bg-slate-800 sm:min-h-[88px] ${
+                      className={`relative flex min-h-[70px] flex-col p-1 text-left transition-colors hover:bg-slate-800 sm:min-h-[88px] ${
+                        d.inMonth ? 'bg-slate-950' : 'bg-slate-900'
+                      } ${
                         d.isToday ? 'z-10 ring-2 ring-inset ring-sky-400' : ''
                       }`}
                       style={

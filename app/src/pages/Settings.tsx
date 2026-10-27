@@ -117,9 +117,16 @@ function isDefiniteRestoreRejection(error: unknown): error is ApiError {
 /** Documented server body limit; reject locally before reading any bytes. */
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 
-const TOO_LARGE_DESCRIPTION =
-  'Restore uploads are limited to 25 MB. Use a smaller backup, or restore the '
-  + 'SQLite files (see DEPLOY.md).';
+/** Client-side File precheck: the file size is not the wire request body. */
+const CLIENT_TOO_LARGE_DESCRIPTION =
+  'This device blocks files over 25 MB before reading them. That precheck '
+  + 'measures the file, while the server limit applies to the upload body, which '
+  + 'can differ. Use a smaller backup, or restore the SQLite files (see DEPLOY.md).';
+
+/** Server 413: the request body exceeded the documented 25 MB limit. */
+const SERVER_TOO_LARGE_DESCRIPTION =
+  'The server rejected this restore upload as too large (25 MB request-body '
+  + 'limit). Use a smaller backup, or restore the SQLite files (see DEPLOY.md).';
 
 const UNCONFIRMED_DESCRIPTION =
   'The server may already have applied the replacement — check the current data before retrying.';
@@ -163,6 +170,13 @@ export default function Settings() {
    * bails at every await boundary.
    */
   const jsonReadTokenRef = useRef(0);
+  /**
+   * Synchronous guard for the erase-all confirm: a duplicate click cannot start
+   * a second reset or show a second toast.
+   */
+  const resetBusyRef = useRef(false);
+  /** Render-visible pending state: disables the dialog actions while erasing. */
+  const [resetBusy, setResetBusy] = useState(false);
 
   // Read-only environment configuration. Fetched once; a late response after
   // unmount is ignored, and any failure/malformed body reads as unavailable.
@@ -296,11 +310,16 @@ export default function Settings() {
     // already invalidated any earlier in-flight read, and this branch has no
     // await, so an older read can never publish after it.
     if (file.size > MAX_BACKUP_BYTES) {
+      // Drop any preview from an earlier pick: this rejection must leave no
+      // stale, still-restorable preview visible.
+      setJsonPreview(null);
       // Round the shown size UP to two decimals: a file one byte over the limit
       // must not read as "25.00 MB", which would contradict "over the limit".
       const sizeMb = (Math.ceil((file.size / (1024 * 1024)) * 100) / 100).toFixed(2);
-      setJsonError(`“${file.name}” is ${sizeMb} MB, over the 25 MB limit.`);
-      toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+      setJsonError(
+        `“${file.name}” is ${sizeMb} MB, over this app's 25 MB precheck limit.`,
+      );
+      toast.error('Backup file is too large', { description: CLIENT_TOO_LARGE_DESCRIPTION });
       return;
     }
 
@@ -360,7 +379,7 @@ export default function Settings() {
       synced.catch((error: unknown) => {
         if (isDefiniteRestoreRejection(error)) {
           if (error.status === 413) {
-            toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+            toast.error('Backup file is too large', { description: SERVER_TOO_LARGE_DESCRIPTION });
             return;
           }
           toast.error('Records were added on this device only', {
@@ -409,7 +428,7 @@ export default function Settings() {
       setReplaceOpen(false);
       if (isDefiniteRestoreRejection(error)) {
         if (error.status === 413) {
-          toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+          toast.error('Backup file is too large', { description: SERVER_TOO_LARGE_DESCRIPTION });
         } else {
           toast.error('Restore failed — nothing was changed', {
             description: error.message,
@@ -423,6 +442,43 @@ export default function Settings() {
     } finally {
       restoreBusyRef.current = false;
       setRestoreBusy(false);
+    }
+  }
+
+  async function confirmReset() {
+    if (resetBusyRef.current) return;
+    resetBusyRef.current = true;
+    setResetBusy(true);
+    try {
+      if (!store.serverMode) {
+        // Browser-only: resetAll() erases local data synchronously and then
+        // rejects by design (there is no server connection to erase). The
+        // local erase is all this device can confirm, so report that and
+        // swallow the expected rejection.
+        await store.resetAll().catch(() => {});
+        toast.success('Data erased in this browser', {
+          description: 'No server copy was changed. This device is marked unsynced.',
+        });
+        return;
+      }
+      // Server mode: the local erase is already optimistic, but only a
+      // fulfilled promise confirms the server reset (and timezone re-publish).
+      // The store suppresses its generic sync toast for this task, so this is
+      // the single, specific error the user sees on failure.
+      await store.resetAll();
+      toast.success('All data erased');
+    } catch {
+      toast.error('Erased in this browser — server erase unconfirmed', {
+        description:
+          'The local data was erased, but the server erase failed or could not be '
+          + 'confirmed. This device remains marked unsynced.',
+      });
+    } finally {
+      resetBusyRef.current = false;
+      setResetBusy(false);
+      // Close on settle (success or failure), matching the restore dialog: the
+      // outcome is reported by the toast above, and a retry is one click away.
+      setResetOpen(false);
     }
   }
 
@@ -1158,7 +1214,14 @@ export default function Settings() {
       </AlertDialog>
 
       {/* reset confirm */}
-      <AlertDialog open={resetOpen} onOpenChange={setResetOpen}>
+      <AlertDialog
+        open={resetOpen}
+        onOpenChange={(open) => {
+          // Ignores attempts (Escape/overlay) to close while erasing: the
+          // outcome is reported when the promise settles, which closes it.
+          if (!resetBusy) setResetOpen(open);
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Erase all data?</AlertDialogTitle>
@@ -1169,14 +1232,17 @@ export default function Settings() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={resetBusy}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => {
-                store.resetAll();
-                toast.success('All data erased');
+              disabled={resetBusy}
+              onClick={(event) => {
+                // Keep the dialog open while the erase runs (Radix closes on
+                // Action by default); confirmReset closes it on settle.
+                event.preventDefault();
+                void confirmReset();
               }}
             >
-              Erase everything
+              {resetBusy ? 'Erasing…' : 'Erase everything'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

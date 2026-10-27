@@ -348,7 +348,7 @@ test('backup dump is atomic and safe: failures leave no daily/temp file and neve
   }
 });
 
-test('corrupt legacy attack JSON columns fall back to [] through export, backup, and restore', async (t) => {
+test('corrupt legacy attack JSON columns are sanitized through export, backup, and restore', async (t) => {
   const h = await makeApp({ label: 'migraine-corrupt-json' });
   t.after(() => h.close());
 
@@ -361,16 +361,19 @@ test('corrupt legacy attack JSON columns fall back to [] through export, backup,
   h.db.prepare(`INSERT INTO attacks (id,start,"end",pain_log,peak_pain,symptoms,triggers,aura,notes,source)
     VALUES ('valid1','2026-05-03T00:00:00Z',NULL,'[{"ts":"2026-05-03T01:00:00Z","level":6}]',6,'["aura"]','["sleep"]',0,'all-valid','manual')`).run();
 
-  // GET /api/export must not throw; each field falls back independently.
+  // GET /api/export must not throw; each field is sanitized independently:
+  // malformed JSON and non-array JSON become [], while a real array keeps its
+  // valid items and drops only the invalid ones.
   const exported = await h.app.inject({ method: 'GET', url: '/api/export' });
   assert.equal(exported.statusCode, 200);
   const envelope = exported.json();
   assert.deepEqual(envelope.attacks.map((a) => a.id), ['corrupt1', 'corrupt2', 'valid1']);
   const [bad, mixed, good] = envelope.attacks;
 
+  // malformed JSON -> []; non-array JSON -> []; mixed array -> valid item kept
   assert.deepEqual(bad.painLog, []);
   assert.deepEqual(bad.symptoms, []);
-  assert.deepEqual(bad.triggers, []);
+  assert.deepEqual(bad.triggers, ['ok']);
   // valid sibling fields are untouched
   assert.equal(bad.start, '2026-05-01T00:00:00Z');
   assert.equal(bad.peakPain, 4);
@@ -396,6 +399,7 @@ test('corrupt legacy attack JSON columns fall back to [] through export, backup,
   assert.ok(file && existsSync(file));
   const dumped = JSON.parse(readFileSync(file, 'utf8'));
   assert.deepEqual(dumped.attacks[0].painLog, []);
+  assert.deepEqual(dumped.attacks[0].triggers, ['ok']);
   assert.deepEqual(dumped.attacks[1].symptoms, ['nausea']);
   assert.deepEqual(dumped.attacks[2].painLog, [{ ts: '2026-05-03T01:00:00Z', level: 6 }]);
 
@@ -409,6 +413,7 @@ test('corrupt legacy attack JSON columns fall back to [] through export, backup,
   const rounds = (await target.app.inject({ method: 'GET', url: '/api/attacks' })).json();
   assert.deepEqual(rounds.map((a) => a.id), ['corrupt1', 'corrupt2', 'valid1']);
   assert.deepEqual(rounds[0].painLog, []);
+  assert.deepEqual(rounds[0].triggers, ['ok']);
   assert.deepEqual(rounds[1].symptoms, ['nausea']);
   assert.deepEqual(rounds[2].triggers, ['sleep']);
 
@@ -421,4 +426,43 @@ test('corrupt legacy attack JSON columns fall back to [] through export, backup,
     const res = await target.app.inject({ method: 'POST', url: '/api/attacks', payload });
     assert.equal(res.statusCode, 400);
   }
+});
+
+test('a PATCH read-merge-write keeps valid pain-log items and drops only invalid ones', async (t) => {
+  const h = await makeApp({ label: 'migraine-patch-mixed-painlog' });
+  t.after(() => h.close());
+
+  // Inserted directly (bypassing the write validator): two valid entries and
+  // one invalid entry (level is a string, not a finite number).
+  h.db.prepare(`INSERT INTO attacks (id,start,"end",pain_log,peak_pain,symptoms,triggers,aura,notes,source)
+    VALUES ('mixed','2026-07-01T00:00:00Z',NULL,
+      '[{"ts":"2026-07-01T01:00:00Z","level":4},{"ts":"2026-07-01T02:00:00Z","level":7},{"ts":"2026-07-01T03:00:00Z","level":"high"}]',
+      7,'[]','[]',NULL,'before','manual')`).run();
+
+  const validEntries = [
+    { ts: '2026-07-01T01:00:00Z', level: 4 },
+    { ts: '2026-07-01T02:00:00Z', level: 7 },
+  ];
+  // Reading is already sanitized (this is the same mapper PATCH reads through).
+  const before = (await h.app.inject({ method: 'GET', url: '/api/attacks' })).json();
+  assert.deepEqual(before[0].painLog, validEntries);
+
+  // An UNRELATED field edit: the read-merge-write must not lose recoverable
+  // pain entries just because one legacy item was invalid.
+  const patched = await h.app.inject({
+    method: 'PATCH', url: '/api/attacks/mixed', payload: { notes: 'after' },
+  });
+  assert.equal(patched.statusCode, 200);
+  assert.equal(patched.json().notes, 'after');
+  assert.deepEqual(patched.json().painLog, validEntries);
+
+  const after = (await h.app.inject({ method: 'GET', url: '/api/attacks' })).json();
+  assert.equal(after.length, 1);
+  assert.equal(after[0].notes, 'after');
+  assert.deepEqual(after[0].painLog, validEntries);
+  assert.deepEqual(after[0].painLog.map((p) => p.level), [4, 7]);
+
+  // The stored column now holds only the sanitized entries.
+  const row = h.db.prepare('SELECT pain_log FROM attacks WHERE id = ?').get('mixed');
+  assert.deepEqual(JSON.parse(row.pain_log), validEntries);
 });

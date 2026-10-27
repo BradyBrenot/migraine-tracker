@@ -107,6 +107,8 @@ export default function AttackFormDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="grid max-h-[calc(100dvh-1rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-h-[92vh] sm:max-w-lg">
+        {/* p-0 removes DialogContent's default padding, so the header reserves
+            the absolutely positioned close-button gutter with pr-16. */}
         <DialogHeader className="border-b border-slate-800 px-5 py-4 pr-16">
           <DialogTitle>{isNew ? 'Add attack' : 'Edit attack'}</DialogTitle>
         </DialogHeader>

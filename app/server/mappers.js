@@ -5,10 +5,18 @@
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /**
- * Defensive read of a legacy JSON column. A hand-edited/damaged row must not
- * throw inside GET /api/export, the nightly backup, or restore's post-commit
- * snapshot read; malformed JSON falls back to `[]` instead. Raw column text is
- * never exposed or logged.
+ * Defensive, sanitizing read of a legacy JSON column. A hand-edited/damaged
+ * row must not throw inside GET /api/export, the nightly backup, or restore's
+ * post-commit snapshot read, so malformed JSON — and valid JSON that is not an
+ * array — falls back to `[]`.
+ *
+ * A genuine array is filtered item by item: valid entries are kept and only
+ * invalid ones are dropped. Dropping recoverable entries would be lossy beyond
+ * the damage, which matters most for PATCH /api/attacks/:id: that route does a
+ * read-merge-write (`{...attackFromRow(existing), ...patch}` → `attackToRow`),
+ * so a whole-field fallback would destroy every valid item in the array when
+ * the user edits an unrelated field. Raw column text is never exposed or
+ * logged.
  */
 function parseArrayColumn(raw, isValidItem) {
   let parsed;
@@ -17,9 +25,7 @@ function parseArrayColumn(raw, isValidItem) {
   } catch {
     return [];
   }
-  // Do not partially preserve an invalid array: one bad item means the whole
-  // field is untrustworthy, so the documented empty shape wins.
-  return Array.isArray(parsed) && parsed.every(isValidItem) ? parsed : [];
+  return Array.isArray(parsed) ? parsed.filter(isValidItem) : [];
 }
 
 // painLog items: plain objects with a string ts and finite numeric level.

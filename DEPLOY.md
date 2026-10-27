@@ -278,6 +278,28 @@ then use `image: migraine-tracker:latest` in place of `build:`.
 - HTTPS is required for mobile Chrome installation; use the real HTTPS hostname
   for the install acceptance check.
 
+### Same-origin write guard
+
+The server rejects a mutating request (anything other than `GET`/`HEAD`/`OPTIONS`)
+with `403 {"error":"cross-origin request denied"}` when it carries an `Origin`
+or `Referer` header whose `host:port` does not match the request's `Host`
+header. Requests with neither header (curl, scripts, partner clients) are still
+allowed, reads are never blocked, and the scheme is deliberately not compared
+(TLS may terminate at the proxy). Malformed/opaque origins are denied.
+
+If a reverse proxy rewrites the `Host` header, writes can return 403 while
+reads and `GET` keep working. The proxy must preserve the original Host header.
+For nginx the generic form is:
+
+```nginx
+proxy_set_header Host $host;
+```
+
+Other proxies differ, so check your proxy's documentation for the equivalent
+setting instead of assuming it behaves the same way. Symptom: the app loads and
+every save, erase, or import fails with 403 — verify Host preservation in the
+proxy configuration. This guard is not authentication.
+
 ### Partner read-only view
 
 Send the partner to `https://<host>/view` (the same host used for the app). It

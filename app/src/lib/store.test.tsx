@@ -952,7 +952,11 @@ describe('StoreProvider sync state and persistence', () => {
     expect(currentStore().sync.failed).toBe(true);
     expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
     expect(currentStore().state.attacks).toHaveLength(0);
-    expect(toast.error).toHaveBeenCalled();
+    // Settings reports this failure itself; the queue must not also show the
+    // generic toast (which would double-report the same failure)...
+    expect(toast.error).not.toHaveBeenCalled();
+    // ...while the diagnostic log and the latches above are unaffected.
+    expect(consoleError).toHaveBeenCalledWith('[sync] reset failed:', expect.any(Error));
     consoleError.mockRestore();
   });
 

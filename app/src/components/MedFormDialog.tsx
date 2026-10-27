@@ -111,7 +111,7 @@ export default function MedFormDialog({
           {isNurtec && (
             <div className="space-y-1.5">
               <Label>
-                Tablets <span className="font-normal text-slate-500">(blank = unknown)</span>
+                Tablets <span className="font-normal text-slate-400">(blank = unknown)</span>
               </Label>
               <Input
                 type="number"

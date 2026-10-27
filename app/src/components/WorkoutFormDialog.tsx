@@ -218,7 +218,7 @@ export default function WorkoutFormDialog({
 
           <div className="space-y-1.5">
             <Label>
-              Duration <span className="font-normal text-slate-500">(minutes, optional)</span>
+              Duration <span className="font-normal text-slate-400">(minutes, optional)</span>
             </Label>
             <Input
               type="number"

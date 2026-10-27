@@ -167,7 +167,7 @@ export default function Reports() {
         <div className="flex items-center gap-1">
           <button
             onClick={() => setCursor((c) => addMonths(c, -1))}
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
             aria-label="Previous month"
           >
             <ChevronLeft className="h-5 w-5" />
@@ -177,7 +177,7 @@ export default function Reports() {
           </span>
           <button
             onClick={() => setCursor((c) => addMonths(c, 1))}
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
             aria-label="Next month"
           >
             <ChevronRight className="h-5 w-5" />
@@ -190,7 +190,7 @@ export default function Reports() {
                 <button
                   key={s}
                   onClick={() => setReportSpan(s)}
-                  className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors ${
                     reportSpan === s ? 'bg-white text-slate-950' : 'text-slate-400 hover:bg-slate-800'
                   }`}
                 >
@@ -198,7 +198,7 @@ export default function Reports() {
                 </button>
               ))}
             </div>
-            <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadReport}>
+            <Button variant="outline" size="sm" className="h-10 gap-1.5" onClick={downloadReport}>
               <Download className="h-4 w-4" /> Report
             </Button>
           </div>

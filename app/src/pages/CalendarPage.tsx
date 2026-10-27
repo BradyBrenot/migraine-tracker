@@ -108,7 +108,7 @@ function MedLimitBar({ medId }: { medId: string }) {
           style={{ width: `${pct}%`, background: barColor }}
         />
       </div>
-      <div className="mt-1 text-[11px] text-slate-500">
+      <div className="mt-1 text-[11px] text-slate-400">
         rolling {rule.windowDays} days
         {over && <span className="ml-1 font-semibold" style={{ color: STATUS.danger }}>— overuse risk!</span>}
       </div>
@@ -165,7 +165,7 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (me
           {onSchedule && (
             <button
               onClick={() => onSchedule(medId)}
-              className="rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+              className="flex h-10 w-10 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-200"
               title="Schedule next dose / appointment"
               aria-label={`Schedule next ${medName(medId)}`}
             >
@@ -196,7 +196,7 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (me
               style={{ width: `${pct}%`, background: due ? STATUS.danger : STATUS.ok }}
             />
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             ~every {interval}d
             {plannedDate ? ' · schedule overrides auto-date' : ''}
           </div>
@@ -406,7 +406,7 @@ export default function CalendarPage() {
         <div className="mb-3 flex items-center justify-between">
           <button
             onClick={() => setCursor((c) => addMonths(c, -1))}
-            className="rounded-lg p-2 text-slate-300 hover:bg-slate-800"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
             aria-label="Previous month"
           >
             <ChevronLeft className="h-5 w-5" />
@@ -421,14 +421,14 @@ export default function CalendarPage() {
           </div>
           <button
             onClick={() => setCursor((c) => addMonths(c, 1))}
-            className="rounded-lg p-2 text-slate-300 hover:bg-slate-800"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
             aria-label="Next month"
           >
             <ChevronRight className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="grid grid-cols-7 text-center text-[11px] font-semibold uppercase text-slate-500">
+        <div className="grid grid-cols-7 text-center text-[11px] font-semibold uppercase text-slate-400">
           {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
             <div key={d} className="py-1">{d}</div>
           ))}
@@ -448,15 +448,21 @@ export default function CalendarPage() {
                       aria-label={formatDayLabel(key, state.timezone, true)}
                       onClick={() => setSelected(key)}
                       className={`relative flex min-h-[70px] flex-col bg-slate-950 p-1 text-left transition-colors hover:bg-slate-800 sm:min-h-[88px] ${
-                        d.inMonth ? '' : 'opacity-35'
-                      } ${d.isToday ? 'z-10 ring-2 ring-inset ring-sky-400' : ''}`}
-                      style={d.maxPain >= 0 ? { background: painTint(d.maxPain) } : undefined}
+                        d.isToday ? 'z-10 ring-2 ring-inset ring-sky-400' : ''
+                      }`}
+                      style={
+                        d.inMonth && d.maxPain >= 0
+                          ? { background: painTint(d.maxPain) }
+                          : undefined
+                      }
                     >
                       <span
                         className={`text-xs font-semibold tabular-nums ${
                           d.isToday
                             ? 'flex h-5 w-5 items-center justify-center rounded-full bg-sky-400 text-slate-950'
-                            : 'text-slate-400'
+                            : d.inMonth
+                              ? 'text-slate-100'
+                              : 'text-slate-400'
                         }`}
                       >
                         {Number(key.slice(8, 10))}
@@ -479,7 +485,7 @@ export default function CalendarPage() {
                             );
                           })}
                           {d.meds.length > 5 && (
-                            <span className="text-[9px] leading-none text-slate-500">
+                            <span className="text-[9px] leading-none text-slate-400">
                               +{d.meds.length - 5}
                             </span>
                           )}
@@ -536,18 +542,20 @@ export default function CalendarPage() {
 
         {/* legend */}
         <div className="mt-3 space-y-2">
-          <div className="flex items-center gap-2 text-[11px] text-slate-400">
-            <span>pain</span>
-            <span
-              className="h-2.5 w-32 rounded-full"
-              style={{
-                background: `linear-gradient(to right, ${[0, 2, 4, 6, 8, 10]
-                  .map((l) => painColor(l))
-                  .join(', ')})`,
-              }}
-            />
-            <span className="text-slate-500">mild → severe</span>
-            <span className="ml-3">day tint = worst attack that day</span>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+            <span className="flex items-center gap-2">
+              <span>pain</span>
+              <span
+                className="h-2.5 w-24 rounded-full sm:w-32"
+                style={{
+                  background: `linear-gradient(to right, ${[0, 2, 4, 6, 8, 10]
+                    .map((l) => painColor(l))
+                    .join(', ')})`,
+                }}
+              />
+              <span className="text-slate-400">mild → severe</span>
+            </span>
+            <span className="text-slate-400">day tint = worst attack</span>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
             {allMedIds(state.meds)
@@ -583,7 +591,10 @@ export default function CalendarPage() {
 
       {/* ── day detail sheet ────────────────────────────────── */}
       <Sheet open={!!selData} onOpenChange={(o) => !o && setSelected(null)}>
-        <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto rounded-t-2xl sm:mx-auto sm:max-w-lg">
+        <SheetContent
+          side="bottom"
+          className="max-h-[85dvh] overflow-y-auto rounded-t-2xl pb-[calc(4rem_+_env(safe-area-inset-bottom,0px))] sm:mx-auto sm:max-w-lg md:pb-4"
+        >
           {selData && (
             <>
               <SheetHeader>
@@ -593,13 +604,13 @@ export default function CalendarPage() {
                 {selectedWellness && (
                   <div className="rounded-lg border border-slate-800 bg-slate-900">
                     <div className="flex items-center justify-between px-3 py-2">
-                      <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wide text-slate-400">
                         Day state
                       </span>
                       <span
                         className={`text-sm font-semibold ${
                           selectedWellness.status === null
-                            ? 'text-slate-500'
+                            ? 'text-slate-400'
                             : DAY_STATE_CLASS[selectedWellness.status]
                         }`}
                       >
@@ -619,7 +630,7 @@ export default function CalendarPage() {
                 )}
                 {selData.attacks.length === 0 && selData.meds.length === 0
                   && (selectedWellness?.workouts.length ?? 0) === 0 && (
-                  <p className="py-6 text-center text-sm text-slate-500">
+                  <p className="py-6 text-center text-sm text-slate-400">
                     Nothing logged this day 🎉
                   </p>
                 )}
@@ -655,7 +666,7 @@ export default function CalendarPage() {
                         <div>
                           <div className="text-sm font-semibold text-slate-200">
                             {fmtTime(a.start)} → {a.end ? fmtTime(a.end) : 'ongoing'}
-                            <span className="ml-2 text-xs font-normal text-slate-500">
+                            <span className="ml-2 text-xs font-normal text-slate-400">
                               {durLabel}
                             </span>
                             {endBeforeStart && (
@@ -698,7 +709,7 @@ export default function CalendarPage() {
                 })}
                 {selData.meds.length > 0 && (
                   <div>
-                    <h3 className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    <h3 className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-400">
                       Medications
                     </h3>
                     <div className="space-y-1">
@@ -713,8 +724,8 @@ export default function CalendarPage() {
                               {medAbbr(m.medId)}
                             </span>
                             <span className="font-medium">{medName(m.medId)}</span>
-                            {m.dose && <span className="text-slate-500">{m.dose}</span>}
-                            <span className="ml-auto text-xs tabular-nums text-slate-500">{fmtTime(m.ts)}</span>
+                            {m.dose && <span className="text-slate-400">{m.dose}</span>}
+                            <span className="ml-auto text-xs tabular-nums text-slate-400">{fmtTime(m.ts)}</span>
                           </div>
                         );
                       })}
@@ -723,7 +734,7 @@ export default function CalendarPage() {
                 )}
                 {(selectedWellness?.workouts.length ?? 0) > 0 && (
                   <div>
-                    <h3 className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    <h3 className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-400">
                       Workouts
                     </h3>
                     <div className="space-y-1">
@@ -736,12 +747,12 @@ export default function CalendarPage() {
                             <span className="font-medium text-slate-200">
                               {WORKOUT_KIND_LABEL[w.kind]} · {w.effort}
                             </span>
-                            <span className="ml-auto text-xs tabular-nums text-slate-500">
+                            <span className="ml-auto text-xs tabular-nums text-slate-400">
                               {fmtTime(w.performedAt)}
                             </span>
                           </div>
                           {w.durationMinutes !== null && (
-                            <div className="text-xs text-slate-500">{w.durationMinutes}m</div>
+                            <div className="text-xs text-slate-400">{w.durationMinutes}m</div>
                           )}
                           {w.notes && (
                             <p className="mt-1 border-l-2 border-slate-700 pl-2 text-xs italic text-slate-400">

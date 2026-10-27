@@ -264,7 +264,7 @@ describe('Settings JSON backup restore', () => {
     expect(screen.getByLabelText('1 day state')).toBeTruthy();
     expect(screen.getByLabelText('1 starting count')).toBeTruthy();
     // Semantics are always spelled out in the preview.
-    expect(screen.getByText(/Merge adds only records that are missing/)).toBeTruthy();
+    expect(screen.getByText(/Merge adds only records missing here/)).toBeTruthy();
     expect(screen.getByText(/Replace removes ALL current records/)).toBeTruthy();
   });
 

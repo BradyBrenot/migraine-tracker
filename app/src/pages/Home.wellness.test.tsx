@@ -669,29 +669,31 @@ describe('Home wellness logging', () => {
     }
   });
 
-  it('labels the primary CTA "Another attack started" and starts a second real attack', async () => {
+  it('labels the primary CTA "Log another attack" and starts a second real attack', async () => {
     const now = Date.now();
     seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
 
     mountHome();
     await waitForSync();
 
-    expect(screen.queryByRole('button', { name: 'Attack started' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Another attack started' }));
+    expect(screen.queryByRole('button', { name: 'Start attack now' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Log another attack' }));
 
     await waitFor(() => expect(captured!.state.attacks).toHaveLength(2));
     expect(screen.getByText('How bad is the pain right now?')).toBeTruthy();
   });
 
-  it('keeps the "Attack started" CTA on a day with no attacks', async () => {
+  it('keeps the "Start attack now" CTA on a day with no attacks', async () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByRole('button', { name: 'Attack started' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Another attack started' })).toBeNull();
+    // Both labels are actions, never a past-tense status.
+    expect(screen.getByRole('button', { name: 'Start attack now' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Log another attack' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Attack started/ })).toBeNull();
   });
 
-  it('clicking the main Attack started CTA then 0 logs a real 0-pain attack, not an Off day', async () => {
+  it('clicking the main Start attack now CTA then 0 logs a real 0-pain attack, not an Off day', async () => {
     mountHome();
     await waitForSync();
 
@@ -701,7 +703,7 @@ describe('Home wellness logging', () => {
     expect(screen.queryByRole('button', { name: 'Log pain' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Attack started' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
 
     // The CTA starts the attack and opens the pain dialog for it.
     await waitFor(() => expect(captured!.state.attacks).toHaveLength(1));
@@ -1243,7 +1245,7 @@ describe('Home recent-dose surfacing', () => {
     await waitForSync();
 
     // The rest of the page still renders and no hint is produced from junk.
-    expect(screen.getByRole('button', { name: 'Attack started' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start attack now' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Tylenol/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Ibuprofen/ })).toBeTruthy();
     expect(screen.queryByText(/^Last /)).toBeNull();
@@ -1416,6 +1418,40 @@ describe('Home demo-data guard', () => {
     expect(api.importAll).not.toHaveBeenCalled();
     // Seeding flips `seeded`, so the existing condition hides the block.
     expect(screen.queryByText(DEMO_COPY)).toBeNull();
+  });
+
+  it('hides the demo block when only a medication exists locally', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+    seedState({ timezone: 'UTC', meds: [makeMed({ id: 'local-med' })] });
+
+    mountHome();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalled());
+    expect(captured!.serverMode).toBe(false);
+    expect(captured!.state.attacks).toHaveLength(0);
+    expect(captured!.state.meds).toHaveLength(1);
+
+    // Nonempty local data must never be replaced by demo seeding.
+    expect(screen.queryByText(DEMO_COPY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DEMO_BUTTON })).toBeNull();
+    expect(api.importAll).not.toHaveBeenCalled();
+  });
+
+  it('hides the demo block when only a workout exists locally', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+    seedState({
+      timezone: 'UTC',
+      workouts: [makeWorkout('cardio', { id: 'local-workout' })],
+    });
+
+    mountHome();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalled());
+    expect(captured!.serverMode).toBe(false);
+    expect(captured!.state.attacks).toHaveLength(0);
+    expect(captured!.state.workouts).toHaveLength(1);
+
+    expect(screen.queryByText(DEMO_COPY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DEMO_BUTTON })).toBeNull();
+    expect(api.importAll).not.toHaveBeenCalled();
   });
 
   it('keeps the demo block hidden for already-seeded local state', async () => {

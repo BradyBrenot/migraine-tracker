@@ -18,7 +18,7 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
+      className={`inline-flex min-h-11 items-center rounded-full border px-3 text-sm font-medium transition-colors ${
         active
           ? 'border-slate-900 bg-white text-slate-950'
           : 'border-slate-600 bg-slate-900 text-slate-300 hover:border-slate-400'
@@ -106,117 +106,119 @@ export default function AttackFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent className="grid max-h-[calc(100dvh-1rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-h-[92vh] sm:max-w-lg">
+        <DialogHeader className="border-b border-slate-800 px-5 py-4 pr-16">
           <DialogTitle>{isNew ? 'Add attack' : 'Edit attack'}</DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-5 py-2">
-          {/* times */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Started</Label>
-              <Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+        <div className="min-h-0 overflow-y-auto px-5 py-4">
+          <div className="space-y-5">
+            {/* times */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Started</Label>
+                <Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="flex items-center justify-between">
+                  Ended
+                  <label className="flex items-center gap-1 text-xs font-normal text-slate-400">
+                    <input
+                      type="checkbox"
+                      checked={ongoing}
+                      onChange={(e) => setOngoing(e.target.checked)}
+                      className="accent-slate-900"
+                    />
+                    ongoing
+                  </label>
+                </Label>
+                <Input
+                  type="datetime-local"
+                  value={end}
+                  disabled={ongoing}
+                  onChange={(e) => setEnd(e.target.value)}
+                />
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label className="flex items-center justify-between">
-                Ended
-                <label className="flex items-center gap-1 text-xs font-normal text-slate-400">
-                  <input
-                    type="checkbox"
-                    checked={ongoing}
-                    onChange={(e) => setOngoing(e.target.checked)}
-                    className="accent-slate-900"
-                  />
-                  ongoing
-                </label>
+
+            {/* pain */}
+            <div className="space-y-2">
+              <Label>
+                Peak pain:{' '}
+                {painSet ? (
+                  <span className="font-bold" style={{ color: painColor(pain) }}>{pain}/10</span>
+                ) : (
+                  <span className="text-slate-400">not set</span>
+                )}
               </Label>
-              <Input
-                type="datetime-local"
-                value={end}
-                disabled={ongoing}
-                onChange={(e) => setEnd(e.target.value)}
+              <div className="flex flex-wrap gap-1.5">
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => { setPain(n); setPainSet(true); }}
+                    className={`h-11 w-11 rounded-lg border text-sm font-bold transition-all ${
+                      painSet && pain === n
+                        ? 'scale-110 border-transparent shadow'
+                        : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-400'
+                    }`}
+                    style={painSet && pain === n ? { background: painColor(n), color: textOn(painColor(n)) } : undefined}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* symptoms */}
+            <div className="space-y-2">
+              <Label>Symptoms</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {SYMPTOM_OPTIONS.map((s) => (
+                  <Chip key={s} active={symptoms.includes(s)} onClick={() => setSymptoms(toggle(symptoms, s))}>
+                    {s}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+
+            {/* triggers */}
+            <div className="space-y-2">
+              <Label>Potential triggers</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {TRIGGER_OPTIONS.map((t) => (
+                  <Chip key={t} active={triggers.includes(t)} onClick={() => setTriggers(toggle(triggers, t))}>
+                    {t}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+
+            {/* aura */}
+            <div className="space-y-2">
+              <Label>Aura</Label>
+              <div className="flex gap-1.5">
+                <Chip active={aura === true} onClick={() => setAura(aura === true ? null : true)}>Yes</Chip>
+                <Chip active={aura === false} onClick={() => setAura(aura === false ? null : false)}>No</Chip>
+              </div>
+            </div>
+
+            {/* notes */}
+            <div className="space-y-1.5">
+              <Label>Notes</Label>
+              <Textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Anything else worth remembering…"
+                rows={3}
               />
             </div>
           </div>
-
-          {/* pain */}
-          <div className="space-y-2">
-            <Label>
-              Peak pain:{' '}
-              {painSet ? (
-                <span className="font-bold" style={{ color: painColor(pain) }}>{pain}/10</span>
-              ) : (
-                <span className="text-slate-400">not set</span>
-              )}
-            </Label>
-            <div className="flex flex-wrap gap-1.5">
-              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => { setPain(n); setPainSet(true); }}
-                  className={`h-9 w-9 rounded-lg border text-sm font-bold transition-all ${
-                    painSet && pain === n
-                      ? 'scale-110 border-transparent shadow'
-                      : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-400'
-                  }`}
-                  style={painSet && pain === n ? { background: painColor(n), color: textOn(painColor(n)) } : undefined}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* symptoms */}
-          <div className="space-y-2">
-            <Label>Symptoms</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {SYMPTOM_OPTIONS.map((s) => (
-                <Chip key={s} active={symptoms.includes(s)} onClick={() => setSymptoms(toggle(symptoms, s))}>
-                  {s}
-                </Chip>
-              ))}
-            </div>
-          </div>
-
-          {/* triggers */}
-          <div className="space-y-2">
-            <Label>Potential triggers</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {TRIGGER_OPTIONS.map((t) => (
-                <Chip key={t} active={triggers.includes(t)} onClick={() => setTriggers(toggle(triggers, t))}>
-                  {t}
-                </Chip>
-              ))}
-            </div>
-          </div>
-
-          {/* aura */}
-          <div className="space-y-2">
-            <Label>Aura</Label>
-            <div className="flex gap-1.5">
-              <Chip active={aura === true} onClick={() => setAura(aura === true ? null : true)}>Yes</Chip>
-              <Chip active={aura === false} onClick={() => setAura(aura === false ? null : false)}>No</Chip>
-            </div>
-          </div>
-
-          {/* notes */}
-          <div className="space-y-1.5">
-            <Label>Notes</Label>
-            <Textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Anything else worth remembering…"
-              rows={3}
-            />
-          </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save}>{isNew ? 'Add attack' : 'Save changes'}</Button>
+        <DialogFooter className="border-t border-slate-800 px-5 py-3">
+          <Button variant="outline" className="h-11" onClick={onClose}>Cancel</Button>
+          <Button className="h-11" onClick={save}>{isNew ? 'Add attack' : 'Save changes'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

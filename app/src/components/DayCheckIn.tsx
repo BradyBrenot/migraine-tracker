@@ -126,7 +126,7 @@ export default function DayCheckIn({
                 setNoteDraft(record?.notes ?? '');
                 setNoteOpen((open) => !open);
               }}
-              className="inline-flex min-h-[32px] items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              className="inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
             >
               Note
             </button>
@@ -136,7 +136,7 @@ export default function DayCheckIn({
                 setNoteOpen(false);
                 setEditing(true);
               }}
-              className="inline-flex min-h-[32px] items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              className="inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
             >
               Change
             </button>
@@ -145,7 +145,7 @@ export default function DayCheckIn({
           <button
             type="button"
             onClick={() => setEditing(false)}
-            className="ml-auto inline-flex min-h-[32px] items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+            className="ml-auto inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
           >
             Cancel
           </button>
@@ -172,14 +172,14 @@ export default function DayCheckIn({
           <button
             type="button"
             onClick={saveNote}
-            className="min-h-[32px] shrink-0 rounded-md border border-slate-700 px-2.5 text-xs font-semibold text-slate-300 hover:border-slate-500"
+            className="min-h-10 shrink-0 rounded-md border border-slate-700 px-2.5 text-xs font-semibold text-slate-300 hover:border-slate-500"
           >
             Save
           </button>
           <button
             type="button"
             onClick={() => setNoteOpen(false)}
-            className="min-h-[32px] shrink-0 rounded-md px-2 text-xs font-medium text-slate-400 hover:text-slate-200"
+            className="min-h-10 shrink-0 rounded-md px-2 text-xs font-medium text-slate-400 hover:text-slate-200"
           >
             Cancel
           </button>

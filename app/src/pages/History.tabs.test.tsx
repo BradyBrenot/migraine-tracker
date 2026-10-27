@@ -183,8 +183,9 @@ describe('History tab bar', () => {
 
     const tablist = screen.getByRole('tablist');
     expect(tablist.className).toContain('grid-cols-4');
-    // h-12 keeps the padded triggers around 41px mobile tap targets; the base h-9 returns at sm+.
-    expect(tablist.className).toContain('h-12');
+    // h-14 holds the stacked label/count rows at phone widths (still a 44px+
+    // tap target); the shorter h-9 returns at sm+ where they sit inline.
+    expect(tablist.className).toContain('h-14');
     expect(tablist.className).toContain('sm:h-9');
 
     // All four tabs remain, each with its record count.

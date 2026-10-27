@@ -231,6 +231,17 @@ export default function Home() {
   const acuteMeds = MED_CATALOG.filter((m) => m.kind !== 'preventive');
   const preventives = MED_CATALOG.filter((m) => m.kind === 'preventive');
 
+  // Demo seeding replaces local records, so it may only be offered while every
+  // local record array is empty — an attack-free med/workout/refill/day-state/
+  // baseline history is still real data and must not be overwritten.
+  const hasAnyRecords =
+    state.attacks.length > 0
+    || state.meds.length > 0
+    || state.refills.length > 0
+    || state.workouts.length > 0
+    || state.dayStates.length > 0
+    || state.stockBaselines.length > 0;
+
   return (
     <div className="mx-auto max-w-xl space-y-4 sm:space-y-5">
       {/* ── Active attack banner / start button ─────────────────── */}
@@ -290,10 +301,10 @@ export default function Home() {
       ) : (
         <button
           onClick={handleStart}
-          className="group flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 py-5 text-xl font-bold text-white shadow-lg shadow-red-950 transition-colors hover:bg-red-500 active:scale-[0.98] sm:py-8"
+          className="group flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 py-5 text-xl font-bold text-white transition-colors hover:bg-red-500 active:scale-[0.98] sm:py-8"
         >
           <Play className="h-7 w-7 transition-transform group-hover:scale-110" />
-          {attackOverlapsToday ? 'Another attack started' : 'Attack started'}
+          {attackOverlapsToday ? 'Log another attack' : 'Start attack now'}
         </button>
       )}
 
@@ -301,10 +312,15 @@ export default function Home() {
       {/* Hidden during an active attack: the banner owns guidance then, and an
           earlier Well/Off record must never re-enable exercise logging. */}
       {!activeAttack && (
-        <section className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm">
-          <DayCheckIn guidance={wellnessGuidance} effectiveStatus={todayState} />
+        <section className="rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
+          <div className="p-3">
+            <DayCheckIn guidance={wellnessGuidance} effectiveStatus={todayState} />
+          </div>
           {todayState !== 'attack' && (
-            <div className="mt-2.5 border-t border-slate-800/70 pt-2.5">
+            <div className="border-t border-slate-800/70 px-3 py-2.5">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Movement
+              </p>
               <WorkoutQuickLog />
             </div>
           )}
@@ -319,43 +335,46 @@ export default function Home() {
           </h2>
           <span className="text-xs text-slate-400">one tap = logged now</span>
         </div>
-        <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {acuteMeds.map((m) => (
             <button
               key={m.id}
               onClick={() => handleMed(m.id)}
-              className="relative rounded-xl border bg-slate-900 p-2 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
+              className="flex flex-col rounded-xl border bg-slate-900 p-2.5 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
             >
               <span
                 className="mb-1.5 block h-1 w-6 rounded-full sm:h-1.5 sm:w-8"
                 style={{ background: m.color }}
               />
-              <div className="break-words text-xs font-semibold leading-tight sm:text-base">
+              <span className="break-words text-sm font-semibold leading-tight sm:text-base">
                 {m.name}
-              </div>
-              <div className="truncate text-[10px] text-slate-400 sm:text-[11px]" title={m.kindLabel}>
+              </span>
+              <span
+                className="truncate text-[10px] text-slate-400 sm:text-[11px]"
+                title={m.kindLabel}
+              >
                 {m.kindLabel}
-              </div>
+              </span>
               {recentDoseHints.has(m.id) && (
                 <span className="block break-words text-[10px] leading-tight tabular-nums text-slate-400 sm:text-[11px]">
                   {recentDoseHints.get(m.id)}
                 </span>
               )}
               {m.id === 'nurtec' && (
-                <span className="mt-1 flex flex-wrap gap-1 sm:absolute sm:right-2 sm:top-2 sm:mt-0 sm:flex-col sm:items-end">
+                <span className="mt-auto flex flex-wrap items-center gap-1 pt-1.5">
                   <span
-                    className={`whitespace-nowrap rounded-full px-1 py-0.5 text-[10px] font-bold sm:px-1.5 ${
+                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
                       nurtecDays >= 13
                         ? 'bg-rose-950 text-rose-300'
                         : nurtecDays >= 10
                           ? 'bg-amber-950 text-amber-300'
-                          : 'bg-slate-800 text-slate-400'
+                          : 'bg-slate-800 text-slate-300'
                     }`}
                   >
                     {nurtecDays}/15
                   </span>
                   <span
-                    className={`whitespace-nowrap rounded-full px-1 py-0.5 text-[10px] font-bold sm:px-1.5 ${nurtecBadge.className}`}
+                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${nurtecBadge.className}`}
                     title={nurtecBadge.title}
                   >
                     {nurtecBadge.text}
@@ -406,11 +425,19 @@ export default function Home() {
 
       {/* ── Secondary actions ───────────────────────────────────── */}
       <section className="grid grid-cols-2 gap-2">
-        <Button variant="outline" className="h-12 gap-1.5 px-2" onClick={() => setNewOpen(true)}>
+        <Button
+          variant="outline"
+          className="h-11 gap-1.5 border-slate-800 bg-slate-900/40 px-2 text-slate-300 hover:bg-slate-900 hover:text-slate-100"
+          onClick={() => setNewOpen(true)}
+        >
           <HistoryIcon className="h-4 w-4 shrink-0" />
           <span className="text-xs sm:text-sm">Past attack</span>
         </Button>
-        <Button variant="outline" className="h-12 gap-1.5 px-2" onClick={() => setPastMedOpen(true)}>
+        <Button
+          variant="outline"
+          className="h-11 gap-1.5 border-slate-800 bg-slate-900/40 px-2 text-slate-300 hover:bg-slate-900 hover:text-slate-100"
+          onClick={() => setPastMedOpen(true)}
+        >
           <Pill className="h-4 w-4 shrink-0" />
           <span className="text-xs sm:text-sm">Past med</span>
         </Button>
@@ -421,8 +448,9 @@ export default function Home() {
           silently append demo records to canonical server data. Gate on
           `serverMode` (a backend was confirmed reachable via hydration), not
           on hydration completion: before the first `/api/export` resolves
-          this is still local mode. */}
-      {!serverMode && !state.seeded && state.attacks.length === 0 && (
+          this is still local mode. It also requires an entirely empty local
+          state because `loadDemoData` would replace any existing records. */}
+      {!serverMode && !state.seeded && !hasAnyRecords && (
         <div className="rounded-xl border border-dashed bg-slate-900 p-4 text-center text-sm text-slate-400">
           <p>No data yet. This demo stores everything in your browser only.</p>
           <button

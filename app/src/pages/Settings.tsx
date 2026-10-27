@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  Upload, Trash2, Sparkles, FileDown, FileUp, AlertTriangle, Pill, Plus,
+  Upload, Trash2, FileDown, FileUp, AlertTriangle, Pill, Plus,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { ApiError, api } from '@/lib/api';
@@ -113,6 +113,9 @@ function describeAddedCounts(added: Record<BackupRecordKey, number>): string {
 function isDefiniteRestoreRejection(error: unknown): error is ApiError {
   return error instanceof ApiError && (error.status === 400 || error.status === 413);
 }
+
+/** Documented server body limit; reject locally before reading any bytes. */
+const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 
 const TOO_LARGE_DESCRIPTION =
   'Restore uploads are limited to 25 MB. Use a smaller backup, or restore the '
@@ -288,6 +291,18 @@ export default function Settings() {
     e.target.value = '';
     if (!file) return;
     setJsonError(null);
+    // Reject over the documented 25 MiB limit before reading: the file must not
+    // be pulled into memory, parsed, or previewed. The token increment above
+    // already invalidated any earlier in-flight read, and this branch has no
+    // await, so an older read can never publish after it.
+    if (file.size > MAX_BACKUP_BYTES) {
+      // Round the shown size UP to two decimals: a file one byte over the limit
+      // must not read as "25.00 MB", which would contradict "over the limit".
+      const sizeMb = (Math.ceil((file.size / (1024 * 1024)) * 100) / 100).toFixed(2);
+      setJsonError(`“${file.name}” is ${sizeMb} MB, over the 25 MB limit.`);
+      toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+      return;
+    }
 
     let text: string;
     try {
@@ -419,9 +434,9 @@ export default function Settings() {
           <Upload className="h-4 w-4" /> Import from Migraine Buddy
         </h2>
         <p className="mt-1 text-sm text-slate-400">
-          In Migraine Buddy: <em>Settings → Export → CSV</em>. The importer recognizes
-          start/end times, pain level, medications, symptoms, triggers, and notes —
-          and maps medications to your catalog (Nurtec, Tylenol, Ibuprofen, Naproxen, …).
+          In Migraine Buddy: <em>Settings → Export → CSV</em>. Imports start/end times,
+          pain, medications, symptoms, triggers, and notes, mapping medications to your
+          catalog.
         </p>
         <input
           ref={fileRef}
@@ -439,49 +454,85 @@ export default function Settings() {
       <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
         <h2 className="text-base font-bold">Medication limits</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Usage-day limits per rolling window — these drive the warning bars on the Calendar tab.
-          (Standard MOH guidance: triptans/gepants ≤ 10–15 days/month, NSAIDs &amp; acetaminophen ≤ 15 days/month.)
+          Usage-day limits per rolling window — these drive the warning bars on the
+          Calendar tab. Standard MOH guidance: triptans/gepants ≤ 10–15 days/month,
+          NSAIDs &amp; acetaminophen ≤ 15 days/month.
         </p>
-        <div className="mt-4 space-y-3">
+        <div className="mt-4 space-y-2">
           {MED_CATALOG.filter((m) => m.defaultRule).map((m) => {
             const rule = state.rules[m.id] ?? m.defaultRule!;
             return (
-              <div key={m.id} className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="flex w-28 items-center gap-1.5 font-semibold">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: medColor(m.id) }} />
-                  {m.name}
-                </span>
-                <span className="text-slate-400">max</span>
-                <Input
-                  type="number"
-                  min={1}
-                  max={31}
-                  className="h-8 w-16"
-                  value={rule.limit}
-                  onChange={(e) =>
-                    store.setRule(m.id, Math.max(1, Number(e.target.value) || 1), rule.windowDays)
-                  }
-                />
-                <span className="text-slate-400">days per</span>
-                <Input
-                  type="number"
-                  min={7}
-                  max={90}
-                  className="h-8 w-16"
-                  value={rule.windowDays}
-                  onChange={(e) =>
-                    store.setRule(m.id, rule.limit, Math.max(7, Number(e.target.value) || 30))
-                  }
-                />
-                <span className="text-slate-400">days</span>
-                <span className="ml-3 text-slate-400">·</span>
-                <span className="ml-1 text-slate-400">default dose</span>
-                <Input
-                  className="h-8 w-24"
-                  value={state.doses[m.id] ?? ''}
-                  placeholder="—"
-                  onChange={(e) => store.setDoseDefault(m.id, e.target.value)}
-                />
+              <div key={m.id} className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ background: medColor(m.id) }}
+                  />
+                  <span className="text-sm font-semibold">{m.name}</span>
+                  <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+                    {rule.limit} day{rule.limit === 1 ? '' : 's'} / {rule.windowDays}d window
+                  </span>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <div className="min-w-0 space-y-1">
+                    <Label
+                      htmlFor={`rule-limit-${m.id}`}
+                      className="text-[11px] font-medium text-slate-400"
+                    >
+                      Max days
+                    </Label>
+                    <Input
+                      id={`rule-limit-${m.id}`}
+                      aria-label={`${m.name} max days`}
+                      type="number"
+                      min={1}
+                      max={31}
+                      inputMode="numeric"
+                      className="h-10 w-full"
+                      value={rule.limit}
+                      onChange={(e) =>
+                        store.setRule(m.id, Math.max(1, Number(e.target.value) || 1), rule.windowDays)
+                      }
+                    />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <Label
+                      htmlFor={`rule-window-${m.id}`}
+                      className="text-[11px] font-medium text-slate-400"
+                    >
+                      Window days
+                    </Label>
+                    <Input
+                      id={`rule-window-${m.id}`}
+                      aria-label={`${m.name} window days`}
+                      type="number"
+                      min={7}
+                      max={90}
+                      inputMode="numeric"
+                      className="h-10 w-full"
+                      value={rule.windowDays}
+                      onChange={(e) =>
+                        store.setRule(m.id, rule.limit, Math.max(7, Number(e.target.value) || 30))
+                      }
+                    />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <Label
+                      htmlFor={`rule-dose-${m.id}`}
+                      className="text-[11px] font-medium text-slate-400"
+                    >
+                      Default dose
+                    </Label>
+                    <Input
+                      id={`rule-dose-${m.id}`}
+                      aria-label={`${m.name} default dose`}
+                      className="h-10 w-full"
+                      value={state.doses[m.id] ?? ''}
+                      placeholder="—"
+                      onChange={(e) => store.setDoseDefault(m.id, e.target.value)}
+                    />
+                  </div>
+                </div>
               </div>
             );
           })}
@@ -493,8 +544,8 @@ export default function Settings() {
         <h2 className="flex items-center gap-2 text-base font-bold">
           <Pill className="h-4 w-4" /> Nurtec inventory
         </h2>
-        <p className="mt-1 text-xs text-slate-500">
-          Optimistic count from this device — the server&apos;s inventory count is authoritative.
+        <p className="mt-1 text-xs text-slate-400">
+          Optimistic count from this device — the server&apos;s count is authoritative.
         </p>
 
         <div className="mt-3 space-y-1 text-sm">
@@ -556,9 +607,9 @@ export default function Settings() {
 
         <div className="mt-5 border-t border-slate-800 pt-4">
           <h3 className="text-sm font-semibold">Add starting count / correction</h3>
-          <p className="mt-1 text-xs text-slate-500">
-            A new count replaces the running count from its effective time — use it to set
-            the initial stock or correct drift (including a negative count).
+          <p className="mt-1 text-xs text-slate-400">
+            A new count replaces the running count from its effective time — set the
+            initial stock or correct drift (including negative counts).
           </p>
           <div className="mt-2 grid gap-2 sm:grid-cols-2">
             <div className="space-y-1.5">
@@ -582,7 +633,7 @@ export default function Settings() {
             </div>
             <div className="space-y-1.5">
               <Label>
-                Effective at <span className="font-normal text-slate-500">(optional)</span>
+                Effective at <span className="font-normal text-slate-400">(optional)</span>
               </Label>
               <Input
                 type="datetime-local"
@@ -593,7 +644,7 @@ export default function Settings() {
             </div>
           </div>
           <div className="mt-2 space-y-1.5">
-            <Label>Notes <span className="font-normal text-slate-500">(optional)</span></Label>
+            <Label>Notes <span className="font-normal text-slate-400">(optional)</span></Label>
             <Input
               aria-label="Starting count notes"
               placeholder="e.g. initial count"
@@ -643,8 +694,8 @@ export default function Settings() {
         <p className="mt-1 text-sm text-slate-400">
           Current: <span className="font-semibold text-slate-200">{state.timezone}</span>
         </p>
-        <p className="mt-1 text-xs text-slate-500">
-          Controls local day and Sunday-start week buckets — including the weekly workout goals.
+        <p className="mt-1 text-xs text-slate-400">
+          Controls local day and Sunday-start week buckets, including weekly workout goals.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Input
@@ -677,10 +728,9 @@ export default function Settings() {
       <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
         <h2 className="text-base font-bold">Reminders</h2>
         <p className="mt-1 text-sm text-slate-400">
-          These non-secret preferences control which reminders are eligible and when.
+          Non-secret preferences that control which reminders are eligible and when.
           Delivery is configured on the server by the operator; the app never stores
-          or displays delivery credentials, and a send is not proof that a phone
-          displayed the message.
+          or shows delivery credentials, and a send is not proof a phone displayed it.
         </p>
 
         <div className="mt-3 rounded-lg border border-slate-800 px-3 py-2">
@@ -690,17 +740,16 @@ export default function Settings() {
               {attackAlertLabel}
             </span>
           </div>
-          <p className="mt-1 text-xs text-slate-500">
-            Configuration comes from the server environment and is read-only here.
-            It only indicates configuration — it gives no delivery guarantee, and a
-            send is not proof that a phone displayed it.
+          <p className="mt-1 text-xs text-slate-400">
+            Configured in the server environment; read-only here. It indicates
+            configuration only — there is no delivery guarantee.
           </p>
         </div>
 
         <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2">
           <div>
             <Label htmlFor="reminders-enabled" className="text-slate-200">Enable reminders</Label>
-            <p className="text-xs text-slate-500">Master switch. Server delivery still requires NTFY_URL.</p>
+            <p className="text-xs text-slate-400">Master switch. Server delivery still requires NTFY_URL.</p>
           </div>
           <Switch
             id="reminders-enabled"
@@ -723,7 +772,7 @@ export default function Settings() {
             >
               <div>
                 <Label htmlFor={`reminder-${key}`} className="text-slate-200">{label}</Label>
-                <p className="text-xs text-slate-500">{hint}</p>
+                <p className="text-xs text-slate-400">{hint}</p>
               </div>
               <Switch
                 id={`reminder-${key}`}
@@ -791,8 +840,8 @@ export default function Settings() {
                 graceMinutes: Number(e.target.value) || 0,
               })}
             />
-            <p className="text-xs text-slate-500">
-              Missed daily/exercise prompts stop being delivered after this window.
+            <p className="text-xs text-slate-400">
+              Missed daily/exercise prompts stop after this window.
             </p>
           </div>
         </div>
@@ -827,7 +876,7 @@ export default function Settings() {
               Discard changes
             </button>
           )}
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-slate-400">
             Waking hours use your time zone ({state.timezone}); overnight windows are not supported.
           </span>
         </div>
@@ -883,16 +932,6 @@ export default function Settings() {
           </Button>
           <Button
             variant="outline"
-            className="gap-2"
-            onClick={() => {
-              store.loadDemoData();
-              toast.success('Demo data loaded');
-            }}
-          >
-            <Sparkles className="h-4 w-4" /> Load demo data
-          </Button>
-          <Button
-            variant="outline"
             className="gap-2 text-rose-400 hover:text-rose-300"
             onClick={() => setResetOpen(true)}
           >
@@ -902,10 +941,10 @@ export default function Settings() {
 
         <div className="mt-4 border-t border-slate-800 pt-4">
           <h3 className="text-sm font-semibold">Restore from a JSON backup</h3>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             Accepts this app&apos;s <span className="font-semibold text-slate-400">Export backup (JSON)</span>{' '}
-            file and nightly/server backup envelopes (including older schema versions).
-            The preview lets you merge only missing records or replace everything.
+            and nightly/server backup envelopes (including older schema versions).
+            Preview to merge missing records or replace everything.
           </p>
           <input
             ref={jsonFileRef}
@@ -1049,10 +1088,10 @@ export default function Settings() {
                 </p>
               )}
 
-              <p className="text-xs text-slate-500">
-                Merge adds only records that are missing here and never changes settings
-                or existing records. Replace removes ALL current records and restores the
-                backup&apos;s records and non-secret settings.
+              <p className="text-xs text-slate-400">
+                Merge adds only records missing here and never changes settings
+                or existing records. Replace removes ALL current records and restores
+                the backup&apos;s records and non-secret settings.
               </p>
             </div>
           )}
@@ -1124,8 +1163,9 @@ export default function Settings() {
           <AlertDialogHeader>
             <AlertDialogTitle>Erase all data?</AlertDialogTitle>
             <AlertDialogDescription>
-              This clears every attack and medication entry stored in this browser.
-              Consider exporting a JSON backup first.
+              {store.serverMode
+                ? 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored on the server and in this browser. Consider exporting a JSON backup first.'
+                : 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored in this browser. Consider exporting a JSON backup first.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -75,7 +75,7 @@ describe('Settings attack-alert environment status', () => {
     render(<Settings />);
 
     expect(await screen.findByText('Configured')).toBeTruthy();
-    expect(screen.getByText(/Configuration comes from the server environment/))
+    expect(screen.getByText(/Configured in the server environment/))
       .toBeTruthy();
     expect(screen.getByText(/no delivery guarantee/)).toBeTruthy();
   });

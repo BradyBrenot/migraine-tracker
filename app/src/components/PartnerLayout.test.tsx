@@ -120,6 +120,29 @@ describe('PartnerLayout', () => {
     expect(within(bottomNav as HTMLElement).getAllByRole('link')).toHaveLength(4);
   });
 
+  it('exposes a skip link, distinct nav landmarks, and lg breakpoints', async () => {
+    renderLayout();
+    await waitFor(() => expect(screen.getByText('Live')).toBeTruthy());
+
+    const skip = screen.getByRole('link', { name: 'Skip to main content' });
+    expect(skip.getAttribute('href')).toBe('#main-content');
+    expect(document.querySelectorAll('a')[0]).toBe(skip);
+
+    const main = document.querySelector('main');
+    expect(main).not.toBeNull();
+    expect(main!.id).toBe('main-content');
+    expect(main!.getAttribute('tabindex')).toBe('-1');
+    expect(main!.className).toContain('lg:pb-10');
+
+    const desktop = screen.getByRole('navigation', { name: 'Partner primary' });
+    expect(desktop.className).toContain('lg:flex');
+    expect(desktop.className).not.toContain('md:flex');
+
+    const mobile = screen.getByRole('navigation', { name: 'Partner mobile primary' });
+    expect(mobile.className).toContain('lg:hidden');
+    expect(mobile.className).not.toContain('md:hidden');
+  });
+
   it('shows Unavailable before the first snapshot and Stale after a later failure', async () => {
     api.exportAll.mockRejectedValue(new Error('offline'));
     renderLayout();

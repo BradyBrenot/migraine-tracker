@@ -234,6 +234,7 @@ describe('Reports selected-month cards', () => {
     mountReports();
     await waitForSync();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'Reports' })).toBeTruthy();
     await waitFor(() => expect(screen.getAllByText('no data this month')).toHaveLength(2));
     expect(statCard('Attacks').textContent).toContain('—');
     expect(statCard('Days affected').textContent).toContain('—');
@@ -315,5 +316,57 @@ describe('Reports selected-month cards', () => {
     // Nurtec has the most distinct days this month: full width; Tylenol 1/2.
     expect(medUsageBarWidth('2 days · 3 doses')).toBe('100%');
     expect(medUsageBarWidth('1 days · 1 doses')).toBe('50%');
+  });
+});
+
+describe('Reports rolling medication window', () => {
+  it('labels the rolling parenthetical with the configured window, not a hardcoded 30d', async () => {
+    seedState({
+      rules: { nurtec: { limit: 4, windowDays: 7 } },
+      meds: [
+        makeMed({ id: 'nurtec-yesterday', ts: '2026-10-26T08:00:00.000Z' }),
+        makeMed({ id: 'nurtec-today', ts: '2026-10-27T08:00:00.000Z' }),
+      ],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    await waitFor(() => expect(screen.getByText('(2/4 in 7d)')).toBeTruthy());
+    expect(screen.queryByText(/in 30d/)).toBeNull();
+
+    // The span selector is a pressed-state group, not a tablist.
+    expect(screen.getByRole('button', { name: '12mo' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: '3mo' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('omits the rolling parenthetical for a malformed legacy rule', async () => {
+    seedState({
+      // Legacy/imported shape with no windowDays.
+      rules: { nurtec: { limit: 15 } } as unknown as TrackerState['rules'],
+      meds: [makeMed({ id: 'nurtec-1', ts: '2026-10-27T08:00:00.000Z' })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    await waitFor(() => expect(screen.getByText('1 days · 1 doses')).toBeTruthy());
+    expect(screen.queryByText(/NaN|undefinedd/)).toBeNull();
+    expect(screen.queryByText(/\(\d+\/15 in /)).toBeNull();
+  });
+
+  it('renders a zero limit as an over-limit count instead of dropping it', async () => {
+    // Shared backup validation allows a nonnegative limit; 0 means any use is
+    // already over the limit, so the parenthetical must render and be styled.
+    seedState({
+      rules: { nurtec: { limit: 0, windowDays: 30 } },
+      meds: [makeMed({ id: 'nurtec-zero', ts: '2026-10-27T08:00:00.000Z' })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    const count = await screen.findByText('(1/0 in 30d)');
+    expect(count.className).toContain('text-rose-400');
   });
 });

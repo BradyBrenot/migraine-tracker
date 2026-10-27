@@ -110,6 +110,7 @@ describe('Settings Nurtec inventory', () => {
   it('shows "Stock not set" (never 0) when no baseline applies', () => {
     renderSettings();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'Settings' })).toBeTruthy();
     expect(screen.getByText('Stock not set — add a starting count below')).toBeTruthy();
     expect(screen.queryByText(/0 tablets left/)).toBeNull();
   });

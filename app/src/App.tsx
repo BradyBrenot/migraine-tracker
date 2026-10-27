@@ -5,6 +5,7 @@ import Layout from '@/components/Layout';
 import PartnerLayout from '@/components/PartnerLayout';
 import Home from '@/pages/Home';
 import PartnerHome from '@/pages/PartnerHome';
+import NotFound from '@/pages/NotFound';
 
 // Home (and the partner "Now" page) stay eager: they are the first screen of
 // their respective apps. Every other page is split into its own chunk so the
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="/view/calendar" element={<CalendarPage />} />
             <Route path="/view/reports" element={<Reports />} />
             <Route path="/view/history" element={<History />} />
+            <Route path="/view/*" element={<NotFound partner />} />
           </Route>
         </Routes>
       </ReadOnlyStoreProvider>
@@ -51,6 +53,7 @@ export default function App() {
           <Route path="/reports" element={<Reports />} />
           <Route path="/history" element={<History />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
     </StoreProvider>

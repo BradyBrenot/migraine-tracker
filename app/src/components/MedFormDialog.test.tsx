@@ -44,6 +44,10 @@ function saveButton(): HTMLButtonElement {
   return screen.getByRole('button', { name: /^(Add|Save)$/ }) as HTMLButtonElement;
 }
 
+function whenInput(): HTMLInputElement {
+  return screen.getByLabelText('When') as HTMLInputElement;
+}
+
 beforeEach(() => {
   store.logMed.mockReset();
   store.updateMed.mockReset();
@@ -137,5 +141,37 @@ describe('MedFormDialog Nurtec tablet quantities', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Nurtec' }));
 
     expect(tabletsInput().value).toBe('1');
+  });
+
+  it('opens a corrupt legacy timestamp blank and blocks saving until repaired', () => {
+    openDialog(makeMed({ ts: 'not-a-date', quantity: null }));
+
+    expect(whenInput().value).toBe('');
+    expect(saveButton().disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('valid date');
+
+    fireEvent.click(saveButton());
+    expect(store.updateMed).not.toHaveBeenCalled();
+
+    const repaired = '2026-05-01T09:00';
+    fireEvent.change(whenInput(), { target: { value: repaired } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    expect(store.updateMed).toHaveBeenCalledWith(
+      'med-1',
+      expect.objectContaining({ ts: new Date(repaired).toISOString() }),
+    );
+  });
+
+  it('marks the selected medication with aria-pressed', () => {
+    openDialog();
+
+    expect(screen.getByRole('button', { name: 'Nurtec' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Tylenol' }).getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tylenol' }));
+    expect(screen.getByRole('button', { name: 'Tylenol' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Nurtec' }).getAttribute('aria-pressed')).toBe('false');
   });
 });

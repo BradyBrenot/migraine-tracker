@@ -91,6 +91,22 @@ interface BarSegment {
   endBeforeStart: boolean;
 }
 
+/**
+ * Concise accessible name for a calendar day cell: keep the configured-zone
+ * date, then add the attack/medication counts the visual chips encode.
+ */
+function dayCellLabel(day: DayData, timeZone: string): string {
+  const label = formatDayLabel(day.key, timeZone, true);
+  const details: string[] = [];
+  if (day.attacks.length > 0) {
+    details.push(`${day.attacks.length} attack${day.attacks.length === 1 ? '' : 's'}`);
+  }
+  if (day.meds.length > 0) {
+    details.push(`${day.meds.length} medication${day.meds.length === 1 ? '' : 's'}`);
+  }
+  return `${label}, ${details.length > 0 ? details.join(', ') : 'no attacks or medications'}`;
+}
+
 function MedLimitBar({ medId }: { medId: string }) {
   const { state } = useStore();
   const now = useNow();
@@ -428,6 +444,7 @@ export default function CalendarPage() {
 
   return (
     <div className="space-y-6">
+      <h1 className="sr-only">Calendar</h1>
       {/* ── med usage strip ─────────────────────────────────── */}
       <section>
         <h2 className="mb-2 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-400">
@@ -507,7 +524,7 @@ export default function CalendarPage() {
                     <button
                       key={key}
                       data-day={key}
-                      aria-label={formatDayLabel(key, state.timezone, true)}
+                      aria-label={dayCellLabel(d, state.timezone)}
                       onClick={() => setSelected(key)}
                       className={`relative flex min-h-[70px] flex-col p-1 text-left transition-colors hover:bg-slate-800 sm:min-h-[88px] ${
                         d.inMonth ? 'bg-slate-950' : 'bg-slate-900'
@@ -650,7 +667,7 @@ export default function CalendarPage() {
       <Sheet open={!!selData} onOpenChange={(o) => !o && setSelected(null)}>
         <SheetContent
           side="bottom"
-          className="max-h-[85dvh] overflow-y-auto rounded-t-2xl pb-[calc(4rem_+_env(safe-area-inset-bottom,0px))] sm:mx-auto sm:max-w-lg md:pb-4"
+          className="max-h-[85dvh] overflow-y-auto rounded-t-2xl pb-[calc(4rem_+_env(safe-area-inset-bottom,0px))] sm:mx-auto sm:max-w-lg lg:pb-4"
         >
           {selData && (
             <>
@@ -844,8 +861,9 @@ export default function CalendarPage() {
                 </DialogTitle>
               </DialogHeader>
               <div className="space-y-1.5 py-2">
-                <Label>Date</Label>
+                <Label htmlFor="calendar-schedule-date">Date</Label>
                 <Input
+                  id="calendar-schedule-date"
                   type="date"
                   value={scheduleDate}
                   onChange={(e) => setScheduleDate(e.target.value)}

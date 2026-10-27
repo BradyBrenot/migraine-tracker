@@ -31,7 +31,7 @@ function SyncPill() {
     <NavLink
       to="/settings"
       title={`Sync: ${s.label}`}
-      className={`${s.cls} ml-auto inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold md:ml-3 ${
+      className={`${s.cls} ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold lg:ml-3 ${
         needsAttention ? '' : 'hidden md:inline-flex'
       }`}
     >
@@ -45,14 +45,21 @@ export default function Layout() {
   const { activeAttack } = useStore();
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
+      {/* First focusable element: keyboard users can jump the nav on every page. */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-slate-950 focus:shadow-lg"
+      >
+        Skip to main content
+      </a>
       {/* top bar */}
       <header className="sticky top-0 z-30 border-b bg-slate-900/90 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4">
-          <span className="text-lg font-bold tracking-tight">
+        <div className="mx-auto flex h-14 max-w-5xl flex-nowrap items-center gap-2 px-4">
+          <span className="min-w-0 truncate text-lg font-bold tracking-tight">
             🌀 Migraine Tracker
           </span>
           {activeAttack && (
-            <span className="ml-2 flex items-center gap-1.5 rounded-full bg-rose-950 px-3 py-1 text-xs font-semibold text-rose-300">
+            <span className="ml-1 flex shrink-0 items-center gap-1.5 rounded-full bg-rose-950 px-3 py-1 text-xs font-semibold text-rose-300">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-600" />
@@ -62,7 +69,7 @@ export default function Layout() {
           )}
           <SyncPill />
           {/* desktop nav */}
-          <nav className="ml-auto hidden gap-1 md:flex">
+          <nav aria-label="Primary" className="ml-auto hidden gap-1 lg:flex">
             {tabs.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
@@ -84,14 +91,21 @@ export default function Layout() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 sm:pt-6">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto max-w-5xl scroll-mt-20 px-4 pb-[calc(6rem_+_env(safe-area-inset-bottom,0px))] pt-4 lg:pb-10 sm:pt-6"
+      >
         <RouteBoundary>
           <Outlet />
         </RouteBoundary>
       </main>
 
       {/* mobile bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 border-t bg-slate-900/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur md:hidden">
+      <nav
+        aria-label="Primary mobile"
+        className="fixed bottom-0 left-0 right-0 z-30 border-t bg-slate-900/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur lg:hidden"
+      >
         <div className="mx-auto grid max-w-lg grid-cols-5">
           {tabs.map(({ to, label, icon: Icon }) => (
             <NavLink

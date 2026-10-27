@@ -1,0 +1,7 @@
+# This app is private health data and must not be indexed. Indexing is
+# prevented by the noindex/nofollow meta tags in index.html and view.html.
+# Disallow is intentionally empty (allow all crawling) so crawlers can fetch
+# the pages and see those meta tags. This is privacy hygiene, not a security
+# control: access is protected by the deployment network boundary (Tailscale).
+User-agent: *
+Disallow:

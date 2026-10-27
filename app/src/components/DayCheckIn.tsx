@@ -96,8 +96,9 @@ export default function DayCheckIn({
                 <button
                   key={status}
                   type="button"
+                  aria-pressed={selected}
                   onClick={() => choose(status)}
-                  className={`min-h-[40px] rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 ${
+                  className={`min-h-11 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 sm:min-h-10 ${
                     selected
                       ? meta.pill
                       : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500'
@@ -126,7 +127,7 @@ export default function DayCheckIn({
                 setNoteDraft(record?.notes ?? '');
                 setNoteOpen((open) => !open);
               }}
-              className="inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              className="inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:min-h-10"
             >
               Note
             </button>
@@ -136,7 +137,7 @@ export default function DayCheckIn({
                 setNoteOpen(false);
                 setEditing(true);
               }}
-              className="inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+              className="inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:min-h-10"
             >
               Change
             </button>
@@ -145,7 +146,7 @@ export default function DayCheckIn({
           <button
             type="button"
             onClick={() => setEditing(false)}
-            className="ml-auto inline-flex min-h-10 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+            className="ml-auto inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:min-h-10"
           >
             Cancel
           </button>
@@ -156,6 +157,7 @@ export default function DayCheckIn({
         <div className="flex items-center gap-1.5">
           <input
             aria-label="Day note"
+            autoFocus
             value={noteDraft}
             onChange={(e) => setNoteDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -172,14 +174,14 @@ export default function DayCheckIn({
           <button
             type="button"
             onClick={saveNote}
-            className="min-h-10 shrink-0 rounded-md border border-slate-700 px-2.5 text-xs font-semibold text-slate-300 hover:border-slate-500"
+            className="min-h-11 shrink-0 rounded-md border border-slate-700 px-2.5 text-xs font-semibold text-slate-300 hover:border-slate-500 sm:min-h-10"
           >
             Save
           </button>
           <button
             type="button"
             onClick={() => setNoteOpen(false)}
-            className="min-h-10 shrink-0 rounded-md px-2 text-xs font-medium text-slate-400 hover:text-slate-200"
+            className="min-h-11 shrink-0 rounded-md px-2 text-xs font-medium text-slate-400 hover:text-slate-200 sm:min-h-10"
           >
             Cancel
           </button>

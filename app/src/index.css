@@ -44,13 +44,47 @@
   body {
     @apply bg-background text-foreground;
   }
+  /*
+   * A single, visible keyboard-focus indicator for interactive controls. It is
+   * drawn with the same `--ring` token shadcn's `focus-visible:ring-*` utilities
+   * use, so it reads as the same accent; those utilities keep their box-shadow
+   * ring (base-layer outlines are overridden by their `outline-none` utility,
+   * so the two never fight). Programmatic targets such as the skip link's
+   * `#main-content` (`tabindex="-1"`) are deliberately excluded.
+   */
+  :where(
+    a,
+    button,
+    input,
+    select,
+    textarea,
+    summary,
+    [role='button'],
+    [role='tab'],
+    [role='menuitem']
+  ):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
 }
 
 /*
- * Respect the OS "reduce motion" setting: the attack badge and sync dot stay
- * visible (and keep their colour/shape), they just stop animating.
+ * Respect the OS "reduce motion" setting without removing any element: motion
+ * is duration-neutralized rather than disabled per-animation, so transitions,
+ * Radix enter/exit animations, and smooth scrolling all resolve instantly.
+ * The attack badge and sync dots keep their colour, shape, and static visible
+ * state; they simply stop animating.
  */
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
   .animate-ping,
   .animate-pulse {
     animation: none;

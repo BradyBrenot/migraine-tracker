@@ -260,6 +260,7 @@ export default function Home() {
 
   return (
     <div className="mx-auto max-w-xl space-y-4 sm:space-y-5">
+      <h1 className="sr-only">Migraine log</h1>
       {/* ── Active attack banner / start button ─────────────────── */}
       {activeAttack ? (
         <section className="overflow-hidden rounded-2xl border border-rose-900 bg-gradient-to-br from-rose-950 to-slate-950 shadow-sm">

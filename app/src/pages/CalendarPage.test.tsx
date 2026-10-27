@@ -549,3 +549,48 @@ describe('CalendarPage degenerate attacks', () => {
     expect(within(sheet).queryByText('End is before start')).toBeNull();
   });
 });
+
+describe('CalendarPage accessible day cells', () => {
+  const TZ = 'UTC';
+
+  it('keeps the date and adds concise attack and medication counts', async () => {
+    const day = midMonthDay(TZ);
+    const otherDay = `${day.slice(0, 8)}16`;
+    const startMs = dayKeyStartMs(day, TZ) + 8 * 60 * 60 * 1000;
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('label-attack', startMs, startMs + 60 * 60 * 1000)],
+      meds: [{
+        id: 'label-med', medId: 'tylenol', ts: new Date(startMs).toISOString(),
+        dose: '', quantity: null, attackId: null, notes: '', source: 'manual',
+      }],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Calendar' })).toBeTruthy();
+    const cell = document.querySelector<HTMLButtonElement>(`[data-day="${day}"]`);
+    if (!cell) throw new Error(`calendar cell not found for ${day}`);
+    const label = cell.getAttribute('aria-label') ?? '';
+    // The configured-zone date still leads the name, so the existing
+    // date-based lookup semantics are preserved...
+    expect(label).toContain(formatDayTitle(day, TZ));
+    // ...and the visual chips' information is now available to screen readers.
+    expect(label).toContain('1 attack');
+    expect(label).toContain('1 medication');
+
+    const empty = document.querySelector<HTMLButtonElement>(`[data-day="${otherDay}"]`);
+    expect(empty?.getAttribute('aria-label')).toContain('no attacks or medications');
+  });
+
+  it('associates the schedule-date label with its date input', async () => {
+    seedState({ timezone: TZ });
+    mountCalendar();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Schedule next Emgality' }));
+    const dateInput = await screen.findByLabelText('Date');
+    expect((dateInput as HTMLInputElement).type).toBe('date');
+  });
+});

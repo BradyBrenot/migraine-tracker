@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type {
   Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout,
 } from '@/types';
+import { fmtDateFull, fmtTime } from '@/lib/format';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 
 vi.mock('@/lib/api', () => ({
@@ -94,6 +95,13 @@ async function waitForSync(): Promise<void> {
     expect(captured).not.toBeNull();
     expect(captured!.sync.status).toBe('synced');
   });
+}
+
+function activateTab(name: RegExp): void {
+  const tab = screen.getByRole('tab', { name });
+  // Radix tabs activate on mousedown, not click.
+  fireEvent.mouseDown(tab);
+  fireEvent.click(tab);
 }
 
 function seedState(partial: Partial<TrackerState>): void {
@@ -221,8 +229,15 @@ describe('History attack-linked medication grouping', () => {
     mountHistory();
     await waitForSync();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'History' })).toBeTruthy();
     // Both attack rows render (the writer tree exposes edit controls).
-    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Edit\b/i })).toHaveLength(2));
+
+    // Representative full names: the context is included, not just "Edit".
+    const attackStart = '2026-05-10T08:00:00.000Z';
+    const attackName = `${fmtDateFull(attackStart)} at ${fmtTime(attackStart)}`;
+    expect(screen.getByRole('button', { name: `Edit attack ${attackName}` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: `Delete attack ${attackName}` })).toBeTruthy();
 
     // Rows are newest-first; each row's chips keep the newest-first meds order.
     const chipNames = screen
@@ -231,6 +246,12 @@ describe('History attack-linked medication grouping', () => {
     expect(chipNames).toEqual(['Ibuprofen', 'Tylenol', 'Nurtec']);
     // The unlinked and legacy non-string links never attach to a row.
     expect(screen.queryByText('Naproxen')).toBeNull();
+
+    activateTab(/Meds/);
+    const medTs = '2026-05-10T12:00:00.000Z';
+    const medLabel = `Tylenol ${fmtDateFull(medTs)} at ${fmtTime(medTs)}`;
+    expect(await screen.findByRole('button', { name: `Edit ${medLabel}` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: `Delete ${medLabel}` })).toBeTruthy();
   });
 });
 
@@ -264,8 +285,8 @@ describe('History attack rows with inconsistent durations', () => {
     expect(screen.getByText('2h')).toBeTruthy();
 
     // Both entries remain editable and deletable — no validation gate.
-    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^Edit\b/i })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^Delete\b/i })).toHaveLength(2);
   });
 
   it('never warns "End is before start" on an ongoing attack with a future start', async () => {

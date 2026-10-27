@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtDate, fmtDateFull, fmtTime } from './format.ts';
+import { fmtDate, fmtDateFull, fmtTime, toLocalInput } from './format.ts';
 
 const ISO = '2026-10-27T18:05:00.000Z';
 
@@ -31,5 +31,18 @@ describe('browser-locale formatters', () => {
     expect(fmtTime('not-a-date')).toBe('Invalid Date');
     expect(fmtDate('not-a-date')).toBe('Invalid Date');
     expect(fmtDateFull('not-a-date')).toBe('Invalid Date');
+  });
+});
+
+describe('datetime-local conversion', () => {
+  it('formats a valid Date for datetime-local inputs', () => {
+    const d = new Date(2026, 2, 4, 9, 5);
+    expect(toLocalInput(d)).toBe('2026-03-04T09:05');
+  });
+
+  it('returns an empty string for an invalid Date instead of NaN segments', () => {
+    // Dialogs must open blank rather than "NaN-NaN-NaNTNaN:NaN".
+    expect(toLocalInput(new Date('not-a-date'))).toBe('');
+    expect(toLocalInput(new Date(Number.NaN))).toBe('');
   });
 });

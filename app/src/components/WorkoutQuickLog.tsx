@@ -155,8 +155,9 @@ export default function WorkoutQuickLog() {
             <button
               key={effort}
               type="button"
+              aria-pressed={todayByKind[pendingKind]?.effort === effort}
               onClick={() => log(effort)}
-              className={`min-h-[40px] rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500 ${
+              className={`min-h-11 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 sm:min-h-10 border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500 ${
                 todayByKind[pendingKind]?.effort === effort ? 'ring-1 ring-emerald-600' : ''
               }`}
             >
@@ -166,7 +167,7 @@ export default function WorkoutQuickLog() {
           <button
             type="button"
             onClick={() => setPendingKind(null)}
-            className="min-h-[32px] rounded-lg px-2 text-xs font-medium text-slate-400 transition-colors hover:text-slate-200"
+            className="min-h-11 rounded-lg px-2 text-xs font-medium text-slate-400 transition-colors hover:text-slate-200 sm:min-h-8"
           >
             Cancel
           </button>
@@ -185,7 +186,7 @@ export default function WorkoutQuickLog() {
                     ? `${label} logged today: ${EFFORT_LABEL[current.effort]} — tap to log a higher effort`
                     : undefined
                 }
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500 sm:min-h-10"
               >
                 {label}
                 {current && (

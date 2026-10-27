@@ -245,6 +245,8 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'Migraine log' })).toBeTruthy();
+
     // Weekly goals stay visible beside the quick-log buttons.
     expect(screen.getByText('This week:')).toBeTruthy();
     expect(screen.getByText('0/2')).toBeTruthy();
@@ -323,6 +325,9 @@ describe('Home wellness logging', () => {
 
     expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
+    // Choice chips expose their selected state without changing their names.
+    expect(screen.getByRole('button', { name: 'Well' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('false');
     // The small chip never offers a disconnected day-only Attack.
     expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
     expect(screen.getByText('How was today?')).toBeTruthy();
@@ -343,6 +348,9 @@ describe('Home wellness logging', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    // The recorded Off choice is now offered as pressed; Well is not.
+    expect(screen.getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Well' }).getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: 'Well' }));
 
     await waitFor(() => {
@@ -361,6 +369,8 @@ describe('Home wellness logging', () => {
     await waitFor(() => expect(screen.getByText('Off')).toBeTruthy());
 
     fireEvent.click(screen.getByRole('button', { name: 'Note' }));
+    // Opening the editor focuses the note so typing starts immediately.
+    expect(document.activeElement).toBe(screen.getByLabelText('Day note'));
     fireEvent.change(screen.getByLabelText('Day note'), {
       target: { value: '  rough morning  ' },
     });
@@ -799,6 +809,9 @@ describe('Home workout per-kind dedup', () => {
     expect(countsBefore).toContain('Strength 1/2');
 
     fireEvent.click(strengthButton());
+    // The current effort is exposed as pressed; other efforts are not.
+    expect(screen.getByRole('button', { name: 'Medium' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Hard' }).getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: 'Hard' }));
 
     await waitFor(() => expect(api.patchWorkout).toHaveBeenCalledTimes(1));

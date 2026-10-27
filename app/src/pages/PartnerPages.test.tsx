@@ -195,8 +195,8 @@ describe('CalendarPage in the read-only viewer', () => {
     const attackSummary = within(sheet as HTMLElement).getByText(/→/);
     expect(attackSummary.closest('button')).toBeNull();
     expect(screen.queryByRole('button', { name: /→/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete\b/i })).toBeNull();
   });
 });
 
@@ -235,25 +235,25 @@ describe('History in the read-only viewer', () => {
 
     expect(screen.getAllByRole('tab')).toHaveLength(4);
     expect(screen.queryByRole('button', { name: 'Add past attack' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete\b/i })).toBeNull();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByText(/Nausea/)).toBeTruthy();
 
     activateTab(/Workouts/);
     await waitFor(() => expect(screen.getByText('Strength · medium')).toBeTruthy());
     expect(screen.queryByRole('button', { name: 'Add past workout' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
 
     activateTab(/Rx pickups/);
     await waitFor(() => expect(screen.getByText('CVS')).toBeTruthy());
     expect(screen.queryByRole('button', { name: 'Add Rx pickup' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
 
     activateTab(/Meds/);
     await waitFor(() => expect(screen.getByText('75 mg')).toBeTruthy());
     expect(screen.queryByRole('button', { name: 'Add past medication' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete\b/i })).toBeNull();
   });
 });

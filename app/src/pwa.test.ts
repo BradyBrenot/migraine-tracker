@@ -49,6 +49,7 @@ function pngDimensions(file: string): { width: number; height: number } {
 
 const manifest = readManifest(join(PUBLIC_DIR, 'manifest.webmanifest'));
 const partnerManifest = readManifest(join(PUBLIC_DIR, 'partner.webmanifest'));
+const robots = readFileSync(join(PUBLIC_DIR, 'robots.txt'), 'utf8');
 
 describe('web app manifest', () => {
   it('is app-scoped and installable', () => {
@@ -125,6 +126,11 @@ describe('index.html mobile-web metadata', () => {
     expect(html).toContain('<title>Migraine Tracker</title>');
     expect(html).toContain('src="/src/main.tsx"');
   });
+
+  it('declares a noindex policy and a concise description', () => {
+    expect(html).toContain('name="robots" content="noindex, nofollow"');
+    expect(html).toMatch(/name="description"\s+content="[^"]{20,}"/);
+  });
 });
 
 describe('view.html partner shell metadata', () => {
@@ -141,6 +147,20 @@ describe('view.html partner shell metadata', () => {
   it('keeps the partner title and the shared entry script', () => {
     expect(html).toContain('<title>Migraine Partner</title>');
     expect(html).toContain('src="/src/main.tsx"');
+  });
+
+  it('declares a noindex policy and a concise description', () => {
+    expect(html).toContain('name="robots" content="noindex, nofollow"');
+    expect(html).toMatch(/name="description"\s+content="[^"]{20,}"/);
+  });
+});
+
+describe('robots.txt privacy policy', () => {
+  it('allows crawling so crawlers can read the noindex meta tags', () => {
+    expect(robots).toMatch(/^User-agent:\s*\*$/m);
+    // An empty Disallow allows every path; `Disallow: /` would block crawling.
+    expect(robots).toMatch(/^Disallow:\s*$/m);
+    expect(robots).not.toMatch(/^Disallow:\s*\//m);
   });
 });
 
@@ -170,6 +190,10 @@ describe('built output (only when dist/ exists)', () => {
   it.skipIf(!built)('copies the source partner manifest into dist', () => {
     // readFileSync throws when a stale dist/ lacks the partner manifest.
     expect(readManifest(join(DIST_DIR, 'partner.webmanifest'))).toEqual(partnerManifest);
+  });
+
+  it.skipIf(!built)('copies robots.txt into dist unchanged', () => {
+    expect(readFileSync(join(DIST_DIR, 'robots.txt'), 'utf8')).toBe(robots);
   });
 
   it.skipIf(!built)('serves the partner shell for /view from dist', () => {

@@ -6,6 +6,7 @@ import type { StoreApi } from '@/lib/store';
 import type {
   Attack, DayState, Refill, StockBaseline, TrackerState, Workout,
 } from '@/types';
+import { fmtDateFull, fmtTime } from '@/lib/format';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 
 vi.mock('@/lib/api', () => ({
@@ -130,6 +131,19 @@ function makeRefill(overrides: Partial<Refill> = {}): Refill {
   };
 }
 
+function makeWorkout(overrides: Partial<Workout> = {}): Workout {
+  return {
+    id: 'workout-1',
+    performedAt: '2026-03-02T10:00:00.000Z',
+    kind: 'strength',
+    effort: 'medium',
+    durationMinutes: 30,
+    notes: '',
+    source: 'manual',
+    ...overrides,
+  };
+}
+
 function applyApiDefaults(backend: MockedBackend): void {
   backend.exportAll.mockResolvedValue({
     attacks: [] as Attack[],
@@ -164,7 +178,11 @@ function applyApiDefaults(backend: MockedBackend): void {
 }
 
 function openRefillsTab(): void {
-  const tab = screen.getByRole('tab', { name: /Rx pickups/ });
+  activateTab(/Rx pickups/);
+}
+
+function activateTab(name: RegExp): void {
+  const tab = screen.getByRole('tab', { name });
   // Radix tabs activate on mousedown, not click.
   fireEvent.mouseDown(tab);
   fireEvent.click(tab);
@@ -211,9 +229,13 @@ describe('History Rx pickups tablets', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Add Rx pickup/ }));
     expect(tabletsInput().value).toBe('8');
+    expect(screen.getByRole('button', { name: 'Nurtec' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Tylenol' }).getAttribute('aria-pressed')).toBe('false');
 
     fireEvent.click(screen.getByRole('button', { name: 'Tylenol' }));
     expect(tabletsInput().value).toBe('');
+    expect(screen.getByRole('button', { name: 'Tylenol' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Nurtec' }).getAttribute('aria-pressed')).toBe('false');
 
     fireEvent.click(screen.getByRole('button', { name: 'Nurtec' }));
     expect(tabletsInput().value).toBe('8');
@@ -256,7 +278,11 @@ describe('History Rx pickups tablets', () => {
     await waitForSync();
     openRefillsTab();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    // Full refill names include the med and pickup date, not just "Edit".
+    expect(screen.getByRole('button', { name: 'Edit Nurtec pickup on 2026-03-01' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete Nurtec pickup on 2026-03-01' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Edit\b/i }));
 
     expect(tabletsInput().value).toBe('8');
     expect(dateInput().value).toBe('2026-03-01');
@@ -296,8 +322,22 @@ describe('History Rx pickups tablets', () => {
     await waitForSync();
     openRefillsTab();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Edit\b/i }));
     expect(tabletsInput().value).toBe('');
+  });
+});
+
+describe('History Edit/Delete accessible names', () => {
+  it('describes workout controls with the rendered kind, date, and time', async () => {
+    const ts = '2026-03-02T10:00:00.000Z';
+    seedState({ workouts: [makeWorkout({ performedAt: ts })] });
+    mountHistory();
+    await waitForSync();
+    activateTab(/Workouts/);
+
+    const label = `Strength workout ${fmtDateFull(ts)} at ${fmtTime(ts)}`;
+    expect(await screen.findByRole('button', { name: `Edit ${label}` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: `Delete ${label}` })).toBeTruthy();
   });
 });
 

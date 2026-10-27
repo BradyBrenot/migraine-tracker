@@ -206,6 +206,7 @@ export default function Reports() {
 
   return (
     <div className="space-y-6">
+      <h1 className="sr-only">Reports</h1>
       {/* month picker + export -- wraps to separate rows at phone widths */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1">
@@ -233,6 +234,7 @@ export default function Reports() {
               {(['3', '6', '12', 'all'] as const).map((s) => (
                 <button
                   key={s}
+                  aria-pressed={reportSpan === s}
                   onClick={() => setReportSpan(s)}
                   className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors ${
                     reportSpan === s ? 'bg-white text-slate-950' : 'text-slate-400 hover:bg-slate-800'
@@ -353,8 +355,23 @@ export default function Reports() {
             <div className="space-y-3">
               {data.medUsage.map((m) => {
                 const rule = state.rules[m.id];
-                const windowUsed = rule
-                  ? usageDaysInWindow(state.meds, m.id, rule.windowDays, now, state.timezone)
+                // Legacy/imported rules can be partial. Only a positive integer
+                // window and a nonnegative integer limit (0 is meaningful: any
+                // use is over the limit) may drive the rolling count or its
+                // label; otherwise the parenthetical is omitted instead of
+                // computing with NaN or printing "undefinedd".
+                const windowDays = rule
+                  && Number.isInteger(rule.windowDays)
+                  && rule.windowDays > 0
+                  ? rule.windowDays
+                  : null;
+                const limit = rule
+                  && Number.isInteger(rule.limit)
+                  && rule.limit >= 0
+                  ? rule.limit
+                  : null;
+                const windowUsed = windowDays !== null
+                  ? usageDaysInWindow(state.meds, m.id, windowDays, now, state.timezone)
                   : null;
                 return (
                   <div key={m.name}>
@@ -362,13 +379,13 @@ export default function Reports() {
                       <span className="font-medium">{m.name}</span>
                       <span className="tabular-nums text-slate-400">
                         {m.days} days · {m.doses} doses
-                        {rule && windowUsed !== null && (
+                        {windowDays !== null && limit !== null && windowUsed !== null && (
                           <span
                             className={`ml-1 font-semibold ${
-                              windowUsed >= rule.limit ? 'text-rose-400' : ''
+                              windowUsed >= limit ? 'text-rose-400' : ''
                             }`}
                           >
-                            ({windowUsed}/{rule.limit} in 30d)
+                            ({windowUsed}/{limit} in {windowDays}d)
                           </span>
                         )}
                       </span>

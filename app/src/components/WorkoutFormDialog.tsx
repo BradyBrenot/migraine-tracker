@@ -5,11 +5,16 @@ import { toLocalInput } from '@/lib/format';
 import { localDayKey } from '../../shared/datetime.ts';
 import { workoutInstantMs } from '../../shared/workouts.ts';
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+
+const PERFORMED_ID = 'workout-performed-at';
+const DURATION_ID = 'workout-duration';
+const DURATION_ERROR_ID = 'workout-duration-error';
+const NOTES_ID = 'workout-notes';
 
 const KINDS: { value: WorkoutKind; label: string }[] = [
   { value: 'strength', label: 'Strength' },
@@ -89,6 +94,7 @@ function Toggle({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={`rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 ${
         active
@@ -174,11 +180,16 @@ export default function WorkoutFormDialog({
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{workout ? 'Edit workout' : 'Add workout'}</DialogTitle>
+          <DialogDescription>
+            {workout
+              ? 'Update when this workout happened, the kind of effort, or its details.'
+              : 'Record a workout you did earlier. Kind and effort are required.'}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          <div className="space-y-1.5">
-            <Label>Kind</Label>
+          <fieldset className="space-y-1.5">
+            <legend className="text-sm font-medium">Kind</legend>
             <div className="flex flex-wrap gap-1.5">
               {KINDS.map(({ value, label }) => (
                 <Toggle
@@ -190,10 +201,10 @@ export default function WorkoutFormDialog({
                 </Toggle>
               ))}
             </div>
-          </div>
+          </fieldset>
 
-          <div className="space-y-1.5">
-            <Label>Effort</Label>
+          <fieldset className="space-y-1.5">
+            <legend className="text-sm font-medium">Effort</legend>
             <div className="flex flex-wrap gap-1.5">
               {EFFORTS.map(({ value, label }) => (
                 <Toggle
@@ -205,11 +216,12 @@ export default function WorkoutFormDialog({
                 </Toggle>
               ))}
             </div>
-          </div>
+          </fieldset>
 
           <div className="space-y-1.5">
-            <Label>Performed at</Label>
+            <Label htmlFor={PERFORMED_ID}>Performed at</Label>
             <Input
+              id={PERFORMED_ID}
               type="datetime-local"
               value={form.performedAt}
               onChange={(e) => setForm((f) => ({ ...f, performedAt: e.target.value }))}
@@ -217,30 +229,33 @@ export default function WorkoutFormDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label>
+            <Label htmlFor={DURATION_ID}>
               Duration <span className="font-normal text-slate-400">(minutes, optional)</span>
             </Label>
             <Input
+              id={DURATION_ID}
               type="number"
               min={1}
               step={1}
               inputMode="numeric"
               aria-label="Duration in minutes"
               aria-invalid={!duration.valid}
+              aria-describedby={!duration.valid ? DURATION_ERROR_ID : undefined}
               placeholder="—"
               value={form.duration}
               onChange={(e) => setForm((f) => ({ ...f, duration: e.target.value }))}
             />
             {!duration.valid && (
-              <p role="alert" className="text-xs text-rose-300">
+              <p id={DURATION_ERROR_ID} role="alert" className="text-xs text-rose-300">
                 Duration must be a positive whole number of minutes, or leave blank.
               </p>
             )}
           </div>
 
           <div className="space-y-1.5">
-            <Label>Notes</Label>
+            <Label htmlFor={NOTES_ID}>Notes</Label>
             <Input
+              id={NOTES_ID}
               value={form.notes}
               onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
               placeholder="Anything worth remembering…"

@@ -17,7 +17,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -156,6 +156,7 @@ export default function History() {
 
   return (
     <div className="mx-auto max-w-2xl">
+      <h1 className="sr-only">History</h1>
       <Tabs defaultValue="attacks">
         {/* Compact labels keep the four tabs readable at phone widths; the
             full wording returns at sm+. Counts stay visible at every size and
@@ -270,14 +271,14 @@ export default function History() {
                       <button
                         onClick={() => setEditAttack(a)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                        aria-label="Edit"
+                        aria-label={`Edit attack ${fmtDateFull(a.start)} at ${fmtTime(a.start)}`}
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
                       <button
                         onClick={() => setDeleteId(a.id)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                        aria-label="Delete"
+                        aria-label={`Delete attack ${fmtDateFull(a.start)} at ${fmtTime(a.start)}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -321,14 +322,14 @@ export default function History() {
                       <button
                         onClick={() => setEditMed(m)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                        aria-label="Edit"
+                        aria-label={`Edit ${medName(m.medId)} ${fmtDateFull(m.ts)} at ${fmtTime(m.ts)}`}
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
                       <button
                         onClick={() => setDeleteMedId(m.id)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                        aria-label="Delete"
+                        aria-label={`Delete ${medName(m.medId)} ${fmtDateFull(m.ts)} at ${fmtTime(m.ts)}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -388,14 +389,14 @@ export default function History() {
                         <button
                           onClick={() => openEditRefill(r)}
                           className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                          aria-label="Edit"
+                          aria-label={`Edit ${medName(r.medId)} pickup on ${r.date}`}
                         >
                           <Pencil className="h-4 w-4" />
                         </button>
                         <button
                           onClick={() => setDeleteRefillId(r.id)}
                           className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                          aria-label="Delete"
+                          aria-label={`Delete ${medName(r.medId)} pickup on ${r.date}`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -440,14 +441,14 @@ export default function History() {
                       <button
                         onClick={() => setEditWorkout(w)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                        aria-label="Edit"
+                        aria-label={`Edit ${WORKOUT_KIND_LABEL[w.kind]} workout ${fmtDateFull(w.performedAt)} at ${fmtTime(w.performedAt)}`}
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
                       <button
                         onClick={() => setDeleteWorkoutId(w.id)}
                         className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-950 hover:text-rose-400"
-                        aria-label="Delete"
+                        aria-label={`Delete ${WORKOUT_KIND_LABEL[w.kind]} workout ${fmtDateFull(w.performedAt)} at ${fmtTime(w.performedAt)}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -495,18 +496,27 @@ export default function History() {
             <DialogContent className="sm:max-w-sm">
               <DialogHeader>
                 <DialogTitle>{refillEditId ? 'Edit Rx pickup' : 'Add Rx pickup'}</DialogTitle>
+                <DialogDescription>
+                  {refillEditId
+                    ? 'Update the pickup date, tablet count, or notes for this refill.'
+                    : 'Record a pharmacy pickup to track refill cadence and Nurtec stock.'}
+                </DialogDescription>
               </DialogHeader>
               <div className="space-y-3 py-2">
-                <div className="space-y-1.5">
-                  <Label>Medication</Label>
-                  {refillEditId ? (
+                {refillEditId ? (
+                  <div className="space-y-1.5">
+                    <span className="text-sm font-medium">Medication</span>
                     <div className="text-sm font-semibold text-slate-200">{medName(refillMed)}</div>
-                  ) : (
+                  </div>
+                ) : (
+                  <fieldset className="space-y-1.5">
+                    <legend className="text-sm font-medium">Medication</legend>
                     <div className="grid grid-cols-3 gap-1.5">
                       {allMedIds([...state.meds, ...state.refills]).map((id) => (
                         <button
                           key={id}
                           type="button"
+                          aria-pressed={refillMed === id}
                           onClick={() => selectRefillMed(id)}
                           className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
                             refillMed === id
@@ -519,17 +529,23 @@ export default function History() {
                         </button>
                       ))}
                     </div>
-                  )}
+                  </fieldset>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="refill-date">Pickup date</Label>
+                  <Input
+                    id="refill-date"
+                    type="date"
+                    value={refillDate}
+                    onChange={(e) => setRefillDate(e.target.value)}
+                  />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Pickup date</Label>
-                  <Input type="date" value={refillDate} onChange={(e) => setRefillDate(e.target.value)} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>
+                  <Label htmlFor="refill-tablets">
                     Tablets <span className="font-normal text-slate-400">(blank = unknown)</span>
                   </Label>
                   <Input
+                    id="refill-tablets"
                     type="number"
                     min={0}
                     step={1}
@@ -547,8 +563,15 @@ export default function History() {
                   )}
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Notes <span className="font-normal text-slate-400">(pharmacy…)</span></Label>
-                  <Input value={refillNotes} onChange={(e) => setRefillNotes(e.target.value)} placeholder="e.g. CVS" />
+                  <Label htmlFor="refill-notes">
+                    Notes <span className="font-normal text-slate-400">(pharmacy…)</span>
+                  </Label>
+                  <Input
+                    id="refill-notes"
+                    value={refillNotes}
+                    onChange={(e) => setRefillNotes(e.target.value)}
+                    placeholder="e.g. CVS"
+                  />
                 </div>
               </div>
               <DialogFooter>

@@ -145,6 +145,34 @@ describe('WorkoutFormDialog duration validation', () => {
     fireEvent.click(saveButton());
     expect(store.updateWorkout).not.toHaveBeenCalled();
   });
+
+  it('opens a corrupt legacy performedAt blank and blocks saving until repaired', () => {
+    openDialog(makeWorkout({ performedAt: 'not-a-date' }));
+
+    expect(performedInput().value).toBe('');
+    expect(saveButton().disabled).toBe(true);
+    fireEvent.click(saveButton());
+    expect(store.updateWorkout).not.toHaveBeenCalled();
+
+    fireEvent.change(performedInput(), { target: { value: '2026-03-02T10:00' } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    expect(store.updateWorkout).toHaveBeenCalledWith(
+      'workout-1',
+      expect.objectContaining({ performedAt: new Date('2026-03-02T10:00').toISOString() }),
+    );
+  });
+
+  it('exposes the selected kind and effort with aria-pressed', () => {
+    openDialog();
+    fillRequired();
+
+    expect(screen.getByRole('button', { name: 'Strength' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Cardio' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Medium' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Hard' }).getAttribute('aria-pressed')).toBe('false');
+  });
 });
 
 describe('WorkoutFormDialog duplicate-day warning', () => {

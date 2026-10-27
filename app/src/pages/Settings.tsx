@@ -533,6 +533,7 @@ export default function Settings() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
+      <h1 className="sr-only">Settings</h1>
       {/* import */}
       <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
         <h2 className="flex items-center gap-2 text-base font-bold">
@@ -679,7 +680,7 @@ export default function Settings() {
             </span>
             <Button
               variant="outline"
-              className="h-7 px-2 text-xs"
+              className="h-11 px-3 text-xs sm:h-7 sm:px-2"
               onClick={() => store.resetLowStockAlert()}
             >
               Reset alert
@@ -1003,7 +1004,7 @@ export default function Settings() {
           {weatherDirty && weatherErrors.length === 0 && (
             <button
               type="button"
-              className="text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200"
+              className="inline-flex min-h-11 items-center text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200 sm:min-h-0"
               onClick={() => {
                 setWeatherDraft(null);
                 setWeatherResults([]);
@@ -1163,7 +1164,7 @@ export default function Settings() {
           {remindersDirty && reminderErrors.length === 0 && (
             <button
               type="button"
-              className="text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200"
+              className="inline-flex min-h-11 items-center text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200 sm:min-h-0"
               onClick={() => setReminderDraft(null)}
             >
               Discard changes

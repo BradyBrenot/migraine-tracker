@@ -4,12 +4,18 @@ import { useStore } from '@/lib/store';
 import { SYMPTOM_OPTIONS, TRIGGER_OPTIONS, painColor, textOn } from '@/lib/meds';
 import { toLocalInput } from '@/lib/format';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+
+const START_ID = 'attack-start';
+const END_ID = 'attack-end';
+const ONGOING_ID = 'attack-ongoing';
+const NOTES_ID = 'attack-notes';
+const TIME_ERROR_ID = 'attack-time-error';
 
 function Chip({
   active, onClick, children,
@@ -17,6 +23,7 @@ function Chip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={`inline-flex min-h-11 items-center rounded-full border px-3 text-sm font-medium transition-colors ${
         active
@@ -60,6 +67,8 @@ export default function AttackFormDialog({
       // Intentional one-shot form initialization on dialog open: the fields
       // must re-sync to the edited attack. This is a controlled reset that
       // runs once per open, not render-derived state cascading every render.
+      // `toLocalInput` returns '' for an invalid Date, so a corrupt legacy
+      // start/end opens blank instead of "NaN-NaN-NaN…" and can be repaired.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStart(toLocalInput(new Date(attack.start)));
       setEnd(attack.end ? toLocalInput(new Date(attack.end)) : '');
@@ -84,9 +93,25 @@ export default function AttackFormDialog({
     }
   }, [open, attack]);
 
+  // Date.parse is used (rather than `new Date(...)`) so the validity check and
+  // the saved instant share one reading of the same local datetime string.
+  // An intentional end-before-start is NOT rejected: those records stay
+  // editable and are surfaced as a warning elsewhere.
+  const startMs = start.trim() === '' ? Number.NaN : Date.parse(start);
+  const endMs = end.trim() === '' ? Number.NaN : Date.parse(end);
+  const startInvalid = !Number.isFinite(startMs);
+  const endInvalid = !ongoing && !Number.isFinite(endMs);
+  const timeError = startInvalid
+    ? 'Enter a valid start date and time.'
+    : endInvalid
+      ? 'Enter a valid end date and time, or mark the attack as ongoing.'
+      : '';
+  const canSave = timeError === '';
+
   function save() {
-    const startDate = new Date(start);
-    const endDate = !ongoing && end ? new Date(end) : null;
+    if (!canSave) return;
+    const startDate = new Date(startMs);
+    const endDate = !ongoing && Number.isFinite(endMs) ? new Date(endMs) : null;
     if (isNew) {
       const a = startAttack(startDate);
       if (endDate) endAttack(a.id, endDate);
@@ -111,6 +136,11 @@ export default function AttackFormDialog({
             the absolutely positioned close-button gutter with pr-16. */}
         <DialogHeader className="border-b border-slate-800 px-5 py-4 pr-16">
           <DialogTitle>{isNew ? 'Add attack' : 'Edit attack'}</DialogTitle>
+          <DialogDescription>
+            {isNew
+              ? 'Record when the attack started, how bad it got, and anything that may have triggered it.'
+              : 'Update the times, pain, symptoms, triggers, or notes for this attack.'}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 overflow-y-auto px-5 py-4">
@@ -118,46 +148,68 @@ export default function AttackFormDialog({
             {/* times */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label>Started</Label>
-                <Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+                <Label htmlFor={START_ID}>Started</Label>
+                <Input
+                  id={START_ID}
+                  type="datetime-local"
+                  value={start}
+                  aria-invalid={startInvalid}
+                  aria-describedby={startInvalid ? TIME_ERROR_ID : undefined}
+                  onChange={(e) => setStart(e.target.value)}
+                />
               </div>
               <div className="space-y-1.5">
-                <Label className="flex items-center justify-between">
-                  Ended
-                  <label className="flex items-center gap-1 text-xs font-normal text-slate-400">
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor={END_ID}>Ended</Label>
+                  {/* Separate label/control pair (no nested <label>): the
+                      checkbox names the ongoing state, the Ended label names
+                      the datetime input. */}
+                  <span className="flex items-center gap-1 text-xs font-normal text-slate-400">
                     <input
+                      id={ONGOING_ID}
                       type="checkbox"
                       checked={ongoing}
                       onChange={(e) => setOngoing(e.target.checked)}
                       className="accent-slate-900"
                     />
-                    ongoing
-                  </label>
-                </Label>
+                    <label htmlFor={ONGOING_ID} className="cursor-pointer">
+                      ongoing
+                    </label>
+                  </span>
+                </div>
                 <Input
+                  id={END_ID}
                   type="datetime-local"
                   value={end}
                   disabled={ongoing}
+                  aria-invalid={endInvalid}
+                  aria-describedby={endInvalid ? TIME_ERROR_ID : undefined}
                   onChange={(e) => setEnd(e.target.value)}
                 />
               </div>
             </div>
+            {timeError && (
+              <p id={TIME_ERROR_ID} role="alert" className="text-xs text-rose-300">
+                {timeError}
+              </p>
+            )}
 
             {/* pain */}
-            <div className="space-y-2">
-              <Label>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">
                 Peak pain:{' '}
                 {painSet ? (
                   <span className="font-bold" style={{ color: painColor(pain) }}>{pain}/10</span>
                 ) : (
                   <span className="text-slate-400">not set</span>
                 )}
-              </Label>
+              </legend>
               <div className="flex flex-wrap gap-1.5">
                 {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
                   <button
                     key={n}
                     type="button"
+                    aria-pressed={painSet && pain === n}
                     onClick={() => { setPain(n); setPainSet(true); }}
                     className={`h-11 w-11 rounded-lg border text-sm font-bold transition-all ${
                       painSet && pain === n
@@ -170,11 +222,11 @@ export default function AttackFormDialog({
                   </button>
                 ))}
               </div>
-            </div>
+            </fieldset>
 
             {/* symptoms */}
-            <div className="space-y-2">
-              <Label>Symptoms</Label>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Symptoms</legend>
               <div className="flex flex-wrap gap-1.5">
                 {SYMPTOM_OPTIONS.map((s) => (
                   <Chip key={s} active={symptoms.includes(s)} onClick={() => setSymptoms(toggle(symptoms, s))}>
@@ -182,11 +234,11 @@ export default function AttackFormDialog({
                   </Chip>
                 ))}
               </div>
-            </div>
+            </fieldset>
 
             {/* triggers */}
-            <div className="space-y-2">
-              <Label>Potential triggers</Label>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Potential triggers</legend>
               <div className="flex flex-wrap gap-1.5">
                 {TRIGGER_OPTIONS.map((t) => (
                   <Chip key={t} active={triggers.includes(t)} onClick={() => setTriggers(toggle(triggers, t))}>
@@ -194,21 +246,22 @@ export default function AttackFormDialog({
                   </Chip>
                 ))}
               </div>
-            </div>
+            </fieldset>
 
             {/* aura */}
-            <div className="space-y-2">
-              <Label>Aura</Label>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Aura</legend>
               <div className="flex gap-1.5">
                 <Chip active={aura === true} onClick={() => setAura(aura === true ? null : true)}>Yes</Chip>
                 <Chip active={aura === false} onClick={() => setAura(aura === false ? null : false)}>No</Chip>
               </div>
-            </div>
+            </fieldset>
 
             {/* notes */}
             <div className="space-y-1.5">
-              <Label>Notes</Label>
+              <Label htmlFor={NOTES_ID}>Notes</Label>
               <Textarea
+                id={NOTES_ID}
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Anything else worth remembering…"
@@ -220,7 +273,7 @@ export default function AttackFormDialog({
 
         <DialogFooter className="border-t border-slate-800 px-5 py-3">
           <Button variant="outline" className="h-11" onClick={onClose}>Cancel</Button>
-          <Button className="h-11" onClick={save}>{isNew ? 'Add attack' : 'Save changes'}</Button>
+          <Button className="h-11" onClick={save} disabled={!canSave}>{isNew ? 'Add attack' : 'Save changes'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

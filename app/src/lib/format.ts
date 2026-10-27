@@ -59,8 +59,13 @@ export function fmtDuration(ms: number): string {
   return remH ? `${days}d ${remH}h` : `${days}d`;
 }
 
-/** Convert a Date to the value format used by <input type="datetime-local"> */
+/**
+ * Convert a Date to the value format used by <input type="datetime-local">.
+ * An invalid Date returns '' instead of `NaN-NaN-NaNTNaN:NaN`, so dialogs open
+ * blank and validation can treat corrupt legacy records as repairable.
+ */
 export function toLocalInput(d: Date): string {
+  if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

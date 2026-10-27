@@ -132,3 +132,82 @@ describe('AttackFormDialog peak-pain edits', () => {
     expect(store.logPain).toHaveBeenCalledWith('new-attack', 0, expect.any(Date));
   });
 });
+
+describe('AttackFormDialog time validation', () => {
+  function startInput(): HTMLInputElement {
+    return screen.getByLabelText('Started') as HTMLInputElement;
+  }
+
+  function endInput(): HTMLInputElement {
+    return screen.getByLabelText('Ended') as HTMLInputElement;
+  }
+
+  it('blocks saving an empty start and reports it with role=alert', () => {
+    openDialog(makeAttack());
+
+    fireEvent.change(startInput(), { target: { value: '' } });
+
+    expect(saveButton().disabled).toBe(true);
+    expect(startInput().getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByRole('alert').textContent).toContain('valid start');
+    fireEvent.click(saveButton());
+    expect(store.updateAttack).not.toHaveBeenCalled();
+  });
+
+  it('requires a usable end when ongoing is unchecked', () => {
+    openDialog(null);
+
+    // New attacks start ongoing, so the end field is disabled and optional.
+    expect(endInput().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'ongoing' }));
+    expect(endInput().disabled).toBe(false);
+
+    expect(saveButton().disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('valid end');
+
+    fireEvent.change(startInput(), { target: { value: '2026-05-01T09:00' } });
+    fireEvent.change(endInput(), { target: { value: '2026-05-01T10:00' } });
+    expect(saveButton().disabled).toBe(false);
+  });
+
+  it('keeps an end-before-start attack editable and saves it without rejecting', () => {
+    // End-before-start is intentional legacy/edit behavior: repair is possible,
+    // but the form must never force end >= start on save.
+    openDialog(makeAttack({ start: '2026-05-02T10:00:00.000Z', end: '2026-05-02T12:00:00.000Z' }));
+
+    const start = '2026-05-01T09:00';
+    const end = '2026-05-01T08:00';
+    fireEvent.change(startInput(), { target: { value: start } });
+    fireEvent.change(endInput(), { target: { value: end } });
+
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    expect(store.updateAttack).toHaveBeenCalledWith(
+      'attack-1',
+      expect.objectContaining({
+        start: new Date(start).toISOString(),
+        end: new Date(end).toISOString(),
+      }),
+    );
+  });
+
+  it('opens a corrupt legacy start blank and can repair and save it', () => {
+    openDialog(makeAttack({ start: 'not-a-date' }));
+
+    expect(startInput().value).toBe('');
+    expect(document.body.textContent).not.toContain('NaN');
+    expect(saveButton().disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('valid start');
+
+    const repaired = '2026-05-01T09:00';
+    fireEvent.change(startInput(), { target: { value: repaired } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    expect(store.updateAttack).toHaveBeenCalledWith(
+      'attack-1',
+      expect.objectContaining({ start: new Date(repaired).toISOString() }),
+    );
+  });
+});

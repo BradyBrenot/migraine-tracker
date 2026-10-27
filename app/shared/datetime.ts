@@ -259,6 +259,25 @@ export function addDays(key: DayKey, n: number): DayKey {
 }
 
 /**
+ * First day of the month containing `key` ('YYYY-MM-DD' -> 'YYYY-MM-01').
+ * Plain string slicing: cheap and total, like the rest of the day-key surface.
+ */
+export function monthStartKey(key: DayKey): DayKey {
+  return `${key.slice(0, 7)}-01`;
+}
+
+/**
+ * Calendar-month arithmetic on a day key, returning the first day of the
+ * target month: never fixed 86400000 ms across a month, and the UTC-noon
+ * anchor keeps it DST-independent. Throws `RangeError` on malformed keys.
+ */
+export function addMonths(key: DayKey, n: number): DayKey {
+  const { year, month } = parseDayKey(key);
+  const d = new Date(Date.UTC(year, month - 1 + n, 1, 12));
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-01`;
+}
+
+/**
  * Whole calendar-day difference `later - earlier` between two day keys.
  *
  * Both keys are parsed and resolved to UTC noon before subtracting. Noon keeps

@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   addDays,
+  addMonths,
   dayKeyStartMs,
   diffDayKeys,
   isValidTimeZone,
   localDayKey,
+  monthStartKey,
   sameSundayWeek,
   sundayWeekBounds,
   sundayWeekStart,
@@ -135,6 +137,40 @@ describe('addDays', () => {
     expect(addDays('2025-12-31', 1)).toBe('2026-01-01');
     expect(addDays('2026-03-01', -1)).toBe('2026-02-28');
     expect(addDays('2026-06-15', 0)).toBe('2026-06-15');
+  });
+});
+
+describe('monthStartKey', () => {
+  it('truncates any day key to the first of its month', () => {
+    expect(monthStartKey('2026-06-15')).toBe('2026-06-01');
+    expect(monthStartKey('2026-06-01')).toBe('2026-06-01');
+    expect(monthStartKey('2026-12-31')).toBe('2026-12-01');
+  });
+});
+
+describe('addMonths', () => {
+  it('moves whole calendar months, including year boundaries', () => {
+    expect(addMonths('2026-01-01', 1)).toBe('2026-02-01');
+    expect(addMonths('2026-01-01', -1)).toBe('2025-12-01');
+    expect(addMonths('2026-12-01', 1)).toBe('2027-01-01');
+    expect(addMonths('2026-03-01', 0)).toBe('2026-03-01');
+    expect(addMonths('2026-01-01', 12)).toBe('2027-01-01');
+    expect(addMonths('2026-01-01', -12)).toBe('2025-01-01');
+  });
+
+  it('normalizes a mid-month key to the first of the target month', () => {
+    expect(addMonths('2026-01-31', 1)).toBe('2026-02-01');
+    expect(addMonths('2026-03-15', -1)).toBe('2026-02-01');
+  });
+
+  it('is not affected by the DST transition month', () => {
+    expect(addMonths('2026-03-01', 1)).toBe('2026-04-01');
+    expect(addMonths('2026-10-01', 1)).toBe('2026-11-01');
+  });
+
+  it('throws RangeError on malformed keys, consistent with other day-key helpers', () => {
+    expect(() => addMonths('2026-6-1', 1)).toThrow(RangeError);
+    expect(() => addMonths('not-a-day', 1)).toThrow(RangeError);
   });
 });
 

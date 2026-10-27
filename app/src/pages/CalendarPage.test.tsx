@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, TrackerState, Workout } from '@/types';
 import { dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
@@ -212,6 +212,40 @@ function makeAttack(dayKey: string, timeZone: string): Attack {
   };
 }
 
+/** An attack from explicit instants (`end === null` = ongoing). */
+function makeTimedAttack(id: string, startMs: number, endMs: number | null): Attack {
+  return {
+    id,
+    start: new Date(startMs).toISOString(),
+    end: endMs === null ? null : new Date(endMs).toISOString(),
+    painLog: [],
+    peakPain: 6,
+    symptoms: [],
+    triggers: [],
+    aura: null,
+    notes: '',
+    source: 'manual',
+  };
+}
+
+/** Day 15 of the configured zone's current month, always inside the grid. */
+function midMonthDay(timeZone: string): string {
+  return `${localDayKey(Date.now(), timeZone).slice(0, 7)}-15`;
+}
+
+function daysInMonthOf(dayKey: string): number {
+  const year = Number(dayKey.slice(0, 4));
+  const month = Number(dayKey.slice(5, 7));
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Text of the month header line ("X attack days of D · Y attacks"). */
+function monthHeaderText(): string {
+  const header = screen.getByText((_, element) => element?.tagName === 'P'
+    && (element.textContent ?? '').includes('attack day'));
+  return (header.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -290,5 +324,105 @@ describe('CalendarPage configured-timezone day identity', () => {
     expect(screen.getByText('nausea')).toBeTruthy();
     expect(screen.getByText('Cardio · medium')).toBeTruthy();
     expect(screen.getByRole('heading', { name: formatDayTitle(dayKey, timeZone) })).toBeTruthy();
+  });
+});
+
+describe('CalendarPage ongoing attacks', () => {
+  const TZ = 'UTC';
+
+  it('shows an em dash, not negative elapsed, for an ongoing attack with a future start', async () => {
+    const now = Date.now();
+    const startMs = now + 3 * 86400000;
+    const startDay = localDayKey(startMs, TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('future-ongoing', startMs, null)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    // The start day may be in the next month near a month boundary.
+    if (startDay.slice(0, 7) !== localDayKey(now, TZ).slice(0, 7)) {
+      fireEvent.click(screen.getByLabelText('Next month'));
+    }
+    clickDay(startDay);
+
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(sheet.textContent).toContain('ongoing'));
+    // Never "-1h" style nonsense; the duration is an em dash.
+    expect(within(sheet).getByText('—')).toBeTruthy();
+    expect(within(sheet).queryByText(/^-\d/)).toBeNull();
+    // An ongoing attack has no end, so it can never be "end before start".
+    expect(within(sheet).queryByText('End is before start')).toBeNull();
+  });
+
+  it('keeps elapsed-so-far for a valid ongoing attack', async () => {
+    const now = Date.now();
+    const startMs = now - 2 * 60 * 60 * 1000;
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('running-ongoing', startMs, null)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    clickDay(localDayKey(now, TZ));
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(sheet.textContent).toContain('ongoing'));
+    expect(within(sheet).getByText('2h')).toBeTruthy();
+  });
+});
+
+describe('CalendarPage degenerate attacks', () => {
+  const TZ = 'UTC';
+
+  it('keeps an end-before-start attack on its start day with a warning and no negative duration', async () => {
+    const day = midMonthDay(TZ);
+    const previousDay = day.slice(0, 8) + String(Number(day.slice(8, 10)) - 1).padStart(2, '0');
+    const startMs = dayKeyStartMs(day, TZ) + 10 * 60 * 60 * 1000;
+    const endMs = dayKeyStartMs(previousDay, TZ) + 10 * 60 * 60 * 1000;
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('bad-attack', startMs, endMs)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    // The month header counts it once: 1 attack day, 1 attack.
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe(`1 attack day of ${daysInMonthOf(day)} · 1 attack`);
+    });
+
+    clickDay(day);
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('End is before start')).toBeTruthy());
+    // No confusing negative duration ("-1d 0h"); the duration is an em dash.
+    expect(within(sheet).getByText('—')).toBeTruthy();
+    expect(within(sheet).queryByText(/^-/)).toBeNull();
+    expect(screen.getByRole('heading', { name: formatDayTitle(day, TZ) })).toBeTruthy();
+  });
+
+  it('counts a zero-duration attack at exactly local midnight as one attack day', async () => {
+    const day = midMonthDay(TZ);
+    const midnight = dayKeyStartMs(day, TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('zero-attack', midnight, midnight)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe(`1 attack day of ${daysInMonthOf(day)} · 1 attack`);
+    });
+
+    clickDay(day);
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('0m')).toBeTruthy());
+    expect(within(sheet).queryByText('End is before start')).toBeNull();
   });
 });

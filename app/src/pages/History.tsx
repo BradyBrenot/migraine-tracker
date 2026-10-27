@@ -5,6 +5,7 @@ import { allMedIds, medColor, medName, painColor, textOn } from '@/lib/meds';
 import { parseTabletQuantity } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { diffDayKeys, isValidDayKey, localDayKey } from '../../shared/datetime.ts';
+import { parseAttackTimes } from '../../shared/attackstats.ts';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
 import type { Attack, MedEvent, Refill, Workout, WorkoutKind } from '@/types';
 import AttackFormDialog from '@/components/AttackFormDialog';
@@ -177,7 +178,22 @@ export default function History() {
             <p className="py-10 text-center text-sm text-slate-400">No attacks logged yet.</p>
           )}
           {attacks.map((a) => {
-            const dur = (a.end ? new Date(a.end).getTime() : now) - new Date(a.start).getTime();
+            const times = parseAttackTimes(a, now);
+            // A valid finished end earlier than a valid start is surfaced as a
+            // warning, but never blocked, hidden, or silently repaired. An
+            // ongoing attack (no end) can never be end-before-start.
+            const endBeforeStart = a.end !== null
+              && times.startMs !== null
+              && times.endMs !== null
+              && times.endMs < times.startMs;
+            const elapsed = times.startMs !== null && times.endMs !== null
+              ? times.endMs - times.startMs
+              : null;
+            // Never show a negative/garbage duration as if it were elapsed time.
+            // Ongoing attacks still show elapsed-so-far (bounded by `now`).
+            const durLabel = elapsed !== null && elapsed >= 0 && !endBeforeStart
+              ? fmtDuration(elapsed)
+              : '—';
             const attackMeds = meds.filter((m) => m.attackId === a.id);
             return (
               <div key={a.id} className="rounded-xl border bg-slate-900 p-3 shadow-sm">
@@ -196,9 +212,17 @@ export default function History() {
                           ONGOING
                         </span>
                       )}
+                      {endBeforeStart && (
+                        <span
+                          role="status"
+                          className="ml-2 rounded-full bg-amber-950 px-2 py-0.5 text-[10px] font-bold text-amber-300"
+                        >
+                          End is before start
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-slate-400">
-                      {fmtDuration(dur)}
+                      {durLabel}
                       {a.symptoms.length > 0 && ` · ${a.symptoms.slice(0, 3).join(', ')}`}
                     </div>
                     {attackMeds.length > 0 && (

@@ -1,0 +1,237 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import type { StoreApi } from '@/lib/store';
+import type {
+  Attack, DayState, Refill, StockBaseline, TrackerState, Workout,
+} from '@/types';
+import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    exportAll: vi.fn(),
+    importAll: vi.fn(),
+    resetAll: vi.fn(),
+    addAttack: vi.fn(),
+    patchAttack: vi.fn(),
+    deleteAttack: vi.fn(),
+    addMed: vi.fn(),
+    patchMed: vi.fn(),
+    deleteMed: vi.fn(),
+    addRefill: vi.fn(),
+    patchRefill: vi.fn(),
+    deleteRefill: vi.fn(),
+    addStockBaseline: vi.fn(),
+    patchStockBaseline: vi.fn(),
+    deleteStockBaseline: vi.fn(),
+    addWorkout: vi.fn(),
+    patchWorkout: vi.fn(),
+    deleteWorkout: vi.fn(),
+    listWorkouts: vi.fn(),
+    listDayStates: vi.fn(),
+    putDayState: vi.fn(),
+    putSetting: vi.fn(),
+  },
+}));
+
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}));
+
+type StoreModule = typeof import('@/lib/store');
+type HistoryModule = typeof import('@/pages/History');
+
+interface MockedBackend {
+  exportAll: Mock;
+  importAll: Mock;
+  resetAll: Mock;
+  addAttack: Mock;
+  patchAttack: Mock;
+  deleteAttack: Mock;
+  addMed: Mock;
+  patchMed: Mock;
+  deleteMed: Mock;
+  addRefill: Mock;
+  patchRefill: Mock;
+  deleteRefill: Mock;
+  addStockBaseline: Mock;
+  patchStockBaseline: Mock;
+  deleteStockBaseline: Mock;
+  addWorkout: Mock;
+  patchWorkout: Mock;
+  deleteWorkout: Mock;
+  listWorkouts: Mock;
+  listDayStates: Mock;
+  putDayState: Mock;
+  putSetting: Mock;
+}
+
+const STORAGE_KEY = 'migraine-tracker-v1';
+
+let api: MockedBackend;
+let storeModule: StoreModule;
+let historyModule: HistoryModule;
+let captured: StoreApi | null = null;
+
+function Probe() {
+  captured = storeModule.useStore();
+  return null;
+}
+
+function mountHistory(): void {
+  const History = historyModule.default;
+  render(
+    <storeModule.StoreProvider>
+      <History />
+      <Probe />
+    </storeModule.StoreProvider>,
+  );
+}
+
+async function waitForSync(): Promise<void> {
+  await waitFor(() => {
+    expect(captured).not.toBeNull();
+    expect(captured!.sync.status).toBe('synced');
+  });
+}
+
+function seedState(partial: Partial<TrackerState>): void {
+  const state: TrackerState = {
+    attacks: [],
+    meds: [],
+    refills: [],
+    workouts: [],
+    dayStates: [],
+    stockBaselines: [],
+    rules: {},
+    doses: {},
+    planned: {},
+    timezone: 'UTC',
+    lowStockThreshold: 2,
+    reminders: DEFAULT_REMINDER_SETTINGS,
+    lowStockAlertedAt: null,
+    seeded: false,
+    ...partial,
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function applyApiDefaults(backend: MockedBackend): void {
+  backend.exportAll.mockResolvedValue({
+    attacks: [] as Attack[],
+    meds: [] as TrackerState['meds'],
+    refills: [] as Refill[],
+    workouts: [] as Workout[],
+    dayStates: [] as DayState[],
+    stockBaselines: [] as StockBaseline[],
+    settings: {} as Record<string, unknown>,
+  });
+  backend.importAll.mockResolvedValue(undefined);
+  backend.resetAll.mockResolvedValue(undefined);
+  backend.addAttack.mockResolvedValue(undefined);
+  backend.patchAttack.mockResolvedValue(undefined);
+  backend.deleteAttack.mockResolvedValue(undefined);
+  backend.addMed.mockResolvedValue(undefined);
+  backend.patchMed.mockResolvedValue(undefined);
+  backend.deleteMed.mockResolvedValue(undefined);
+  backend.addRefill.mockResolvedValue(undefined);
+  backend.patchRefill.mockResolvedValue(undefined);
+  backend.deleteRefill.mockResolvedValue(undefined);
+  backend.addStockBaseline.mockResolvedValue(undefined);
+  backend.patchStockBaseline.mockResolvedValue(undefined);
+  backend.deleteStockBaseline.mockResolvedValue(undefined);
+  backend.addWorkout.mockResolvedValue(undefined);
+  backend.patchWorkout.mockResolvedValue(undefined);
+  backend.deleteWorkout.mockResolvedValue(undefined);
+  backend.listWorkouts.mockResolvedValue([]);
+  backend.listDayStates.mockResolvedValue([]);
+  backend.putDayState.mockResolvedValue(undefined);
+  backend.putSetting.mockResolvedValue(undefined);
+}
+
+function makeAttack(partial: Partial<Attack> & { id: string; start: string }): Attack {
+  return {
+    end: null,
+    painLog: [],
+    peakPain: 5,
+    symptoms: [],
+    triggers: [],
+    aura: null,
+    notes: '',
+    source: 'manual',
+    ...partial,
+  };
+}
+
+beforeEach(async () => {
+  vi.resetModules();
+  vi.clearAllMocks();
+  localStorage.clear();
+  captured = null;
+
+  api = (await import('@/lib/api')).api as unknown as MockedBackend;
+  applyApiDefaults(api);
+  historyModule = await import('@/pages/History');
+  storeModule = await import('@/lib/store');
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  localStorage.clear();
+  captured = null;
+});
+
+describe('History attack rows with inconsistent durations', () => {
+  it('warns only on an end-before-start attack, hides its negative duration, and keeps it editable', async () => {
+    seedState({
+      attacks: [
+        makeAttack({
+          id: 'normal',
+          start: '2026-05-10T08:00:00.000Z',
+          end: '2026-05-10T10:00:00.000Z',
+        }),
+        makeAttack({
+          id: 'inverted',
+          start: '2026-05-12T10:00:00.000Z',
+          end: '2026-05-12T09:00:00.000Z',
+        }),
+      ],
+    });
+
+    mountHistory();
+    await waitForSync();
+
+    // Exactly one visible warning, on the inverted attack.
+    await waitFor(() => expect(screen.getAllByText('End is before start')).toHaveLength(1));
+
+    // The bad row shows an em dash instead of a negative duration...
+    expect(screen.getByText('—')).toBeTruthy();
+    expect(screen.queryByText(/^-\d/)).toBeNull();
+    // ...while the normal row keeps its real elapsed time.
+    expect(screen.getByText('2h')).toBeTruthy();
+
+    // Both entries remain editable and deletable — no validation gate.
+    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(2);
+  });
+
+  it('never warns "End is before start" on an ongoing attack with a future start', async () => {
+    seedState({
+      attacks: [makeAttack({
+        id: 'future-ongoing',
+        start: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        end: null,
+      })],
+    });
+
+    mountHistory();
+    await waitForSync();
+
+    await waitFor(() => expect(screen.getByText('ONGOING')).toBeTruthy());
+    expect(screen.queryByText('End is before start')).toBeNull();
+    // Future start means no elapsed-so-far, not a negative duration.
+    expect(screen.getByText('—')).toBeTruthy();
+  });
+});

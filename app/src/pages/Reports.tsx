@@ -8,7 +8,14 @@ import { useStore } from '@/lib/store';
 import { usageDaysInWindow, daysSinceLast } from '@/lib/usage';
 import { useNow } from '@/lib/clock';
 import { MED_CATALOG, allMedIds, medColor, medName, painColor } from '@/lib/meds';
-import { dayKey, fmtDuration } from '@/lib/format';
+import { fmtDuration } from '@/lib/format';
+import { buildMonthlyTrend, buildReportLines } from '@/lib/report';
+import {
+  addMonths, dayKeyStartMs, localDayKey, monthStartKey, type DayKey,
+} from '../../shared/datetime.ts';
+import {
+  attackDayKeysInMonth, attackOverlapsRange, parseAttackTimes, validDurationMs,
+} from '../../shared/attackstats.ts';
 import { Button } from '@/components/ui/button';
 
 const TOOLTIP_STYLE = {
@@ -34,48 +41,55 @@ function StatCard({
 export default function Reports() {
   const { state, readOnly } = useStore();
   const now = useNow();
-  // exact-month view for on-screen stats
-  const [cursor, setCursor] = useState(() => {
-    const d = new Date(); d.setDate(1); return d;
-  });
+  const timeZone = state.timezone;
+  // exact-month view for on-screen stats: a configured-zone month key, so the
+  // label, window bounds, and day buckets all agree with Calendar.
+  const [cursor, setCursor] = useState<DayKey>(() => monthStartKey(localDayKey(now, timeZone)));
   const [reportSpan, setReportSpan] = useState<'3' | '6' | '12' | 'all'>('12');
 
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
-  const monthLabel = cursor.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  const monthLabel = new Intl.DateTimeFormat(undefined, {
+    month: 'long', year: 'numeric', timeZone,
+  }).format(new Date(dayKeyStartMs(cursor, timeZone)));
 
   const data = useMemo(() => {
-    const mStart = new Date(year, month, 1).getTime();
-    const mEnd = new Date(year, month + 1, 1).getTime();
-    const inMonth = (ts: string) => {
-      const t = new Date(ts).getTime();
-      return t >= mStart && t < mEnd;
-    };
+    const monthPrefix = cursor.slice(0, 7);
+    const mStart = dayKeyStartMs(cursor, timeZone);
+    const mEnd = dayKeyStartMs(addMonths(cursor, 1), timeZone);
+
+    const parsed = state.attacks.map((a) => ({
+      attack: a,
+      times: parseAttackTimes(a, now),
+    }));
     // attacks counted by overlap (multi-day attacks count into this month),
     // but listed/counted once by their start month
-    const attacks = state.attacks.filter((a) => {
-      const s = new Date(a.start).getTime();
-      const e = a.end ? new Date(a.end).getTime() : now;
-      return s < mEnd && e >= mStart;
+    const overlap = parsed.filter(({ times }) => attackOverlapsRange(
+      times.startMs, times.endMs, mStart, mEnd,
+    ));
+    const attacks = overlap.map(({ attack }) => attack);
+    // Med days are bucketed in the configured zone, never by UTC slice.
+    const meds = state.meds.filter((m) => {
+      const t = Date.parse(m.ts);
+      return Number.isFinite(t) && t >= mStart && t < mEnd;
     });
-    const meds = state.meds.filter((m) => inMonth(m.ts));
 
-    const finished = attacks.filter((a) => a.end);
-    const totalMs = finished.reduce(
-      (s, a) => s + (new Date(a.end!).getTime() - new Date(a.start).getTime()), 0);
-    const avgMs = finished.length ? totalMs / finished.length : 0;
+    // Only the shared duration definition feeds the average: ongoing,
+    // unparseable, and negative-duration attacks are excluded, zero counts as 0.
+    const durations = overlap
+      .map(({ times }) => validDurationMs(times))
+      .filter((d): d is number => d !== null);
+    const avgMs = durations.length
+      ? durations.reduce((s, d) => s + d, 0) / durations.length
+      : null;
     const withPain = attacks.filter((a) => a.peakPain >= 0);
     const avgPain = withPain.length
       ? withPain.reduce((s, a) => s + a.peakPain, 0) / withPain.length
-      : 0;
+      : null;
 
-    // distinct days with any attack (clipped to this month)
+    // distinct days with any attack (clipped to this month, half-open)
     const daysLost = new Set<string>();
-    for (const a of attacks) {
-      const s = new Date(a.start).getTime();
-      const e = a.end ? new Date(a.end).getTime() : now;
-      for (let t = Math.max(s, mStart); t < Math.min(e, mEnd); t += 86400000) {
-        daysLost.add(dayKey(new Date(t)));
+    for (const { times } of overlap) {
+      for (const key of attackDayKeysInMonth(times.startMs, times.endMs, monthPrefix, timeZone)) {
+        daysLost.add(key);
       }
     }
 
@@ -93,7 +107,7 @@ export default function Reports() {
       name: medName(id),
       days: new Set(
         meds.filter((e) => e.medId === id)
-          .map((e) => e.ts.slice(0, 10)),
+          .map((e) => localDayKey(Date.parse(e.ts), timeZone)),
       ).size,
       doses: meds.filter((e) => e.medId === id).length,
       color: medColor(id),
@@ -108,200 +122,34 @@ export default function Reports() {
     const triggers = count(attacks.map((a) => a.triggers));
     const symptoms = count(attacks.map((a) => a.symptoms));
 
-    return { attacks, meds, avgMs, avgPain, daysLost: daysLost.size, painDist, medUsage, triggers, symptoms };
-  }, [state, year, month, now]);
+    // An attack (even a zero/negative-duration one) or any med makes the month
+    // known; otherwise 0 days would look like a confirmed clear month.
+    const hasData = attacks.length > 0 || meds.length > 0;
 
-  // Monthly trend buckets — last 12 calendar months, independent of the
-  // month picker. This is the view that matches "how many migraine days
+    return {
+      attacks, meds, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist, medUsage, triggers, symptoms,
+    };
+  }, [state.attacks, state.meds, cursor, timeZone, now]);
+
+  // Monthly trend buckets — last 12 configured-zone calendar months, independent
+  // of the month picker. This is the view that matches "how many migraine days
   // per month" from medical questionnaires.
-  const monthly = useMemo(() => {
-    const nowDate = new Date(now);
-    const rows = [];
-    for (let i = 11; i >= 0; i--) {
-      const first = new Date(nowDate.getFullYear(), nowDate.getMonth() - i, 1);
-      const mStart = first.getTime();
-      const mEnd = new Date(first.getFullYear(), first.getMonth() + 1, 1).getTime();
-
-      const days = new Set<string>();
-      let attacks = 0;
-      let painSum = 0;
-      let painN = 0;
-      for (const a of state.attacks) {
-        const s = new Date(a.start).getTime();
-        const e = a.end ? new Date(a.end).getTime() : now;
-        if (s >= mEnd || e < mStart) continue;
-        attacks++;
-        if (a.peakPain >= 0) { painSum += a.peakPain; painN++; }
-        for (let t = Math.max(s, mStart); t < Math.min(e, mEnd); t += 86400000) {
-          days.add(dayKey(new Date(t)));
-        }
-      }
-
-      const medDays: Record<string, number> = {};
-      for (const id of allMedIds(state.meds)) {
-        medDays[id] = new Set(
-          state.meds
-            .filter((e) => {
-              const t = new Date(e.ts).getTime();
-              return e.medId === id && t >= mStart && t < mEnd;
-            })
-            .map((e) => dayKey(new Date(e.ts))),
-        ).size;
-      }
-
-      rows.push({
-        month: first.toLocaleDateString([], { month: 'short' }),
-        attackDays: days.size,
-        attacks,
-        avgPain: painN ? +(painSum / painN).toFixed(1) : null,
-        ...medDays,
-      });
-    }
-    return rows;
-  }, [state.attacks, state.meds, now]);
+  const monthly = useMemo(() => buildMonthlyTrend({
+    attacks: state.attacks,
+    meds: state.meds,
+    timeZone,
+    nowMs: now,
+  }), [state.attacks, state.meds, timeZone, now]);
 
   /** Build a month-by-month Markdown report. */
   function downloadReport() {
-    const now = new Date();
-
-    // figure out which months have any data at all
-    const firstTs = Math.min(
-      ...state.attacks.map((a) => new Date(a.start).getTime()),
-      ...state.meds.map((m) => new Date(m.ts).getTime()),
-      now.getTime(),
-    );
-    const first = new Date(firstTs);
-    const allMonths: { y: number; m: number }[] = [];
-    for (
-      let d = new Date(first.getFullYear(), first.getMonth(), 1);
-      d <= now;
-      d = new Date(d.getFullYear(), d.getMonth() + 1, 1)
-    ) {
-      allMonths.push({ y: d.getFullYear(), m: d.getMonth() });
-    }
-    const months =
-      reportSpan === 'all' ? allMonths : allMonths.slice(-Number(reportSpan));
-
-    const lines: string[] = [
-      `# Migraine Report`,
-      `Generated: ${now.toLocaleString()}`,
-      `Coverage: ${months.length ? new Date(months[0].y, months[0].m, 1).toLocaleDateString([], { month: 'long', year: 'numeric' }) : '—'} → ${now.toLocaleDateString([], { month: 'long', year: 'numeric' })}`,
-      '',
-    ];
-
-    let totalAttackDays = 0;
-    let totalAttacks = 0;
-
-    for (const { y, m } of months) {
-      const mStart = new Date(y, m, 1).getTime();
-      const mEnd = new Date(y, m + 1, 1).getTime();
-      const daysInMonth = new Date(y, m + 1, 0).getDate();
-      const monthLabel = new Date(y, m, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
-
-      // attacks overlapping this month (listed by start month)
-      const monthAttacks = state.attacks.filter((a) => {
-        const s = new Date(a.start).getTime();
-        return s >= mStart && s < mEnd;
-      });
-      const days = new Set<string>();
-      for (const a of state.attacks) {
-        const s = new Date(a.start).getTime();
-        const e = a.end ? new Date(a.end).getTime() : now.getTime();
-        if (s >= mEnd || e < mStart) continue;
-        for (let t = Math.max(s, mStart); t < Math.min(e, mEnd); t += 86400000) {
-          days.add(dayKey(new Date(t)));
-        }
-      }
-
-      const monthMeds = state.meds.filter((e) => {
-        const t = new Date(e.ts).getTime();
-        return t >= mStart && t < mEnd;
-      });
-
-      const finished = monthAttacks.filter((a) => a.end);
-      const totalMs = finished.reduce(
-        (s, a) => s + (new Date(a.end!).getTime() - new Date(a.start).getTime()), 0);
-      const withPain = monthAttacks.filter((a) => a.peakPain >= 0);
-      const avgPain = withPain.length
-        ? withPain.reduce((s, a) => s + a.peakPain, 0) / withPain.length
-        : null;
-
-      totalAttackDays += days.size;
-      totalAttacks += monthAttacks.length;
-
-      lines.push(`## ${monthLabel}`);
-      lines.push(
-        `**${days.size} attack days of ${daysInMonth}** · ${monthAttacks.length} attacks` +
-          (avgPain !== null ? ` · avg peak pain ${avgPain.toFixed(1)}/10` : '') +
-          (totalMs ? ` · avg duration ${fmtDuration(totalMs / Math.max(1, finished.length))}` : ''),
-      );
-      lines.push('');
-
-      // medications this month
-      if (monthMeds.length) {
-        const byMed = new Map<string, { days: Set<string>; doses: number }>();
-        for (const e of monthMeds) {
-          const entry = byMed.get(e.medId) ?? { days: new Set<string>(), doses: 0 };
-          entry.days.add(dayKey(new Date(e.ts)));
-          entry.doses++;
-          byMed.set(e.medId, entry);
-        }
-        lines.push(`Medications:`);
-        for (const [medId, v] of byMed) {
-          lines.push(`- ${medName(medId)}: ${v.days.size} days, ${v.doses} doses`);
-        }
-        lines.push('');
-      }
-
-      // triggers / symptoms this month
-      const tally = (lists: string[][]) => {
-        const c = new Map<string, number>();
-        for (const l of lists) for (const x of l) c.set(x, (c.get(x) ?? 0) + 1);
-        return [...c.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
-          .map(([k, n]) => `${k} (${n})`).join(', ');
-      };
-      const trig = tally(monthAttacks.map((a) => a.triggers));
-      const sym = tally(monthAttacks.map((a) => a.symptoms));
-      if (trig) lines.push(`Triggers: ${trig}`);
-      if (sym) lines.push(`Symptoms: ${sym}`);
-      if (trig || sym) lines.push('');
-
-      // attack list
-      for (const a of monthAttacks) {
-        const dur = a.end
-          ? fmtDuration(new Date(a.end).getTime() - new Date(a.start).getTime())
-          : 'ongoing';
-        const linked = state.meds.filter((e) => e.attackId === a.id);
-        lines.push(
-          `- ${new Date(a.start).toLocaleString()} — peak ${a.peakPain >= 0 ? a.peakPain + '/10' : '?'}, ${dur}` +
-            (linked.length ? ` — meds: ${linked.map((e) => medName(e.medId)).join(', ')}` : '') +
-            (a.symptoms.length ? ` — ${a.symptoms.join(', ')}` : '') +
-            (a.notes ? ` — "${a.notes}"` : ''),
-        );
-      }
-      lines.push('');
-    }
-
-    // overall summary at the end
-    lines.push(`## Overall`);
-    lines.push(`- ${totalAttacks} attacks across ${totalAttackDays} attack days`);
-    if (months.length) {
-      lines.push(`- Average ${(totalAttackDays / months.length).toFixed(1)} attack days/month`);
-    }
-    lines.push('');
-    lines.push(`### Preventives`);
-    for (const m of MED_CATALOG.filter((x) => x.kind === 'preventive')) {
-      const doses = state.meds
-        .filter((e) => e.medId === m.id)
-        .sort((a, b) => a.ts.localeCompare(b.ts));
-      const d = daysSinceLast(state.meds, m.id, Date.now(), state.timezone);
-      lines.push(
-        `- ${m.name}: last dose ${d === null ? 'never logged' : `${d} days ago`} (every ~${m.intervalDays}d)` +
-          (doses.length
-            ? `; recent: ${doses.slice(-4).map((e) => new Date(e.ts).toLocaleDateString()).join(', ')}`
-            : ''),
-      );
-    }
+    const lines = buildReportLines({
+      attacks: state.attacks,
+      meds: state.meds,
+      timeZone,
+      span: reportSpan,
+      nowMs: Date.now(),
+    });
 
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -318,7 +166,7 @@ export default function Reports() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setCursor(new Date(year, month - 1, 1))}
+            onClick={() => setCursor((c) => addMonths(c, -1))}
             className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800"
             aria-label="Previous month"
           >
@@ -328,7 +176,7 @@ export default function Reports() {
             {monthLabel}
           </span>
           <button
-            onClick={() => setCursor(new Date(year, month + 1, 1))}
+            onClick={() => setCursor((c) => addMonths(c, 1))}
             className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800"
             aria-label="Next month"
           >
@@ -359,18 +207,28 @@ export default function Reports() {
 
       {/* summary cards */}
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <StatCard icon={Activity} label="Attacks" value={String(data.attacks.length)} />
-        <StatCard icon={CalendarX} label="Days affected" value={String(data.daysLost)} />
+        <StatCard
+          icon={Activity}
+          label="Attacks"
+          value={data.hasData ? String(data.attacks.length) : '—'}
+          sub={data.hasData ? undefined : 'no data this month'}
+        />
+        <StatCard
+          icon={CalendarX}
+          label="Days affected"
+          value={data.hasData ? String(data.daysLost) : '—'}
+          sub={data.hasData ? undefined : 'no data this month'}
+        />
         <StatCard
           icon={Clock}
           label="Avg duration"
-          value={data.avgMs ? fmtDuration(data.avgMs) : '—'}
+          value={data.avgMs !== null ? fmtDuration(data.avgMs) : '—'}
         />
         <StatCard
           icon={TrendingUp}
           label="Avg peak pain"
-          value={data.avgPain ? data.avgPain.toFixed(1) : '—'}
-          sub={data.avgPain ? 'out of 10' : undefined}
+          value={data.avgPain !== null ? data.avgPain.toFixed(1) : '—'}
+          sub={data.avgPain !== null ? 'out of 10' : undefined}
         />
       </div>
 

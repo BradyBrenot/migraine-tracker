@@ -5,12 +5,16 @@ Host on anything that can run Docker.
 
 There's no authentication here, you should hide this behind a VPN or something (Tailscale is nice)
 
+## Live demo (GitHub Pages)
+
+A frontend-only demo is published at
+<https://bradybrenot.github.io/migraine-tracker/>
+
 ## Deployment
 
 The slop bot has written DEPLOY.md. It's awful to read because AI writing is insufferable, but essentially
 
-1. No clone or source copy needed: CI publishes a tested image to GitHub Container Registry (`ghcr.io`), so you just run it with Docker Compose.
-2. Docker Compose with contents:
+Docker Compose with contents:
 
 ```yaml
 services:
@@ -30,29 +34,6 @@ services:
       NTFY_ATTACK_TOKEN: ${NTFY_ATTACK_TOKEN:-}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
 ```
-
-See DEPLOY.md for first-publish setup (including making the GHCR package public), updates, rollback to `sha-<commit>` tags, and building the image locally from source as the alternative.
-
-## Live demo (GitHub Pages)
-
-A frontend-only demo is published at
-<https://bradybrenot.github.io/migraine-tracker/> by the same CI workflow.
-It is the writer app with fictional sample data preloaded:
-
-- every interaction (attacks, medications, day check-ins, settings, import,
-  export, restore, erase) works **in memory only**;
-- reloading restores the sample data — nothing is saved, and nothing is sent to
-  a backend (the demo makes no API/network requests and does not read or write
-  this site's local/session storage);
-- the weather forecast and partner `/view` shell need the backend, so weather
-  is unavailable and `/view*` redirects to the demo home;
-- **do not enter real health information** — the banner is permanent and the
-  demo is public.
-
-One-time repository setup: **Settings -> Pages -> Source = GitHub Actions**.
-Deployment is gated to pushes/manual dispatches of `main` in
-`BradyBrenot/migraine-tracker`; pull requests and forks never deploy. The
-normal Docker/GHCR image and production behavior are unchanged.
 
 Environment variables are used for setting up ntfy and nothing else.
 
@@ -80,42 +61,13 @@ There is no auth, they can just access the main mode and mess with things. Anyon
 
 The main mode and partner view both support installing as an "app" on mobile. In Android Chrome for example, open the menu, swipe down and click on **Install**
 
-### Weather pressure drops (optional)
+### Weather info (pressure drop alerts)
 
-Weather warnings are **off by default** and the app works normally without
-them. In Settings, search for a city (search text and the chosen coordinates are
-sent to [Open-Meteo](https://open-meteo.com/); no API key and no new environment
-variables), pick a pressure-drop threshold (default 5 hPa), then enable the
-toggle.
-
-- Only **pressure drops** are assessed: a warning means pressure falls by at
-  least the configured threshold within the next 24 hours from the current
-  hourly baseline. The default 5 hPa is a configurable starting point, not a
-  validated clinical cutoff.
-- Current temperature, humidity and pressure are shown as neutral context and
-  never trigger anything.
-- Reminders send at most **one ntfy message per pressure-drop episode**, and
-  only when the weather per-type switch, the personal reminder master switch,
-  and waking hours all allow it. The message contains the drop magnitude and
-  target time, not the saved city.
-- The Home card shows the last successful forecast during a temporary upstream
-  failure (marked stale) and a calm error message when there is none; stale or
-  unknown data never sends a notification.
-- This is not a medical prediction. Use it as one optional signal alongside how
-  you actually feel; no threshold is universal.
-- Forecast data comes from the free [Open-Meteo](https://open-meteo.com/) API,
-  which is non-commercial and rate-limited; the data is provided under
-  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Per
-  [Open-Meteo's terms](https://open-meteo.com/en/terms), troubleshooting logs
-  may contain the requested coordinates and are deleted after 90 days.
-- Notification delivery keeps the existing at-least-once caveat: a crash between
-  ntfy accepting a message and the app recording it can resend that message.
+Off by default, set up in Settings
 
 ### Backups
 
-The database is backed up nightly to `data/backups/migraine-YYYY-MM-DD.json`, or can be manually exported.
-
-Presently this can only be restored using the `/api/import` endpoint. Need to improve this flow.
+The database is backed up nightly to `data/backups/migraine-YYYY-MM-DD.json`, or can be manually exported from Settings. Can be imported in Settings.
 
 ## Why vibecode
 

@@ -33,6 +33,27 @@ services:
 
 See DEPLOY.md for first-publish setup (including making the GHCR package public), updates, rollback to `sha-<commit>` tags, and building the image locally from source as the alternative.
 
+## Live demo (GitHub Pages)
+
+A frontend-only demo is published at
+<https://bradybrenot.github.io/migraine-tracker/> by the same CI workflow.
+It is the writer app with fictional sample data preloaded:
+
+- every interaction (attacks, medications, day check-ins, settings, import,
+  export, restore, erase) works **in memory only**;
+- reloading restores the sample data — nothing is saved, and nothing is sent to
+  a backend (the demo makes no API/network requests and does not read or write
+  this site's local/session storage);
+- the weather forecast and partner `/view` shell need the backend, so weather
+  is unavailable and `/view*` redirects to the demo home;
+- **do not enter real health information** — the banner is permanent and the
+  demo is public.
+
+One-time repository setup: **Settings -> Pages -> Source = GitHub Actions**.
+Deployment is gated to pushes/manual dispatches of `main` in
+`BradyBrenot/migraine-tracker`; pull requests and forks never deploy. The
+normal Docker/GHCR image and production behavior are unchanged.
+
 Environment variables are used for setting up ntfy and nothing else.
 
 | Variable | Required | Meaning |

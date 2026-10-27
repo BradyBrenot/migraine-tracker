@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:demo": "tsc -b && vite build --mode demo && node scripts/finalize-demo.mjs",
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",
-    "validate:pwa": "node scripts/validate-pwa.mjs"
+    "validate:pwa": "node scripts/validate-pwa.mjs",
+    "validate:demo": "node scripts/validate-demo.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

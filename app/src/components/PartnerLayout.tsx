@@ -97,7 +97,7 @@ export default function PartnerLayout() {
       <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
         <div className="mx-auto flex min-h-14 max-w-5xl flex-nowrap items-center gap-2 px-4 py-2">
           <img
-            src="/icons/icon-192.png"
+            src={`${import.meta.env.BASE_URL}icons/icon-192.png`}
             alt=""
             aria-hidden="true"
             className="h-6 w-6 shrink-0 rounded-md"

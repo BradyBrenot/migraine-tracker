@@ -598,7 +598,8 @@ What the workflow does:
 
 - **Verify** (all pushes and PRs; 30-minute timeout): Node 24, `npm ci` for the
   frontend and for `server/`, then `npm test`, `npm run lint`, `npm run build`,
-  `npm run validate:pwa`, a no-push `docker build` of `app/`,
+  `npm run validate:pwa`, `npm run build:demo`, `npm run validate:demo`, a
+  no-push `docker build` of `app/`,
   `docker compose -f compose.yaml config --quiet`,
   `node --check server/index.js`, `npm test --prefix server`, and
   `npm audit --omit=dev` for both dependency trees.
@@ -619,9 +620,42 @@ What the workflow does:
   an older run can never move `latest` backward. The one remaining race is a
   merge landing between the guard and the push; the next run's guard corrects
   `latest`.
+- **Deploy demo** (`main` pushes and manual dispatches of `main` only, after
+  Verify; 15-minute timeout): builds the frontend-only demo with the Pages base
+  path, validates the artifact, and deploys `app/dist-demo/` to GitHub Pages.
+  It is a sibling of Publish (both need only Verify) with its own
+  `pages` concurrency group and `github-pages` environment.
 
 A green Publish run only means the image exists in GHCR; it does not mean the
 NAS has it. Deployment stays manual (section 5).
+
+## 11. Public demo (GitHub Pages)
+
+The CI workflow also publishes a static, frontend-only demo at:
+
+```
+https://bradybrenot.github.io/migraine-tracker/
+```
+
+One-time setup: in the repository, open **Settings -> Pages** and set
+**Source = GitHub Actions**. After that, the `pages` job builds and deploys on
+every push (or manual dispatch) of `main` in `BradyBrenot/migraine-tracker`.
+Pull requests and forks never deploy, and the job has only `contents: read`,
+`pages: write`, and `id-token: write`.
+
+The demo is the writer app with clearly fictional sample data preloaded. Every
+interaction is held in memory, reloading restores the sample set, and nothing
+is saved or sent anywhere: the build makes no backend/API requests and does not
+read, write, or remove localStorage/sessionStorage. Weather forecasts and the
+partner `/view` view need the backend, so weather is unavailable and `/view*`
+redirects to the demo home. A permanent banner says the data is synthetic and
+that changes are lost on reload; do not enter real health information.
+
+The artifact goes to `app/dist-demo/` (production `app/dist/` and the Docker
+image are unaffected). It uses the Pages base path for assets, the SPA router,
+and the manifest, with `404.html` as the deep-link fallback. Run
+`npm run build:demo` and `npm run validate:demo` locally to reproduce and check
+the same artifact.
 
 ## Notes
 

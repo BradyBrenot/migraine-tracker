@@ -69,7 +69,7 @@ function WarningBlock({ warning, timeZone }: { warning: PressureWarning; timeZon
  * Loading/error/stale states are non-blocking and never disable logging.
  */
 export default function WeatherCard() {
-  const { state } = useStore();
+  const { state, demo } = useStore();
   const weather = normalizeWeatherSettings(state.weather ?? DEFAULT_WEATHER_SETTINGS);
   const [status, setStatus] = useState<WeatherStatus | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -83,7 +83,9 @@ export default function WeatherCard() {
     : 'none';
 
   useEffect(() => {
-    if (!enabled || !hasLocation) {
+    // The demo has no backend and must never poll: even if a visitor could
+    // enable weather in memory, no request is attempted.
+    if (demo || !enabled || !hasLocation) {
       setStatus(null);
       setLoadError(false);
       setLoading(false);
@@ -128,8 +130,9 @@ export default function WeatherCard() {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [enabled, hasLocation, locationKey, threshold]);
+  }, [demo, enabled, hasLocation, locationKey, threshold]);
 
+  if (demo) return null;
   if (!enabled) return null;
 
   const savedPlace = formatWeatherLocation(weather.location);

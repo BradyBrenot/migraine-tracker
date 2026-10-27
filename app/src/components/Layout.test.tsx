@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router';
 
 const store = vi.hoisted(() => ({
   activeAttack: null,
+  demo: false,
   sync: { status: 'synced', pending: 0, diverged: false },
 }));
 
@@ -33,6 +34,7 @@ function renderLayout(): void {
 }
 
 afterEach(() => {
+  store.demo = false;
   cleanup();
 });
 
@@ -101,6 +103,22 @@ describe('writer shell accessibility and responsive breakpoints', () => {
     for (const label of ['Log', 'Calendar', 'Reports', 'History', 'Settings']) {
       expect(screen.getAllByRole('link', { name: label })).toHaveLength(2);
     }
+  });
+});
+
+describe('demo disclosure', () => {
+  it('shows the permanent demo banner and a Demo pill instead of sync state', () => {
+    store.demo = true;
+    renderLayout();
+
+    const banner = screen.getByTestId('demo-banner');
+    expect(banner.textContent).toContain('synthetic sample data');
+    expect(banner.textContent).toContain('Do not enter real health information');
+    // Mobile visibility: no responsive hiding class on the banner.
+    expect(banner.className).not.toContain('hidden');
+
+    expect(screen.getByTestId('demo-pill').textContent).toBe('Demo');
+    expect(screen.queryByTitle(/^Sync:/)).toBeNull();
   });
 });
 

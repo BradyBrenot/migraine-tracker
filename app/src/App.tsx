@@ -1,6 +1,7 @@
 import { lazy } from 'react';
-import { Routes, Route, useLocation } from 'react-router';
+import { Navigate, Routes, Route, useLocation } from 'react-router';
 import { ReadOnlyStoreProvider, StoreProvider } from '@/lib/store';
+import { IS_DEMO } from '@/lib/demo';
 import Layout from '@/components/Layout';
 import PartnerLayout from '@/components/PartnerLayout';
 import Home from '@/pages/Home';
@@ -23,10 +24,18 @@ const Settings = lazy(() => import('@/pages/Settings'));
  *   provider, so a partner browser can never upload, enqueue writes, or touch
  *   the writer's localStorage cache.
  * - every other route mounts ONLY the normal provider, exactly as before.
+ *
+ * The static demo ships only the writer app and no backend: any partner route
+ * (including the retired `/view.html` shell) redirects to the demo home rather
+ * than mounting the polling read-only provider.
  */
 export default function App() {
   const { pathname } = useLocation();
   const isPartnerView = pathname === '/view' || pathname.startsWith('/view/');
+
+  if (IS_DEMO && (isPartnerView || pathname === '/view.html')) {
+    return <Navigate to="/" replace />;
+  }
 
   if (isPartnerView) {
     return (
@@ -45,7 +54,7 @@ export default function App() {
   }
 
   return (
-    <StoreProvider>
+    <StoreProvider demo={IS_DEMO}>
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<Home />} />

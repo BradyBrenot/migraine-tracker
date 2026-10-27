@@ -150,6 +150,7 @@ const UNCONFIRMED_DESCRIPTION =
 export default function Settings() {
   const store = useStore();
   const { state } = store;
+  const demo = store.demo;
   const fileRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<ImportResult | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
@@ -207,6 +208,12 @@ export default function Settings() {
   // Read-only environment configuration. Fetched once; a late response after
   // unmount is ignored, and any failure/malformed body reads as unavailable.
   useEffect(() => {
+    // No backend exists in the demo: report the environment as unavailable
+    // instead of attempting (and failing) a health request.
+    if (demo) {
+      setAttackAlertStatus('unavailable');
+      return;
+    }
     let cancelled = false;
     void api.getHealth()
       .then((health) => {
@@ -222,9 +229,11 @@ export default function Settings() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [demo]);
 
-  const attackAlertLabel = attackAlertStatus === 'checking'
+  const attackAlertLabel = demo
+    ? 'Demo — no server'
+    : attackAlertStatus === 'checking'
     ? 'Checking…'
     : attackAlertStatus === 'configured'
       ? 'Configured'
@@ -252,6 +261,10 @@ export default function Settings() {
   }
 
   async function searchCities() {
+    if (demo) {
+      setWeatherSearchError('Weather forecasts are unavailable in this demo.');
+      return;
+    }
     const query = weatherQuery.trim();
     if (query.length < 2) {
       setWeatherSearchError('Enter at least 2 characters to search.');
@@ -505,7 +518,11 @@ export default function Settings() {
       await store.replaceBackup(preview.backup);
       setReplaceOpen(false);
       setJsonPreview(null);
-      if (store.serverMode) {
+      if (store.demo) {
+        toast.success('Backup restored in the demo', {
+          description: 'The in-memory sample data was replaced until you reload.',
+        });
+      } else if (store.serverMode) {
         toast.success('Backup restored');
       } else {
         // Browser-only restore: nothing reached the server and nothing will
@@ -544,6 +561,13 @@ export default function Settings() {
     resetBusyRef.current = true;
     setResetBusy(true);
     try {
+      if (store.demo) {
+        await store.resetAll();
+        toast.success('Demo data erased in memory', {
+          description: 'Reload the page to restore the sample data.',
+        });
+        return;
+      }
       if (!store.serverMode) {
         // Browser-only: resetAll() erases local data synchronously and then
         // rejects by design (there is no server connection to erase). The
@@ -583,7 +607,11 @@ export default function Settings() {
       <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
         <h2 className="text-base font-bold">Connection &amp; sync</h2>
         <p className="mt-1 text-sm text-slate-400">
-          {store.sync.status === 'conflict' ? (
+          {demo ? (
+            <>Demo mode — synthetic sample data held only in this page&apos;s memory.
+            Nothing is saved to this browser, no server is contacted, and reloading
+            restores the sample set. Do not enter real health information.</>
+          ) : store.sync.status === 'conflict' ? (
             <>This device has changes that were never saved to the server, and the server holds its own copy. Nothing syncs until you resolve this below.</>
           ) : store.sync.status === 'error' ? (
             <>Connected to the backend, but some recent changes couldn&apos;t be saved there. They are safe on this device and marked <span className="font-semibold text-amber-300">unsynced</span>.</>
@@ -880,7 +908,9 @@ export default function Settings() {
           <Pill className="h-4 w-4" /> Nurtec inventory
         </h2>
         <p className="mt-1 text-xs text-slate-400">
-          Optimistic count from this device — the server&apos;s count is authoritative.
+          {demo
+            ? 'Optimistic count from the in-memory demo data — nothing is saved.'
+            : "Optimistic count from this device — the server's count is authoritative."}
         </p>
 
         <div className="mt-3 space-y-1 text-sm">
@@ -1028,6 +1058,14 @@ export default function Settings() {
         <h2 className="flex items-center gap-2 text-base font-bold">
           <CloudRain className="h-4 w-4" /> Weather
         </h2>
+        {demo ? (
+          <p className="mt-1 text-sm text-slate-400">
+            Weather forecasts are provided by the self-hosted backend, so they are
+            unavailable in this static demo. No city search, weather request, or
+            reminder delivery is attempted here.
+          </p>
+        ) : (
+          <>
         <p className="mt-1 text-sm text-slate-400">
           Optional Open-Meteo pressure-drop forecast. Disabled by default; the app
           keeps working without it, and saving a city sends the search text and
@@ -1208,6 +1246,8 @@ export default function Settings() {
             </button>
           )}
         </div>
+          </>
+        )}
       </section>
 
       {/* reminders */}
@@ -1227,8 +1267,9 @@ export default function Settings() {
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            Configured in the server environment; read-only here. It indicates
-            configuration only — there is no delivery guarantee.
+            {demo
+              ? 'Attack alerts are configured on the self-hosted server, which this static demo does not have.'
+              : 'Configured in the server environment; read-only here. It indicates configuration only — there is no delivery guarantee.'}
           </p>
         </div>
 
@@ -1376,6 +1417,12 @@ export default function Settings() {
           Exporting is routine and never changes your data. Restore and import preview
           what they will add before writing anything.
         </p>
+        {demo && (
+          <p className="mt-2 text-xs text-amber-300">
+            Demo only: exporting is safe, and any import or restore changes the
+            in-memory sample data until you reload. No server is involved.
+          </p>
+        )}
 
         <div className="mt-4 border-t border-slate-800 pt-4">
           <h3 className="text-sm font-semibold">Export backup</h3>
@@ -1457,9 +1504,11 @@ export default function Settings() {
           Danger zone
         </h2>
         <p className="mt-1 text-sm text-slate-300">
-          Erasing permanently removes every record and non-secret setting
-          {store.serverMode ? ' on the server and in this browser' : ' in this browser'}.
-          Export a JSON backup above first if you might need it.
+          {demo
+            ? 'Erasing clears the in-memory demo data until you reload the page. Nothing stored elsewhere is touched.'
+            : <>Erasing permanently removes every record and non-secret setting
+              {store.serverMode ? ' on the server and in this browser' : ' in this browser'}.
+              Export a JSON backup above first if you might need it.</>}
         </p>
         <Button
           // The generated `outline` variant carries a `dark:bg-input/*` fill,
@@ -1626,12 +1675,14 @@ export default function Settings() {
           <AlertDialogHeader>
             <AlertDialogTitle>Replace all data with this backup?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently removes every record and setting currently stored
-              {store.serverMode ? ' on the server and in this browser' : ' in this browser'}{' '}
-              and restores this backup&apos;s records and non-secret settings.
-              Download the current state first if you might need it — use{' '}
-              <span className="font-semibold">Export backup (JSON)</span> in the
-              Backup, restore &amp; import section above.
+              {demo
+                ? 'This replaces the in-memory demo data until you reload the page.'
+                : <>This permanently removes every record and setting currently stored
+                  {store.serverMode ? ' on the server and in this browser' : ' in this browser'}{' '}
+                  and restores this backup&apos;s records and non-secret settings.
+                  Download the current state first if you might need it — use{' '}
+                  <span className="font-semibold">Export backup (JSON)</span> in the
+                  Backup, restore &amp; import section above.</>}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1665,9 +1716,11 @@ export default function Settings() {
           <AlertDialogHeader>
             <AlertDialogTitle>Erase all data?</AlertDialogTitle>
             <AlertDialogDescription>
-              {store.serverMode
-                ? 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored on the server and in this browser. Consider exporting a JSON backup first.'
-                : 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored in this browser. Consider exporting a JSON backup first.'}
+              {demo
+                ? 'This clears the in-memory demo data until you reload the page. Use Export backup above if you want a copy first.'
+                : store.serverMode
+                  ? 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored on the server and in this browser. Consider exporting a JSON backup first.'
+                  : 'This permanently clears every attack, medication, refill, workout and day-state record, stock baseline, and non-secret setting stored in this browser. Consider exporting a JSON backup first.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

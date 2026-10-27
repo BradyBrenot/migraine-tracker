@@ -40,6 +40,13 @@ async function req<T>(
   body?: unknown,
   opts: { timeoutMs?: number } = {},
 ): Promise<T> {
+  // Hard backstop for the static demo: it has no backend and must make zero
+  // network requests. Rejecting (rather than inventing data) keeps every demo
+  // UI path explicit about the missing server while guaranteeing the demo can
+  // never call home, even if a future component forgets to gate itself.
+  if (import.meta.env.MODE === 'demo') {
+    throw new Error(`Demo mode: ${method} ${path} is disabled`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS);
   try {

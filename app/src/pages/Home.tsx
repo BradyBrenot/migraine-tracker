@@ -28,7 +28,7 @@ import { Button } from '@/components/ui/button';
  * Nurtec quick-log button. Wording/colors only — the numbers come from the
  * shared calculation via `nurtecInventory`.
  */
-function nurtecStockBadge(stock: NurtecInventory): {
+function nurtecStockBadge(stock: NurtecInventory, demo: boolean): {
   text: string;
   className: string;
   title: string;
@@ -52,7 +52,9 @@ function nurtecStockBadge(stock: NurtecInventory): {
     text: `${stock.quantity} left`,
     className:
       stock.level === 'low' ? 'bg-amber-950 text-amber-300' : 'bg-slate-800 text-slate-300',
-    title: 'Optimistic count from this device — the server inventory count is authoritative.',
+    title: demo
+      ? 'Optimistic count from the in-memory demo data — nothing is saved.'
+      : 'Optimistic count from this device — the server inventory count is authoritative.',
   };
 }
 
@@ -127,7 +129,7 @@ const ATTACK_GUIDANCE = 'Rest if you need to — movement is optional.';
 
 export default function Home() {
   const store = useStore();
-  const { activeAttack, state, serverMode } = store;
+  const { activeAttack, demo, state, serverMode } = store;
   const now = useNow();
 
   const [painOpen, setPainOpen] = useState(false);
@@ -169,7 +171,7 @@ export default function Home() {
   const nurtecUsage = limitState(nurtecDays, nurtecRule.limit);
   // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
   const nurtecStock = nurtecInventory(state, now);
-  const nurtecBadge = nurtecStockBadge(nurtecStock);
+  const nurtecBadge = nurtecStockBadge(nurtecStock, demo);
 
   // Tylenol, Ibuprofen and Naproxen share ONE MOH day budget, so all three
   // cards show the same combined chip (distinct configured-zone days across the
@@ -594,7 +596,11 @@ export default function Home() {
           state because `loadDemoData` would replace any existing records. */}
       {!serverMode && !state.seeded && !hasAnyRecords && (
         <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900 p-4 text-center text-sm text-slate-400">
-          <p>No data yet. This demo stores everything in your browser only.</p>
+          <p>
+            {demo
+              ? 'No data yet. Demo data is held in memory only and returns on reload.'
+              : 'No data yet. This demo stores everything in your browser only.'}
+          </p>
           <button
             onClick={() => {
               store.loadDemoData();

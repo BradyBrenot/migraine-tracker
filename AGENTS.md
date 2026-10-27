@@ -16,6 +16,8 @@ npm test                     # Vitest: shared/ unit tests and src/ tests
 npm run lint                 # frontend TS/TSX only
 npm run build                # tsc -b && vite build
 npm run validate:pwa         # installable-shell checks (dist/ when built)
+npm run build:demo           # static, in-memory GitHub Pages demo -> dist-demo/
+npm run validate:demo        # demo artifact: marker, base paths, SPA fallback, no partner view
 node --check server/index.js # server syntax check
 npm test --prefix server     # Node built-in test runner (server/test)
 ```
@@ -44,6 +46,7 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 - `src/lib/store.tsx` owns application state and mutations; pages consume it through `useStore()`. `src/lib/api.ts` is the HTTP client. On the backend, `server/index.js` is startup wiring only (env, database open, backup loop, reminder scheduler, listen); `server/app.js` is the Fastify app factory and all routes; `server/db.js` + `server/migrations.js` own the schema and `PRAGMA user_version` (current schema v4); `server/mappers.js` converts snake_case rows; `server/snapshot.js` builds the full export used by `/api/export` and the nightly dumps written by `server/backup.js`; `server/validate.js` validates payloads; `server/reminder-config.js`, `server/ntfy.js`, `server/reminders.js`, and `server/scheduler.js` handle reminders.
 - Optional weather pressure-drop support is `server/weather.js` (injected Open-Meteo client, cached polling service, geocoding) plus the pure rules in `app/shared/weather.ts` (settings validation/normalization, unix-seconds→epoch-ms hourly parsing, the pressure-drop assessment, episode signature). It is disabled by default, performs no upstream fetches unless enabled with a saved city, and the request window is `baseline..baseline+24h` inclusive. `shared/` remains erasable-syntax only.
 - localStorage is a cache/offline fallback. On first contact, an empty server receives existing browser records/settings; otherwise a clean server snapshot replaces local records. With unconfirmed local changes the conflict is preserved, not overwritten. When hydrating, a valid server timezone/threshold/reminders are adopted; absent settings keep local defaults.
+- The public demo is a separate Vite mode (`npm run build:demo` -> `dist-demo/`, `import.meta.env.MODE === 'demo'`). `StoreProvider demo` seeds a complete synthetic `TrackerState`, skips every localStorage read/write and hydration, resolves every enqueue locally without latches, and the Settings/Home weather UI is gated so no request is attempted; `src/lib/api.ts` rejects before `fetch` as a hard backstop. The demo ships the writer app only, redirects `/view*` to `/`, and uses a base-prefixed manifest plus `404.html` SPA fallback for GitHub Pages. Production `dist/` and Docker behavior are unchanged.
 - Backend writes are serialized through one promise queue, while local state stays optimistic. Persisted `dirty`/`failed` latches mark unconfirmed/failed changes; a failure stays latched until a confirmed full exchange (first-contact upload, explicit use-server, or confirmed reset). Hydration never silently overwrites unconfirmed local data: if the server is non-empty while local writes are unconfirmed, the store enters `diverged`, pauses server writes, and Settings requires an explicit choice — download this device's backup or adopt the server copy. A full offline outbox/tombstones remain explicitly deferred; do not merge offline edits or deletions automatically.
 - `src/types/index.ts` does not generate the backend model. Keep it, the store/API payloads, and the server's SQL, row mappers, and camelCase/snake_case payloads in sync. Every new persistent record type must be deliberately handled in migrations, export, import, nightly backup, client hydration, and reset. Migrations are additive only (new tables/indexes and nullable columns) and tracked with `PRAGMA user_version`; an older build refuses to open a newer schema.
 - Internal reminder occurrence/delivery state is excluded from `/api/export` and the nightly backup (and `/api/reset` clears it). ntfy URL/token/public-URL configuration stays server-only environment secrets — never persist, export, back up, or log it.
@@ -65,12 +68,12 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 - Focused tests: `npm test -- <test-file>` (Vitest) from `app/`; `node --test test/<name>.test.js` (Node) from `app/server/`
 - Lint: `npm run lint`
 - Typecheck: `npm run build` (there is no separate typecheck script; `tsc -b` runs first)
-- Full verification: `npm test`, `npm run lint`, `npm run build`, `npm run validate:pwa`, `node --check server/index.js`, and `npm test --prefix server`, all from `app/`
+- Full verification: `npm test`, `npm run lint`, `npm run build`, `npm run validate:pwa`, `npm run build:demo`, `npm run validate:demo`, `node --check server/index.js`, and `npm test --prefix server`, all from `app/`
 
 ## Project boundaries
 
-- Generated files: `app/dist/`, `node_modules/`, `server/node_modules/` (build output and installed dependencies; do not edit or commit)
-- Files never to edit directly: `app/dist/`, `app/server/data/` runtime data, lockfile internals by hand
+- Generated files: `app/dist/`, `app/dist-demo/`, `node_modules/`, `server/node_modules/` (build output and installed dependencies; do not edit or commit)
+- Files never to edit directly: `app/dist/`, `app/dist-demo/`, `app/server/data/` runtime data, lockfile internals by hand
 - Required compatibility constraints: Node 24+, additive/non-destructive schema migrations, TypeScript types/store/API/server mappers kept in sync, `shared/` restricted to erasable TypeScript
 
 ## Agent workflow

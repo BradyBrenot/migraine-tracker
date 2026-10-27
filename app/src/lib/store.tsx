@@ -7,6 +7,7 @@ import type {
 import { MED_CATALOG } from '@/lib/meds';
 import { uid } from '@/lib/format';
 import { buildSeedData } from '@/lib/seed';
+import { buildDemoState } from '@/lib/demo';
 import { api as backend } from '@/lib/api';
 import { bumpClock } from '@/lib/clock';
 import { addDays, dayKeyStartMs, isValidTimeZone, localDayKey, systemTimeZone } from '../../shared/datetime.ts';
@@ -673,6 +674,12 @@ export interface StoreApi {
    * mutations are disabled, and no localStorage/sync bookkeeping is used.
    */
   readOnly: boolean;
+  /**
+   * true for the static, in-memory demo: state starts from synthetic sample
+   * data, every mutation works locally, and nothing is persisted or sent to a
+   * backend. UI surfaces use this to gate server-only features and copy.
+   */
+  demo: boolean;
   /** true once we've confirmed a backend is reachable */
   serverMode: boolean;
   /** sync health for compact UI surfaces (Layout pill, Settings) */
@@ -811,10 +818,19 @@ export interface StoreApi {
 
 const StoreCtx = createContext<StoreApi | null>(null);
 
-export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<TrackerState>(loadState);
+export function StoreProvider({
+  children,
+  demo = false,
+}: {
+  children: React.ReactNode;
+  /** In-memory sample mode: no localStorage, no hydration, no backend writes. */
+  demo?: boolean;
+}) {
+  const [state, setState] = useState<TrackerState>(
+    () => (demo ? buildDemoState(emptyState()) : loadState()),
+  );
   const [serverMode, setServerMode] = useState(false);
-  const [meta, setMeta] = useState<SyncMeta>(loadSyncMeta);
+  const [meta, setMeta] = useState<SyncMeta>(() => (demo ? { ...CLEAN_META } : loadSyncMeta()));
   const [diverged, setDiverged] = useState(false);
   const [pending, setPending] = useState(0);
 
@@ -859,12 +875,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const setSyncMeta = useCallback((next: SyncMeta) => {
     metaRef.current = next;
     setMeta(next);
+    if (demo) return; // demo has no persistent sync bookkeeping
     try {
       localStorage.setItem(SYNC_META_KEY, JSON.stringify(next));
     } catch {
       // storage unavailable — the in-memory latch still protects this session
     }
-  }, []);
+  }, [demo]);
 
   const markDirty = useCallback(() => {
     if (!metaRef.current.dirty) setSyncMeta({ ...metaRef.current, dirty: true });
@@ -874,14 +891,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * localStorage is always a cache; the server (when reachable) is canonical.
    * Every state change is persisted (with storage-error tolerance) so an
    * immediate reload — or a reload mid-sync — keeps the exact local data.
+   * The demo is deliberately ephemeral: it never reads or writes storage.
    */
   useEffect(() => {
+    if (demo) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
       // storage full/blocked — in-memory state still works this session
     }
-  }, [state]);
+  }, [state, demo]);
 
   /**
    * Serialized backend write queue. Tasks run strictly one at a time in call
@@ -920,6 +939,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         suppressSyncErrorToast?: boolean;
       } = {},
     ): Promise<void> => {
+      if (demo) {
+        // Demo mutations are local-only by design: every server task resolves
+        // as if confirmed, with no network, pending counter, or stored latch.
+        return Promise.resolve();
+      }
       if (!serverRef.current || (divergedRef.current && !opts.force)) {
         // Offline/local or diverged: the change is unconfirmed AND failed —
         // no automatic path will confirm it; a full exchange is required.
@@ -990,11 +1014,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       outcome.catch(() => undefined);
       return outcome;
     },
-    [markDirty, setSyncMeta],
+    [demo, markDirty, setSyncMeta],
   );
 
-  // Hydrate from the backend on first load.
+  // Hydrate from the backend on first load. The demo never contacts a backend
+  // and never hydrates: its synthetic state is the whole session.
   useEffect(() => {
+    if (demo) return;
     if (hydrateStartedRef.current) return;
     hydrateStartedRef.current = true;
     (async () => {
@@ -1099,7 +1125,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       }
     })();
-  }, [applyState, enqueue, setSyncMeta]);
+  }, [applyState, demo, enqueue, setSyncMeta]);
 
   /**
    * In-session low-stock episode guard. `alerted` means this provider has
@@ -1117,7 +1143,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * re-evaluates per render but only the first result is kept; the read is
    * the same cheap deterministic localStorage access loadState() does.
    */
-  const pendingLatchPersistRef = useRef<string | null>(loadPendingLatch());
+  const pendingLatchPersistRef = useRef<string | null>(demo ? null : loadPendingLatch());
   /**
    * The pending latch currently being published, if any. Set synchronously
    * before the write is enqueued so StrictMode's double effects (and any
@@ -1128,8 +1154,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** Keep the durable pending-latch bookkeeping in step with the ref. */
   const setPendingLatch = useCallback((latchedAt: string | null) => {
     pendingLatchPersistRef.current = latchedAt;
+    if (demo) return; // never touch storage in the ephemeral demo
     storePendingLatch(latchedAt);
-  }, []);
+  }, [demo]);
 
   /**
    * One-shot Nurtec low-stock latch (plan §4): alert once when stock crosses
@@ -1143,6 +1170,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * catch; the local latch still persists through the localStorage effect.
    */
   useEffect(() => {
+    // The demo keeps its sample stock healthy; even if a visitor logs doses
+    // down to the threshold, this effect must never touch localStorage or the
+    // backend (both are absent in demo mode).
+    if (demo) return;
     // Stock is evaluated first because it decides whether a deferred latch is
     // still meaningful: replenishment above the threshold ends the episode, so
     // a pending latch must never be published after that.
@@ -1268,7 +1299,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       });
     }
   }, [
-    applyState, enqueue, setPendingLatch, serverMode,
+    applyState, demo, enqueue, setPendingLatch, serverMode,
     state.meds, state.refills, state.stockBaselines,
     state.lowStockThreshold, state.timezone,
     // `state.lowStockAlertedAt` is deliberately NOT a dependency: this effect
@@ -1281,6 +1312,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** Conflict resolution: adopt the current server snapshot after the user's
    * explicit choice. Failure keeps local data and the divergence latch. */
   const resolveUseServer = useCallback(async () => {
+    // Server conflict resolution has no meaning in the demo (there is no
+    // server and Settings never offers it), so it resolves as a no-op.
+    if (demo) return;
     try {
       const data = await backend.exportAll();
       serverRef.current = true;
@@ -1295,7 +1329,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         description: 'Nothing was changed — your local data was kept. Check the connection and try again.',
       });
     }
-  }, [applyState, setSyncMeta]);
+  }, [applyState, demo, setSyncMeta]);
 
   const sync = useMemo<StoreApi['sync']>(() => ({
     status: deriveSyncStatus({ serverMode, diverged, failed: meta.failed, pending }),
@@ -1313,6 +1347,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       state,
       activeAttack,
       readOnly: false,
+      demo,
       serverMode,
       sync,
       startAttack: (start = new Date(), markDayOff = false) => {
@@ -1736,6 +1771,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // This is deliberately distinct from resetLowStockAlert, which
         // silences the CURRENT low episode until replenishment.
         lowStockEpisodeRef.current = 'unknown';
+        if (demo) {
+          // The in-memory erase is the whole reset; a reload restores the
+          // sample set from the seed. No latches, no storage, no server task.
+          return Promise.resolve();
+        }
         setPendingLatch(null);
         // Local data is gone by explicit choice: lift the write pause now,
         // but do NOT pre-clear dirty/failed — the confirmed server reset
@@ -1864,6 +1904,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // keys present in the payload).
         const settings = restoredSettingsFrom(backup);
 
+        if (demo) {
+          // Demo replacement stays entirely in memory: apply the same local
+          // restore a browser-only app would, but resolve immediately and never
+          // latch dirty/failed or touch the pending-latch bookkeeping.
+          applyState(() => restoredBackupState(backup, records, settings));
+          lowStockEpisodeRef.current = 'unknown';
+          return Promise.resolve();
+        }
+
         const payload = {
           schemaVersion: backup.schemaVersion,
           attacks: records.attacks,
@@ -1934,7 +1983,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       resolveUseServer,
     };
   }, [
-    state, serverMode, sync, applyState, enqueue, resolveUseServer,
+    demo, state, serverMode, sync, applyState, enqueue, resolveUseServer,
     setPendingLatch, setSyncMeta,
   ]);
 
@@ -2043,6 +2092,7 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
     state,
     activeAttack,
     readOnly: true,
+    demo: false,
     serverMode,
     sync,
     startAttack: denyReadOnly,

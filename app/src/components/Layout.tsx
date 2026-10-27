@@ -41,7 +41,21 @@ const SYNC_PILL: Record<SyncStatus, { cls: string; label: string; dot: string }>
 };
 
 function SyncPill() {
-  const { sync } = useStore();
+  const { sync, demo } = useStore();
+  // The demo has no server or local cache to report on: never show a sync
+  // state that implies connectivity.
+  if (demo) {
+    return (
+      <span
+        title="Demo mode — synthetic data held in memory only"
+        data-testid="demo-pill"
+        className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-900 bg-amber-950/60 px-2.5 py-1 text-[11px] font-semibold text-amber-300 lg:ml-3"
+      >
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
+        Demo
+      </span>
+    );
+  }
   const s = SYNC_PILL[sync.status];
   const needsAttention =
     sync.status === 'error' || sync.status === 'conflict' || sync.status === 'syncing';
@@ -60,7 +74,7 @@ function SyncPill() {
 }
 
 export default function Layout() {
-  const { activeAttack } = useStore();
+  const { activeAttack, demo } = useStore();
   const { pathname } = useLocation();
   const title = routeTitle(pathname);
   return (
@@ -76,7 +90,7 @@ export default function Layout() {
       <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-5xl flex-nowrap items-center gap-2 px-4">
           <img
-            src="/icons/icon-192.png"
+            src={`${import.meta.env.BASE_URL}icons/icon-192.png`}
             alt=""
             aria-hidden="true"
             className="h-6 w-6 shrink-0 rounded-md"
@@ -117,6 +131,20 @@ export default function Layout() {
           </nav>
         </div>
       </header>
+
+      {/* Demo disclosure: always visible (never dismissible), including on
+          mobile, because the sample data and lost-on-reload behavior are part
+          of the product contract. */}
+      {demo && (
+        <div
+          role="note"
+          data-testid="demo-banner"
+          className="border-b border-amber-900/70 bg-amber-950/60 px-4 py-2 text-center text-xs font-medium text-amber-100"
+        >
+          <span className="font-bold">Demo:</span> synthetic sample data. Changes are
+          lost when you reload. Do not enter real health information.
+        </div>
+      )}
 
       <main
         id="main-content"

@@ -172,13 +172,46 @@ function recomputePeak(a: Attack): number {
  *
  * The store's public patch signatures already omit `id`, but JavaScript (or
  * `any`) callers can still pass one. A body id must never reassign a record:
- * the route/record id always wins, locally and on the wire. Returns a shallow
+ * the route/record id always wins, locally and on the wire. `undefined`
+ * values are dropped too — JSON cannot transmit them, so treating such a key
+ * as absent keeps the optimistic merge and the wire payload identical
+ * (an explicit `null` is a meaningful clear and is kept). Returns a shallow
  * copy, so the caller's object is never mutated.
  */
-function withoutId<T extends { id: string }>(patch: Partial<T>): Partial<Omit<T, 'id'>> {
-  const copy: Partial<T> = { ...patch };
-  delete copy.id;
-  return copy;
+function cleanPatch<T extends { id: string }>(patch: Partial<T>): Partial<Omit<T, 'id'>> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'id' || value === undefined) continue;
+    copy[key] = value;
+  }
+  return copy as Partial<Omit<T, 'id'>>;
+}
+
+/**
+ * Minimal wire body for a record PATCH: only fields whose value in `next`
+ * actually differs from `current`, and never `id` (the route id is
+ * authoritative). `next` is the fully computed record, not the raw caller
+ * patch, so derived fields (e.g. an attack's legacy peak) are still
+ * transmitted when the local merge changed them.
+ *
+ * Comparison is structural (plain JSON data — the same shape that is
+ * persisted and sent), so key presence matters: an explicit `null` clear
+ * differs from a value and is kept, while unchanged arrays/objects are not
+ * resent. An empty result means "nothing changed" and must not be sent.
+ */
+function changedFields<T extends object>(current: T, next: T): Partial<T> {
+  const before = current as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  const diff: Record<string, unknown> = {};
+  for (const key of Object.keys(after)) {
+    if (key === 'id') continue;
+    if (!sameContent(before[key], after[key])) diff[key] = after[key];
+  }
+  return diff as Partial<T>;
+}
+
+function hasChanges(patch: object): boolean {
+  return Object.keys(patch).length > 0;
 }
 
 type ExportShape = Awaited<ReturnType<typeof backend.exportAll>>;
@@ -1165,7 +1198,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const current = stateRef.current.attacks.find((x) => x.id === id);
         if (!current) return;
         // The route/record id always wins over any runtime `id` in the patch.
-        const safePatch = withoutId<Attack>(patch);
+        const safePatch = cleanPatch<Attack>(patch);
         const merged: Attack = { ...current, ...safePatch, id };
         if (typeof safePatch.peakPain === 'number') {
           // An explicit peak (including a downward correction) wins verbatim;
@@ -1179,11 +1212,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           // Legacy record with no cached peak: derive it once from its log.
           merged.peakPain = recomputePeak(merged);
         }
+        // Diff against the fully merged record (never the raw patch): the
+        // legacy peak derivation above is a real change that must reach the
+        // server, while untouched metadata (and a synthetic pain entry) is
+        // never resent. A no-op edit changes nothing and latches nothing.
+        const diff = changedFields(current, merged);
+        if (!hasChanges(diff)) return;
         applyState((s) => ({
           ...s,
           attacks: s.attacks.map((x) => (x.id === id ? merged : x)),
         }));
-        enqueue('patchAttack(update)', () => backend.patchAttack(id, merged));
+        enqueue('patchAttack(update)', () => backend.patchAttack(id, diff));
       },
       deleteAttack: (id) => {
         applyState((s) => ({
@@ -1226,13 +1265,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const current = stateRef.current.meds.find((m) => m.id === id);
         if (!current) return;
         // Runtime id guard: the route/record id always wins over a body id.
-        const safePatch = withoutId<MedEvent>(patch);
+        const safePatch = cleanPatch<MedEvent>(patch);
+        const merged: MedEvent = { ...current, ...safePatch, id };
+        // Only fields the edit actually changed go on the wire (never `id`,
+        // never unchanged values, explicit nulls kept); an empty diff sends
+        // nothing at all.
+        const diff = changedFields(current, merged);
+        if (!hasChanges(diff)) return;
         applyState((s) => ({
           ...s,
-          meds: s.meds.map((m) => (m.id === id ? { ...m, ...safePatch, id } : m)),
+          meds: s.meds.map((m) => (m.id === id ? merged : m)),
         }));
         // The server merges a partial patch into the existing row.
-        enqueue('patchMed', () => backend.patchMed(id, safePatch));
+        enqueue('patchMed', () => backend.patchMed(id, diff));
       },
       deleteMed: (id) => {
         applyState((s) => ({ ...s, meds: s.meds.filter((m) => m.id !== id) }));
@@ -1250,14 +1295,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateRefill: (id, patch) => {
         const current = stateRef.current.refills.find((r) => r.id === id);
         if (!current) return;
-        const merged: Refill = { ...current, ...patch, id };
+        const merged: Refill = { ...current, ...cleanPatch<Refill>(patch), id };
+        const diff = changedFields(current, merged);
+        if (!hasChanges(diff)) return;
         applyState((s) => ({
           ...s,
           refills: s.refills
             .map((r) => (r.id === id ? merged : r))
             .sort((a, b) => a.date.localeCompare(b.date)),
         }));
-        enqueue('patchRefill', () => backend.patchRefill(id, merged));
+        enqueue('patchRefill', () => backend.patchRefill(id, diff));
       },
       deleteRefill: (id) => {
         applyState((s) => ({ ...s, refills: s.refills.filter((r) => r.id !== id) }));
@@ -1286,7 +1333,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateStockBaseline: (id, patch) => {
         const current = stateRef.current.stockBaselines.find((b) => b.id === id);
         if (!current) return;
-        const merged: StockBaseline = { ...current, ...patch, id };
+        const merged: StockBaseline = { ...current, ...cleanPatch<StockBaseline>(patch), id };
+        const diff = changedFields(current, merged);
+        if (!hasChanges(diff)) return;
         applyState((s) => ({
           ...s,
           stockBaselines: s.stockBaselines
@@ -1294,7 +1343,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             .sort((x, y) =>
               x.effectiveAt.localeCompare(y.effectiveAt) || x.createdAt.localeCompare(y.createdAt)),
         }));
-        enqueue('patchStockBaseline', () => backend.patchStockBaseline(id, merged));
+        enqueue('patchStockBaseline', () => backend.patchStockBaseline(id, diff));
       },
       deleteStockBaseline: (id) => {
         applyState((s) => ({
@@ -1323,14 +1372,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateWorkout: (id, patch) => {
         const current = stateRef.current.workouts.find((w) => w.id === id);
         if (!current) return;
-        const merged: Workout = { ...current, ...patch, id };
+        const merged: Workout = { ...current, ...cleanPatch<Workout>(patch), id };
+        const diff = changedFields(current, merged);
+        if (!hasChanges(diff)) return;
         applyState((s) => ({
           ...s,
           workouts: s.workouts
             .map((w) => (w.id === id ? merged : w))
             .sort((a, b) => a.performedAt.localeCompare(b.performedAt)),
         }));
-        enqueue('patchWorkout', () => backend.patchWorkout(id, merged));
+        enqueue('patchWorkout', () => backend.patchWorkout(id, diff));
       },
       deleteWorkout: (id) => {
         applyState((s) => ({ ...s, workouts: s.workouts.filter((w) => w.id !== id) }));

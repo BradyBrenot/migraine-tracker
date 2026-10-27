@@ -84,6 +84,17 @@ export interface ExportEnvelope {
   settings: Record<string, unknown>;
 }
 
+/**
+ * Encode one dynamic path segment. Record ids can come from imported backups
+ * and legitimately contain `/`, `?`, `#`, `%` or spaces; sending them raw
+ * changes the route or truncates the path. Only the segment is encoded, so the
+ * static route prefix stays literal, and request/timeout behaviour is
+ * unchanged.
+ */
+function seg(value: string): string {
+  return encodeURIComponent(value);
+}
+
 export const api = {
   getHealth: () => req<HealthResponse>('GET', '/api/health'),
 
@@ -99,28 +110,29 @@ export const api = {
   resetAll: () => req('POST', '/api/reset'),
 
   addAttack: (a: unknown) => req('POST', '/api/attacks', a),
-  patchAttack: (id: string, patch: unknown) => req('PATCH', `/api/attacks/${id}`, patch),
-  deleteAttack: (id: string) => req('DELETE', `/api/attacks/${id}`),
+  patchAttack: (id: string, patch: unknown) => req('PATCH', `/api/attacks/${seg(id)}`, patch),
+  deleteAttack: (id: string) => req('DELETE', `/api/attacks/${seg(id)}`),
 
   addMed: (m: unknown) => req('POST', '/api/meds', m),
-  patchMed: (id: string, patch: unknown) => req('PATCH', `/api/meds/${id}`, patch),
-  deleteMed: (id: string) => req('DELETE', `/api/meds/${id}`),
+  patchMed: (id: string, patch: unknown) => req('PATCH', `/api/meds/${seg(id)}`, patch),
+  deleteMed: (id: string) => req('DELETE', `/api/meds/${seg(id)}`),
 
   addRefill: (r: unknown) => req('POST', '/api/refills', r),
-  patchRefill: (id: string, patch: unknown) => req('PATCH', `/api/refills/${id}`, patch),
-  deleteRefill: (id: string) => req('DELETE', `/api/refills/${id}`),
+  patchRefill: (id: string, patch: unknown) => req('PATCH', `/api/refills/${seg(id)}`, patch),
+  deleteRefill: (id: string) => req('DELETE', `/api/refills/${seg(id)}`),
 
   addStockBaseline: (b: unknown) => req('POST', '/api/stock-baselines', b),
-  patchStockBaseline: (id: string, patch: unknown) => req('PATCH', `/api/stock-baselines/${id}`, patch),
-  deleteStockBaseline: (id: string) => req('DELETE', `/api/stock-baselines/${id}`),
+  patchStockBaseline: (id: string, patch: unknown) =>
+    req('PATCH', `/api/stock-baselines/${seg(id)}`, patch),
+  deleteStockBaseline: (id: string) => req('DELETE', `/api/stock-baselines/${seg(id)}`),
 
   addWorkout: (w: unknown) => req('POST', '/api/workouts', w),
-  patchWorkout: (id: string, patch: unknown) => req('PATCH', `/api/workouts/${id}`, patch),
-  deleteWorkout: (id: string) => req('DELETE', `/api/workouts/${id}`),
+  patchWorkout: (id: string, patch: unknown) => req('PATCH', `/api/workouts/${seg(id)}`, patch),
+  deleteWorkout: (id: string) => req('DELETE', `/api/workouts/${seg(id)}`),
   listWorkouts: () => req('GET', '/api/workouts'),
 
   listDayStates: () => req('GET', '/api/day-states'),
-  putDayState: (day: string, body: unknown) => req('PUT', `/api/day-states/${day}`, body),
+  putDayState: (day: string, body: unknown) => req('PUT', `/api/day-states/${seg(day)}`, body),
 
-  putSetting: (key: string, value: unknown) => req('PUT', `/api/settings/${key}`, value),
+  putSetting: (key: string, value: unknown) => req('PUT', `/api/settings/${seg(key)}`, value),
 };

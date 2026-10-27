@@ -266,10 +266,11 @@ describe('History Rx pickups tablets', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(api.patchRefill).toHaveBeenCalledTimes(1));
-    expect(api.patchRefill).toHaveBeenCalledWith(
-      'refill-1',
-      expect.objectContaining({ date: '2026-03-01', notes: 'CVS', quantity: 4 }),
-    );
+    // Narrow PATCH: the unchanged date (and the id) are not resent.
+    expect(api.patchRefill).toHaveBeenCalledWith('refill-1', {
+      notes: 'CVS',
+      quantity: 4,
+    });
   });
 
   it('shows the structured quantity only when it is known', async () => {

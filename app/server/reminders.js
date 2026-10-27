@@ -123,6 +123,10 @@ export function createReminderEngine({
   }
 
   // ── low-stock episode state (internal, never exported) ─────────────
+  // Deliberately independent of the browser's one-shot `lowStockAlertedAt`
+  // setting (PUT /api/settings/lowStockAlert): that setting only drives the
+  // client toast, while this latch decides server reminders. The two are
+  // allowed to disagree — do not consolidate or cross-seed them.
   const LOW_STATE_KEY = 'low_stock';
 
   function readLowState() {

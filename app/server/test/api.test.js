@@ -207,6 +207,33 @@ test('dirty legacy rows: unrelated invalid stored fields do not block valid patc
   assert.equal(medInvalid.statusCode, 400);
 });
 
+test('URL-encoded record ids round-trip through PATCH and DELETE', async (t) => {
+  const h = await makeApp({ label: 'migraine-encoded-ids' });
+  t.after(() => h.close());
+
+  // Imported ids may contain URL delimiter characters. The client encodes the
+  // whole segment, so the server must see the decoded id and address the row.
+  const id = 'a/b?c#d%e f';
+  const created = await h.app.inject({
+    method: 'POST', url: '/api/attacks', payload: { ...sampleAttack, id },
+  });
+  assert.equal(created.statusCode, 201);
+  assert.equal(created.json().id, id);
+
+  const encoded = encodeURIComponent(id);
+  const patched = await h.app.inject({
+    method: 'PATCH', url: `/api/attacks/${encoded}`, payload: { notes: 'narrow' },
+  });
+  assert.equal(patched.statusCode, 200);
+  assert.equal(patched.json().id, id);
+  assert.equal(patched.json().notes, 'narrow');
+  assert.equal(patched.json().peakPain, 7); // unrelated fields untouched
+
+  const deleted = await h.app.inject({ method: 'DELETE', url: `/api/attacks/${encoded}` });
+  assert.equal(deleted.statusCode, 200);
+  assert.equal((await h.app.inject({ method: 'GET', url: '/api/attacks' })).json().length, 0);
+});
+
 test('refills: required fields, mapper shape', async () => {
   const h = await makeApp({ label: 'migraine-refills' });
   try {

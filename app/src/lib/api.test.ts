@@ -191,3 +191,67 @@ describe('api request timeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('dynamic path segment encoding', () => {
+  // Imported record ids may contain every URL delimiter; a raw segment would
+  // change the route or truncate the path.
+  const rawId = 'a/b?c#d%e f';
+  const encodedId = encodeURIComponent(rawId);
+
+  beforeEach(() => {
+    fetchMock.mockResolvedValue(okJson({ ok: true }));
+  });
+
+  it('encodes record ids in every PATCH and DELETE path', async () => {
+    await api.patchAttack(rawId, {});
+    await api.deleteAttack(rawId);
+    await api.patchMed(rawId, {});
+    await api.deleteMed(rawId);
+    await api.patchRefill(rawId, {});
+    await api.deleteRefill(rawId);
+    await api.patchStockBaseline(rawId, {});
+    await api.deleteStockBaseline(rawId);
+    await api.patchWorkout(rawId, {});
+    await api.deleteWorkout(rawId);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      `/api/attacks/${encodedId}`,
+      `/api/attacks/${encodedId}`,
+      `/api/meds/${encodedId}`,
+      `/api/meds/${encodedId}`,
+      `/api/refills/${encodedId}`,
+      `/api/refills/${encodedId}`,
+      `/api/stock-baselines/${encodedId}`,
+      `/api/stock-baselines/${encodedId}`,
+      `/api/workouts/${encodedId}`,
+      `/api/workouts/${encodedId}`,
+    ]);
+    expect(fetchMock.mock.calls.map((call) => call[1]?.method)).toEqual([
+      'PATCH', 'DELETE', 'PATCH', 'DELETE', 'PATCH', 'DELETE',
+      'PATCH', 'DELETE', 'PATCH', 'DELETE',
+    ]);
+    // The body is still plain JSON, not a form/encoded payload.
+    expect(fetchMock.mock.calls[0][1]?.body).toBe(JSON.stringify({}));
+  });
+
+  it('encodes the day-state day and setting key segments', async () => {
+    const rawDay = '2026/10/21?x#y% z';
+    const rawKey = 'weird/key?x#y% z';
+
+    await api.putDayState(rawDay, { status: 'well' });
+    await api.putSetting(rawKey, { a: 1 });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(`/api/day-states/${encodeURIComponent(rawDay)}`);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PUT');
+    expect(fetchMock.mock.calls[1][0]).toBe(`/api/settings/${encodeURIComponent(rawKey)}`);
+    expect(fetchMock.mock.calls[1][1]?.body).toBe(JSON.stringify({ a: 1 }));
+  });
+
+  it('leaves ordinary ids unchanged and still bounded by the 15s timeout', async () => {
+    await api.patchMed('plain-id_1', { notes: 'x' });
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/meds/plain-id_1');
+    // The request timer is cleared on success, exactly as before.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

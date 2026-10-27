@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
-import type { Attack, DayState, MedEvent, StockBaseline, TrackerState, Workout } from '@/types';
+import type { Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout } from '@/types';
 import { currentStock } from '../../shared/inventory.ts';
 import { systemTimeZone } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
@@ -1177,14 +1177,8 @@ describe('workouts and day states', () => {
       currentStore().updateWorkout(id, { effort: 'hard' });
     });
     await waitFor(() => expect(api.patchWorkout).toHaveBeenCalledTimes(1));
-    expect(api.patchWorkout).toHaveBeenCalledWith(id, expect.objectContaining({
-      id,
-      kind: 'cardio',
-      effort: 'hard',
-      durationMinutes: 20,
-      notes: 'run',
-      performedAt: '2026-10-19T07:00:00.000Z',
-    }));
+    // Only the edited field goes on the wire: no id, no unchanged values.
+    expect(api.patchWorkout).toHaveBeenCalledWith(id, { effort: 'hard' });
     expect(currentStore().state.workouts.find((w) => w.id === id)).toMatchObject({
       kind: 'cardio',
       effort: 'hard',
@@ -1338,9 +1332,8 @@ describe('Nurtec inventory and low-stock latch', () => {
       currentStore().updateRefill(refillId, { quantity: 6 });
     });
     await waitFor(() => expect(api.patchRefill).toHaveBeenCalledTimes(1));
-    expect(api.patchRefill).toHaveBeenCalledWith(refillId, expect.objectContaining({
-      id: refillId, medId: 'nurtec', date: pickupDay, quantity: 6,
-    }));
+    // Narrow PATCH: the unchanged med/date/id are not resent.
+    expect(api.patchRefill).toHaveBeenCalledWith(refillId, { quantity: 6 });
     expect(currentStore().state.refills.find((r) => r.id === refillId)).toMatchObject({
       quantity: 6,
     });
@@ -2789,9 +2782,9 @@ describe('peak pain correction', () => {
     expect(storedAttack('a1').painLog).toEqual([{ ts: PAIN_TS, level: 6 }]);
     await settle();
 
-    const payload = lastAttackPatch();
-    expect(payload.peakPain).toBe(9);
-    expect(payload.painLog).toEqual([{ ts: PAIN_TS, level: 6 }]);
+    // Only the corrected peak goes on the wire; the untouched log is not
+    // resent and no synthetic entry is added.
+    expect(lastAttackPatch()).toEqual({ peakPain: 9 });
   });
 
   it('applies an explicit downward correction', async () => {
@@ -2804,9 +2797,7 @@ describe('peak pain correction', () => {
     expect(storedAttack('a1').peakPain).toBe(2);
     expect(storedAttack('a1').painLog).toHaveLength(1);
     await settle();
-    const payload = lastAttackPatch();
-    expect(payload.peakPain).toBe(2);
-    expect(payload.painLog).toHaveLength(1);
+    expect(lastAttackPatch()).toEqual({ peakPain: 2 });
   });
 
   it('accepts an explicit 0 peak', async () => {
@@ -2834,9 +2825,9 @@ describe('peak pain correction', () => {
     expect(storedAttack('a1').notes).toBe('x');
     await settle();
 
-    const payload = lastAttackPatch();
-    expect(payload.peakPain).toBe(2);
-    expect(payload.notes).toBe('x');
+    // The corrected peak is already stored, so the metadata edit sends only
+    // the metadata — it must not resurrect or resend the peak.
+    expect(lastAttackPatch()).toEqual({ notes: 'x' });
   });
 
   it('folds only new pain entries into the corrected peak', async () => {
@@ -2885,7 +2876,10 @@ describe('peak pain correction', () => {
     });
     expect(storedAttack('legacy').peakPain).toBe(6);
     await settle();
-    expect(lastAttackPatch().peakPain).toBe(6);
+    // The diff is built from the merged record: the derived peak is a real
+    // change and must reach the server even though the caller only edited
+    // metadata. The log itself is untouched and not resent.
+    expect(lastAttackPatch()).toEqual({ peakPain: 6, notes: 'legacy' });
   });
 
   it('uses max semantics for new pain entries on a fresh attack', async () => {
@@ -2945,8 +2939,8 @@ describe('peak pain correction', () => {
 
       expect(storedAttack(createdId).peakPain).toBe(level);
       expect(storedAttack(createdId).painLog).toHaveLength(1);
-      expect(lastAttackPatch()).toMatchObject({ peakPain: level, notes: 'past attack' });
-      expect(lastAttackPatch().painLog).toHaveLength(1);
+      // logPain already sent the peak, so the metadata patch is metadata-only.
+      expect(lastAttackPatch()).toEqual({ notes: 'past attack' });
     },
   );
 });
@@ -2973,8 +2967,10 @@ describe('record id integrity', () => {
     expect(api.patchAttack).toHaveBeenCalledTimes(1);
     const [routeId, payload] = api.patchAttack.mock.calls[0];
     expect(routeId).toBe('a1');
-    expect(payload.id).toBe('a1');
-    expect(payload.notes).toBe('kept');
+    // The wire PATCH is a narrow diff: it never carries an id at all, so the
+    // smuggled `id` cannot reassign the record; only the change is sent.
+    expect(payload).not.toHaveProperty('id');
+    expect(payload).toEqual({ notes: 'kept' });
     expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
   });
 
@@ -3022,5 +3018,144 @@ describe('record id integrity', () => {
     expect(api.patchMed).not.toHaveBeenCalled();
     expect(currentStore().sync.pending).toBe(0);
     expect(currentStore().sync.dirty).toBe(false);
+  });
+});
+
+describe('narrow record PATCH payloads', () => {
+  function makeRefillRecord(id: string, overrides: Partial<Refill> = {}): Refill {
+    return {
+      id,
+      medId: 'nurtec',
+      date: '2026-03-01',
+      quantity: 8,
+      notes: 'pharmacy',
+      source: 'manual',
+      ...overrides,
+    };
+  }
+
+  it('sends only the changed attack fields, never the id or unchanged keys', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('a1')] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateAttack('a1', {
+        // Unchanged values (identical arrays/null) are not edits.
+        notes: 'narrow', symptoms: [], triggers: [], aura: null,
+      });
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    expect(api.patchAttack).toHaveBeenCalledTimes(1);
+    const [routeId, payload] = api.patchAttack.mock.calls[0];
+    expect(routeId).toBe('a1');
+    expect(payload).toEqual({ notes: 'narrow' });
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+    expect(currentStore().state.attacks[0]).toMatchObject({ id: 'a1', notes: 'narrow' });
+  });
+
+  it('transmits explicit null clears for attack end/aura', async () => {
+    const attack: Attack = {
+      ...makeAttack('a1'),
+      end: '2026-10-20T12:00:00.000Z',
+      aura: true,
+    };
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [attack] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateAttack('a1', { end: null, aura: null });
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    expect(api.patchAttack).toHaveBeenCalledWith('a1', { end: null, aura: null });
+    const stored = currentStore().state.attacks[0];
+    expect(stored.end).toBeNull();
+    expect(stored.aura).toBeNull();
+  });
+
+  it('transmits explicit null clears for med quantity/attackId and refill quantity', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      meds: [makeMed('m1', { attackId: 'atk1', quantity: 3 })],
+      refills: [makeRefillRecord('r1')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateMed('m1', { attackId: null, quantity: null });
+      currentStore().updateRefill('r1', { quantity: null });
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    expect(api.patchMed).toHaveBeenCalledWith('m1', { attackId: null, quantity: null });
+    expect(api.patchRefill).toHaveBeenCalledWith('r1', { quantity: null });
+    expect(currentStore().state.meds[0]).toMatchObject({ attackId: null, quantity: null });
+    expect(currentStore().state.refills[0].quantity).toBeNull();
+  });
+
+  it('sends narrow stock-baseline and workout diffs', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      stockBaselines: [makeStockBaseline('b1', 10, daysAgo(5))],
+      workouts: [makeWorkout('w1')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      currentStore().updateStockBaseline('b1', { quantity: 7 });
+      currentStore().updateWorkout('w1', { durationMinutes: 30 });
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    expect(api.patchStockBaseline).toHaveBeenCalledWith('b1', { quantity: 7 });
+    expect(api.patchWorkout).toHaveBeenCalledWith('w1', { durationMinutes: 30 });
+    expect(currentStore().state.stockBaselines[0].quantity).toBe(7);
+    expect(currentStore().state.workouts[0].durationMinutes).toBe(30);
+  });
+
+  it('skips the PATCH and the sync latches for no-op and undefined-only updates', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('a1')],
+      meds: [makeMed('m1')],
+      refills: [makeRefillRecord('r1')],
+      workouts: [makeWorkout('w1')],
+      stockBaselines: [makeStockBaseline('b1', 10, daysAgo(5))],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    await act(async () => {
+      // Identical values and undefined keys (which JSON cannot transmit) are
+      // not edits: no empty PATCH, no optimistic change, no dirty latch.
+      currentStore().updateAttack('a1', { notes: '', peakPain: undefined });
+      currentStore().updateAttack('a1', { notes: undefined });
+      currentStore().updateMed('m1', { notes: undefined });
+      currentStore().updateRefill('r1', { notes: 'pharmacy' });
+      currentStore().updateStockBaseline('b1', { quantity: 10 });
+      currentStore().updateWorkout('w1', { notes: undefined });
+    });
+
+    expect(api.patchAttack).not.toHaveBeenCalled();
+    expect(api.patchMed).not.toHaveBeenCalled();
+    expect(api.patchRefill).not.toHaveBeenCalled();
+    expect(api.patchStockBaseline).not.toHaveBeenCalled();
+    expect(api.patchWorkout).not.toHaveBeenCalled();
+    expect(currentStore().sync.pending).toBe(0);
+    expect(currentStore().sync.dirty).toBe(false);
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+    // An undefined key is absent, never a local-only clear.
+    expect(currentStore().state.meds[0].notes).toBe('');
+    expect(currentStore().state.workouts[0].notes).toBe('');
   });
 });

@@ -377,7 +377,7 @@ describe('Reports rolling medication window', () => {
     mountReports();
     await waitForSync();
 
-    const group = screen.getByRole('group', { name: 'Report range (download only)' });
+    const group = screen.getByRole('group', { name: 'Report range' });
     expect(group).toBeTruthy();
     expect(within(group).getByRole('button', { name: '12mo' })).toBeTruthy();
     // The three areas are clearly separated; the month section is a historical

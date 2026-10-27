@@ -235,23 +235,19 @@ export default function Reports() {
     <div className="space-y-5">
       <h1 className="sr-only">Reports</h1>
 
-      {/* ── Report download: the range belongs to the file, not the charts ── */}
+      {/* ── Report download ── */}
       {!readOnly && (
         <section
           aria-labelledby="report-download-title"
-          className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm"
+          className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm"
         >
-          <h2 id="report-download-title" className="text-sm font-bold">
-            Report download
-          </h2>
-          <p className="mt-1 text-xs text-slate-400">
-            Choose how much history the downloaded Markdown report covers. This range
-            applies only to the file — the charts below keep their own fixed windows.
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 id="report-download-title" className="text-sm font-bold">
+              Report download
+            </h2>
             <div
               role="group"
-              aria-label="Report range (download only)"
+              aria-label="Report range"
               className="flex gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1"
             >
               {(['3', '6', '12', 'all'] as const).map((s) => (

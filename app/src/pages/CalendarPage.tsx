@@ -125,8 +125,8 @@ function dayCellLabel(day: DayData, timeZone: string): string {
 }
 
 /**
- * Up to four med chips fit a phone-width day cell (two per row); anything
- * beyond that collapses to "+n". Preventive chips are always kept, so
+ * Four slots (including any "+n" indicator) fit a phone-width day cell in two
+ * rows. Preventive chips are always kept, so
  * truncation can never hide a scheduled preventive dose.
  */
 const MAX_DAY_CHIPS = 4;
@@ -658,22 +658,28 @@ export default function CalendarPage() {
                         const acuteChips = d.meds.filter(
                           (m) => MED_MAP[m.medId]?.kind !== 'preventive',
                         );
-                        const shown = [
-                          ...preventiveChips,
-                          ...acuteChips.slice(
-                            0,
-                            Math.max(0, MAX_DAY_CHIPS - preventiveChips.length),
-                          ),
-                        ];
-                        const hidden = d.meds.length - shown.length;
+                        const prioritized = [...preventiveChips, ...acuteChips];
+                        // The overflow indicator consumes one of the four slots.
+                        // A fixed two-column grid keeps chips + "+n" to two rows,
+                        // even in the ~35px content width of a 360px day cell.
+                        const shown = prioritized.slice(
+                          0,
+                          prioritized.length > MAX_DAY_CHIPS
+                            ? MAX_DAY_CHIPS - 1
+                            : MAX_DAY_CHIPS,
+                        );
+                        const hidden = prioritized.length - shown.length;
                         return (
-                          <div className="mt-auto flex flex-wrap gap-0.5 pt-0.5">
+                          <div
+                            data-med-chip-grid
+                            className="mt-auto grid w-full grid-cols-2 gap-0.5 pt-0.5"
+                          >
                             {shown.map((m) => {
                               const c = medColor(m.medId);
                               return (
                                 <span
                                   key={m.id}
-                                  className="flex h-5 min-w-5 items-center justify-center rounded px-0.5 text-xs font-bold leading-none"
+                                  className="flex h-5 min-w-0 items-center justify-center rounded text-xs font-bold leading-none"
                                   style={{ background: c, color: textOn(c) }}
                                   title={medName(m.medId)}
                                 >
@@ -682,7 +688,7 @@ export default function CalendarPage() {
                               );
                             })}
                             {hidden > 0 && (
-                              <span className="text-xs leading-none text-slate-400">
+                              <span className="flex h-5 min-w-0 items-center justify-center text-xs leading-none text-slate-400">
                                 +{hidden}
                               </span>
                             )}

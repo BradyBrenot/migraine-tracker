@@ -709,11 +709,14 @@ describe('CalendarPage decision cards and aggregate painkillers', () => {
 
     const cell = document.querySelector<HTMLElement>(`[data-day="${day}"]`);
     if (!cell) throw new Error('day cell missing');
-    // The preventive dose is pinned first and survives the 4-chip cap (one
-    // preventive + three acute chips), so two acute chips collapse.
+    // The preventive dose is pinned first. The +n indicator shares the four-slot
+    // budget: one preventive + two acute + "+3" = exactly two grid rows.
     expect(cell.querySelector('[title="Emgality"]')).toBeTruthy();
-    expect(cell.querySelectorAll('[title="Tylenol"]')).toHaveLength(3);
-    expect(cell.textContent).toContain('+2');
+    expect(cell.querySelectorAll('[title="Tylenol"]')).toHaveLength(2);
+    expect(cell.textContent).toContain('+3');
+    const chipGrid = cell.querySelector<HTMLElement>('[data-med-chip-grid]');
+    expect(chipGrid?.className).toContain('grid-cols-2');
+    expect(chipGrid?.children).toHaveLength(4);
     // Accessible name carries the preventive information too.
     expect(cell.getAttribute('aria-label')).toContain('preventive: Emgality');
   });

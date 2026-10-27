@@ -356,28 +356,24 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Primary action: pain is the one-tap thing you reach for mid-attack. */}
-          <div className="border-t border-attack-border/70 p-3">
+          {/* Same action row: pain is primary; ending stays smaller and secondary. */}
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 border-t border-attack-border/70 p-3">
             <button
               type="button"
               onClick={() => setPainOpen(true)}
-              className="flex min-h-14 w-full items-center justify-center gap-2 rounded-lg bg-attack text-base font-bold text-attack-foreground transition-colors hover:bg-attack/90 active:scale-[0.99]"
+              className="flex min-h-12 min-w-0 items-center justify-center gap-2 rounded-lg bg-attack text-base font-bold text-attack-foreground transition-colors hover:bg-attack/90 active:scale-[0.99]"
             >
               <Gauge className="h-5 w-5" />
               Log pain
             </button>
-            {/* Secondary + destructive-adjacent, visually separated below. */}
-            <div className="mt-2 flex items-center justify-between gap-2">
-              <span className="text-xs text-slate-400">Ended or easing?</span>
-              <Button
-                variant="outline"
-                onClick={handleEnd}
-                className="h-11 gap-1.5 border-slate-700 bg-slate-900/70 px-3 text-slate-200 hover:bg-slate-800 hover:text-slate-50"
-              >
-                <Square className="h-4 w-4 text-emerald-400" />
-                Attack ended
-              </Button>
-            </div>
+            <Button
+              variant="outline"
+              onClick={handleEnd}
+              className="h-12 gap-1.5 border-slate-700 bg-slate-900/70 px-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+            >
+              <Square className="h-4 w-4 text-emerald-400" />
+              Attack ended
+            </Button>
           </div>
         </section>
       ) : (

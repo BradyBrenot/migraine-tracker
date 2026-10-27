@@ -34,7 +34,7 @@ Environment variables are used for setting up ntfy and nothing else.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `NTFY_URL` | reminders | ntfy **topic publish URL**. For personal reminders. You can use the public one, in which case https://ntfy.sh/<my-secret-topic> |
+| `NTFY_URL` | reminders | ntfy **topic publish URL**. For personal reminders. You can use the public one, in which case `https://ntfy.sh/<my-secret-topic>` |
 | `NTFY_TOKEN` | no | Only if ntfy host requires a bearer token |
 | `NTFY_ATTACK_URL` | for attack alerts | Similar to above, but this just alerts when you've marked an attack as starting. Intended for use by partners / caregivers. |
 | `NTFY_ATTACK_TOKEN` | no | Token, as above. |

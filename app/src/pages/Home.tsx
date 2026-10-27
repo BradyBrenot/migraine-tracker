@@ -12,6 +12,7 @@ import AttackFormDialog from '@/components/AttackFormDialog';
 import MedFormDialog from '@/components/MedFormDialog';
 import DayCheckIn from '@/components/DayCheckIn';
 import WorkoutQuickLog from '@/components/WorkoutQuickLog';
+import WeatherCard from '@/components/WeatherCard';
 import { addDays, dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
 import {
@@ -400,6 +401,9 @@ export default function Home() {
           ))}
         </div>
       </section>
+
+      {/* ── Weather (optional, after primary logging controls) ──── */}
+      <WeatherCard />
 
       {/* ── Today's meds ────────────────────────────────────────── */}
       {todaysMeds.length > 0 && (

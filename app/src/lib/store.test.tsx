@@ -177,6 +177,7 @@ function persistedState(attacks: Attack[]): TrackerState {
     timezone: 'UTC',
     lowStockThreshold: 2,
     reminders: DEFAULT_REMINDER_SETTINGS,
+    weather: { enabled: false, location: null, pressureDropThresholdHpa: 5 },
     lowStockAlertedAt: null,
     seeded: false,
   };
@@ -528,7 +529,7 @@ describe('StoreProvider sync state and persistence', () => {
 
     await waitFor(() => {
       expect(api.addRefill).toHaveBeenCalledTimes(1);
-      expect(api.putSetting).toHaveBeenCalledTimes(7);
+      expect(api.putSetting).toHaveBeenCalledTimes(8);
       expect(api.putSetting).toHaveBeenCalledWith('reminders', DEFAULT_REMINDER_SETTINGS);
       expect(currentStore().sync.pending).toBe(1);
     });
@@ -559,7 +560,7 @@ describe('StoreProvider sync state and persistence', () => {
       attacks: [], meds: [], refills: [], workouts: [], dayStates: [],
       stockBaselines: [],
     });
-    expect(api.putSetting).toHaveBeenCalledTimes(7);
+    expect(api.putSetting).toHaveBeenCalledTimes(8);
     expect(api.putSetting).toHaveBeenCalledWith('reminders', DEFAULT_REMINDER_SETTINGS);
     expect(api.putSetting).toHaveBeenCalledWith('lowStockThreshold', 2);
     expect(api.putSetting).toHaveBeenCalledWith('lowStockAlert', { latchedAt: null });
@@ -624,7 +625,7 @@ describe('StoreProvider sync state and persistence', () => {
     });
 
     await waitFor(() => {
-      expect(api.putSetting).toHaveBeenCalledTimes(7);
+      expect(api.putSetting).toHaveBeenCalledTimes(8);
       expect(api.putSetting).toHaveBeenCalledWith('reminders', DEFAULT_REMINDER_SETTINGS);
       expect(api.addRefill).toHaveBeenCalledTimes(1);
       expect(currentStore().sync.pending).toBe(1);
@@ -676,7 +677,7 @@ describe('StoreProvider sync state and persistence', () => {
     });
 
     await waitFor(() => {
-      expect(api.putSetting).toHaveBeenCalledTimes(7);
+      expect(api.putSetting).toHaveBeenCalledTimes(8);
       expect(api.putSetting).toHaveBeenCalledWith('reminders', DEFAULT_REMINDER_SETTINGS);
       expect(api.addRefill).toHaveBeenCalledTimes(1);
       expect(currentStore().sync.pending).toBe(1);
@@ -1983,6 +1984,7 @@ describe('JSON backup merge and replace', () => {
         lowStockThreshold: storeModule.DEFAULT_LOW_STOCK_THRESHOLD,
         lowStockAlert: { latchedAt: null },
         reminders: DEFAULT_REMINDER_SETTINGS,
+        weather: { enabled: false, location: null, pressureDropThresholdHpa: 5 },
       }),
     }));
 

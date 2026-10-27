@@ -59,6 +59,37 @@ There is no auth, they can just access the main mode and mess with things. Anyon
 
 The main mode and partner view both support installing as an "app" on mobile. In Android Chrome for example, open the menu, swipe down and click on **Install**
 
+### Weather pressure drops (optional)
+
+Weather warnings are **off by default** and the app works normally without
+them. In Settings, search for a city (search text and the chosen coordinates are
+sent to [Open-Meteo](https://open-meteo.com/); no API key and no new environment
+variables), pick a pressure-drop threshold (default 5 hPa), then enable the
+toggle.
+
+- Only **pressure drops** are assessed: a warning means pressure falls by at
+  least the configured threshold within the next 24 hours from the current
+  hourly baseline. The default 5 hPa is a configurable starting point, not a
+  validated clinical cutoff.
+- Current temperature, humidity and pressure are shown as neutral context and
+  never trigger anything.
+- Reminders send at most **one ntfy message per pressure-drop episode**, and
+  only when the weather per-type switch, the personal reminder master switch,
+  and waking hours all allow it. The message contains the drop magnitude and
+  target time, not the saved city.
+- The Home card shows the last successful forecast during a temporary upstream
+  failure (marked stale) and a calm error message when there is none; stale or
+  unknown data never sends a notification.
+- This is not a medical prediction. Use it as one optional signal alongside how
+  you actually feel; no threshold is universal.
+- Forecast data comes from the free [Open-Meteo](https://open-meteo.com/) API,
+  which is non-commercial and rate-limited; the data is provided under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Per
+  [Open-Meteo's terms](https://open-meteo.com/en/terms), troubleshooting logs
+  may contain the requested coordinates and are deleted after 90 days.
+- Notification delivery keeps the existing at-least-once caveat: a crash between
+  ntfy accepting a message and the app recording it can resend that message.
+
 ### Backups
 
 The database is backed up nightly to `data/backups/migraine-YYYY-MM-DD.json`, or can be manually exported.

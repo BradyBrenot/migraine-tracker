@@ -21,6 +21,10 @@ import { parseBackup } from '../shared/backup.ts';
 import { currentStock, classifyStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../shared/inventory.ts';
 import { isValidTimeZone } from '../shared/datetime.ts';
 import { normalizeReminderSettings, reminderSettingsErrors } from '../shared/reminders.ts';
+import {
+  emptyWeatherStatus, normalizeGeocodeQuery, normalizeWeatherSettings,
+  weatherSettingsErrors,
+} from '../shared/weather.ts';
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
@@ -79,6 +83,7 @@ function sourceHost(value) {
 
 export async function buildApp({
   db, distDir, logger = false, onAttackChange, notificationStatus,
+  weather = null, onWeatherChange,
 } = {}) {
   const app = Fastify({ logger });
 
@@ -106,6 +111,17 @@ export async function buildApp({
   function notifyAttackChange(event) {
     try {
       onAttackChange?.(event);
+    } catch {
+      // never fail the write
+    }
+  }
+
+  // Weather cache invalidation hook (settings change / reset / restore). It is
+  // synchronous and never allowed to affect the write's status code or body;
+  // the callback itself kicks off the async refresh.
+  function notifyWeatherChange() {
+    try {
+      onWeatherChange?.();
     } catch {
       // never fail the write
     }
@@ -393,6 +409,17 @@ export async function buildApp({
         .run(req.params.key, JSON.stringify(normalized));
       return { ok: true };
     }
+    // Optional weather: saved non-secret city coordinates + threshold only.
+    // Strict shared validation, normalized projection (no runtime data).
+    if (req.params.key === 'weather') {
+      const errors = weatherSettingsErrors(req.body);
+      if (errors.length) return reply.code(400).send({ error: errors.join('; ') });
+      const normalized = normalizeWeatherSettings(req.body);
+      db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .run(req.params.key, JSON.stringify(normalized));
+      notifyWeatherChange();
+      return { ok: true };
+    }
     if (req.params.key === 'timezone') {
       if (typeof req.body !== 'string' || !isValidTimeZone(req.body)) {
         return reply.code(400).send({ error: 'timezone must be a valid IANA time zone' });
@@ -401,6 +428,39 @@ export async function buildApp({
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run(req.params.key, JSON.stringify(req.body ?? null));
     return { ok: true };
+  });
+
+  // ── weather (optional Open-Meteo pressure-drop forecast) ───────────
+  // GET returns only safe runtime status (never upstream URLs/bodies). With
+  // no service wired (e.g. a bare test app) the feature reads as disabled.
+  app.get('/api/weather', () => {
+    if (!weather || typeof weather.getStatus !== 'function') return emptyWeatherStatus();
+    try {
+      return weather.getStatus();
+    } catch {
+      return { ...emptyWeatherStatus(), status: 'error', stale: true };
+    }
+  });
+
+  // City search is deliberately POST + JSON body: Fastify's request log
+  // includes req.url for GET query strings, and a searched city is user data.
+  // The fixed error text never echoes the upstream body.
+  app.post('/api/weather/geocode', async (req, reply) => {
+    const query = normalizeGeocodeQuery(bodyObject(req).query);
+    if (!query) {
+      return reply.code(400).send({
+        error: 'query must be 2 to 100 characters without control characters',
+      });
+    }
+    if (!weather || typeof weather.geocode !== 'function') {
+      return reply.code(503).send({ error: 'weather search unavailable' });
+    }
+    try {
+      const results = await weather.geocode(query);
+      return { results: Array.isArray(results) ? results : [] };
+    } catch {
+      return reply.code(502).send({ error: 'weather search unavailable' });
+    }
   });
 
   // ── bulk import / export ───────────────────────────────────────────
@@ -554,6 +614,9 @@ export async function buildApp({
       }
       throw e;
     }
+    // A replacement can change/remove the saved weather location: drop cached
+    // forecast data before the next GET so an old location is never served.
+    notifyWeatherChange();
     return envelope;
   });
 
@@ -573,6 +636,7 @@ export async function buildApp({
     db.exec(`DELETE FROM meds; DELETE FROM attacks; DELETE FROM refills; DELETE FROM workouts;
       DELETE FROM day_states; DELETE FROM stock_baselines; DELETE FROM settings;
       DELETE FROM reminder_occurrences; DELETE FROM reminder_state;`);
+    notifyWeatherChange();
     return { ok: true };
   });
 

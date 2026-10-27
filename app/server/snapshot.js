@@ -4,6 +4,7 @@
 import { SCHEMA_VERSION } from './migrations.js';
 import { isReservedSettingsKey } from './validate.js';
 import { normalizeReminderSettings } from '../shared/reminders.ts';
+import { normalizeWeatherSettings } from '../shared/weather.ts';
 import {
   attackFromRow, medFromRow, refillFromRow, workoutFromRow, dayStateFromRow,
   baselineFromRow,
@@ -14,7 +15,9 @@ import {
  * filtered even if a legacy/manual database insert bypassed the PUT route, so
  * /api/settings, /api/export and the nightly backup can never leak them.
  * `reminders` is normalized to its known non-secret shape, dropping any
- * nested delivery fields a hand-edited/legacy row may contain.
+ * nested delivery fields a hand-edited/legacy row may contain. `weather` is
+ * normalized the same way (saved city/coordinates + threshold only; runtime
+ * forecast data never lives in the settings table).
  */
 export function collectSettings(db) {
   const out = {};
@@ -28,7 +31,9 @@ export function collectSettings(db) {
       // scheduler's settings read; skip it rather than expose raw text.
       continue;
     }
-    out[row.key] = row.key === 'reminders' ? normalizeReminderSettings(value) : value;
+    if (row.key === 'reminders') out[row.key] = normalizeReminderSettings(value);
+    else if (row.key === 'weather') out[row.key] = normalizeWeatherSettings(value);
+    else out[row.key] = value;
   }
   return out;
 }

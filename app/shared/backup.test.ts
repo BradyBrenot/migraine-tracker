@@ -91,6 +91,18 @@ const FULL_SETTINGS = {
   lowStockThreshold: 3,
   lowStockAlert: { latchedAt: '2026-04-09T12:00:00.000Z' },
   reminders: { ...DEFAULT_REMINDER_SETTINGS },
+  weather: {
+    enabled: true,
+    location: {
+      id: 4930956,
+      name: 'Boston',
+      admin1: 'Massachusetts',
+      country: 'United States',
+      latitude: 42.35843,
+      longitude: -71.05977,
+    },
+    pressureDropThresholdHpa: 6,
+  },
 };
 
 const fullEnvelope = () => ({
@@ -488,5 +500,85 @@ describe('settings', () => {
     expect(isReservedBackupSettingsKey('rules')).toBe(false);
     expect(isReservedBackupSettingsKey('timezone')).toBe(false);
     expect(isReservedBackupSettingsKey(7)).toBe(false);
+  });
+
+  it('restores only the saved non-secret weather projection', () => {
+    const backup = expectOk({
+      schemaVersion: 4,
+      attacks: [],
+      settings: {
+        weather: {
+          enabled: true,
+          location: {
+            id: 42,
+            name: 'Boston',
+            admin1: '',
+            country: 'US',
+            latitude: 42.36,
+            longitude: -71.06,
+            // Unknown non-secret extras are not validated but are dropped by
+            // the defensive normalizer, so only known fields are ever stored.
+            label: 'home',
+          },
+          pressureDropThresholdHpa: 5.5,
+          provider: 'open-meteo',
+        },
+      },
+    });
+    expect(backup.settings.weather).toEqual({
+      enabled: true,
+      location: {
+        id: 42,
+        name: 'Boston',
+        admin1: '',
+        country: 'US',
+        latitude: 42.36,
+        longitude: -71.06,
+      },
+      pressureDropThresholdHpa: 5.5,
+    });
+
+    const browser = expectOk({
+      attacks: [],
+      weather: {
+        enabled: false,
+        location: null,
+        pressureDropThresholdHpa: 5,
+      },
+    });
+    expect(browser.format).toBe('browser');
+    expect(browser.settings.weather).toEqual({
+      enabled: false,
+      location: null,
+      pressureDropThresholdHpa: 5,
+    });
+  });
+
+  it('rejects weather settings with secret-like or out-of-bounds fields', () => {
+    expect(expectError({
+      schemaVersion: 4,
+      attacks: [],
+      settings: { weather: { enabled: true, location: null, pressureDropThresholdHpa: 5, ntfyToken: 'x' } },
+    })).toMatch(/weather settings must not contain ntfyToken/);
+
+    expect(expectError({
+      schemaVersion: 4,
+      attacks: [],
+      settings: {
+        weather: {
+          enabled: true,
+          location: {
+            id: 1, name: 'X', latitude: 91, longitude: 0,
+          },
+          pressureDropThresholdHpa: 5,
+        },
+      },
+    })).toMatch(/latitude/);
+
+    expect(expectError({
+      schemaVersion: 4,
+      attacks: [],
+      settings: { weather: { enabled: true, location: null, pressureDropThresholdHpa: 0 } },
+    })).toMatch(/pressureDropThresholdHpa/);
   });
 });

@@ -25,6 +25,8 @@ import type {
 } from '../src/types/index.ts';
 import { isValidTimeZone } from './datetime.ts';
 import { normalizeReminderSettings, reminderSettingsErrors } from './reminders.ts';
+import type { WeatherSettings } from './weather.ts';
+import { normalizeWeatherSettings, weatherSettingsErrors } from './weather.ts';
 
 /**
  * Highest schema envelope this build understands. Keep in sync with
@@ -46,6 +48,8 @@ export interface BackupSettings {
   lowStockThreshold?: number;
   lowStockAlert?: { latchedAt: string | null };
   reminders?: ReminderSettings;
+  /** Saved non-secret city/coordinates + threshold (never runtime forecast data). */
+  weather?: WeatherSettings;
 }
 
 export interface ParsedBackup {
@@ -97,13 +101,13 @@ const ENVELOPE_KEYS = ['schemaVersion', 'exportedAt', 'settings'] as const;
 const BROWSER_KEYS = [
   ...RECORD_KEYS,
   'rules', 'doses', 'planned', 'timezone', 'lowStockThreshold',
-  'lowStockAlertedAt', 'reminders', 'seeded',
+  'lowStockAlertedAt', 'reminders', 'weather', 'seeded',
 ] as const;
 
 /** The only restorable non-secret setting keys (server storage names). */
 const BACKUP_SETTINGS_KEYS = [
   'rules', 'doses', 'planned', 'timezone', 'lowStockThreshold',
-  'lowStockAlert', 'reminders',
+  'lowStockAlert', 'reminders', 'weather',
 ] as const;
 
 const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
@@ -451,6 +455,12 @@ function settingValueError(key: string, value: unknown, label: string): string |
     const errors = reminderSettingsErrors(value);
     return errors.length ? `${label}: ${errors.join('; ')}` : null;
   }
+  if (key === 'weather') {
+    // Saved city/coordinates + threshold only. Runtime forecast data and
+    // episode bookkeeping are not settings and are never restorable.
+    const errors = weatherSettingsErrors(value);
+    return errors.length ? `${label}: ${errors.join('; ')}` : null;
+  }
   return null;
 }
 
@@ -480,6 +490,9 @@ function assignSetting(out: BackupSettings, key: string, value: unknown): void {
     }
     case 'reminders':
       out.reminders = normalizeReminderSettings(value);
+      break;
+    case 'weather':
+      out.weather = normalizeWeatherSettings(value);
       break;
     default:
       break;

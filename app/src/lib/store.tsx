@@ -15,6 +15,9 @@ import { currentStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../../shared/inventor
 import {
   DEFAULT_REMINDER_SETTINGS, normalizeReminderSettings, reminderSettingsErrors,
 } from '../../shared/reminders.ts';
+import {
+  DEFAULT_WEATHER_SETTINGS, normalizeWeatherSettings, weatherSettingsErrors,
+} from '../../shared/weather.ts';
 import type { BackupRecordKey, ParsedBackup } from '../../shared/backup.ts';
 
 const STORAGE_KEY = 'migraine-tracker-v1';
@@ -121,6 +124,7 @@ function emptyState(): TrackerState {
     timezone: systemTimeZone(),
     lowStockThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
     reminders: { ...DEFAULT_REMINDER_SETTINGS },
+    weather: { ...DEFAULT_WEATHER_SETTINGS },
     lowStockAlertedAt: null,
     seeded: false,
   };
@@ -150,6 +154,9 @@ function loadState(): TrackerState {
         ? parsed.lowStockThreshold
         : DEFAULT_LOW_STOCK_THRESHOLD,
       reminders: normalizeReminderSettings(parsed.reminders),
+      // Legacy caches predate the optional weather feature: absent/invalid
+      // values become the documented disabled default.
+      weather: normalizeWeatherSettings(parsed.weather),
       lowStockAlertedAt:
         typeof parsed.lowStockAlertedAt === 'string' ? parsed.lowStockAlertedAt : null,
     };
@@ -253,6 +260,12 @@ function serverSnapshotToState(data: ExportShape, fallbackTz: string): Partial<T
   // normalizes defensively, and secrets never live in this setting.
   if (isPlainRecord(data.settings?.reminders)) {
     snapshot.reminders = normalizeReminderSettings(data.settings.reminders);
+  }
+  // Weather is also optional: adopt the server's saved city/threshold when it
+  // holds one, otherwise keep this browser's local choice (a legacy server must
+  // not clear a just-configured location).
+  if (isPlainRecord(data.settings?.weather)) {
+    snapshot.weather = normalizeWeatherSettings(data.settings.weather);
   }
   return snapshot;
 }
@@ -397,7 +410,7 @@ const byBaselineEffectiveAt = (a: StockBaseline, b: StockBaseline): number =>
 type RestoredSettings = Pick<
   TrackerState,
   | 'rules' | 'doses' | 'planned' | 'timezone' | 'lowStockThreshold'
-  | 'reminders' | 'lowStockAlertedAt'
+  | 'reminders' | 'weather' | 'lowStockAlertedAt'
 >;
 
 /**
@@ -423,6 +436,9 @@ function restoredSettingsFrom(backup: ParsedBackup): RestoredSettings {
     // The parser normalizes reminders when present, so absent means "not in
     // the backup" → the defaults, exactly like a fresh state.
     reminders: backup.settings.reminders ?? { ...DEFAULT_REMINDER_SETTINGS },
+    // The parser normalizes weather when present; absent means "not in the
+    // backup" → the documented disabled default for a replacement.
+    weather: backup.settings.weather ?? { ...DEFAULT_WEATHER_SETTINGS },
     lowStockAlertedAt: backup.settings.lowStockAlert?.latchedAt ?? null,
   };
 }
@@ -442,6 +458,7 @@ function restorePayloadSettings(settings: RestoredSettings) {
     lowStockThreshold: settings.lowStockThreshold,
     lowStockAlert: { latchedAt: settings.lowStockAlertedAt },
     reminders: settings.reminders,
+    weather: settings.weather,
   };
 }
 
@@ -557,6 +574,7 @@ function rebaseRestoreState(
     lowStockThreshold: changed('lowStockThreshold')
       ? current.lowStockThreshold : restored.lowStockThreshold,
     reminders: changed('reminders') ? current.reminders : restored.reminders,
+    weather: changed('weather') ? current.weather : restored.weather,
     lowStockAlertedAt: changed('lowStockAlertedAt')
       ? current.lowStockAlertedAt : restored.lowStockAlertedAt,
     seeded: changed('seeded') ? current.seeded : restored.seeded,
@@ -623,6 +641,11 @@ export interface StoreApi {
    * errors (and applies nothing) when the merge is invalid.
    */
   updateReminders: (patch: Partial<TrackerState['reminders']>) => string[];
+  /**
+   * Merge + validate the optional weather settings (saved city + threshold).
+   * Returns validation errors (and applies nothing) when invalid.
+   */
+  updateWeather: (patch: Partial<TrackerState['weather']>) => string[];
   /** Clear the one-shot low-stock alert latch without waiting for replenishment. */
   resetLowStockAlert: () => void;
   // bulk
@@ -919,6 +942,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             await backend.putSetting('lowStockThreshold', s.lowStockThreshold);
             await backend.putSetting('lowStockAlert', { latchedAt: s.lowStockAlertedAt });
             await backend.putSetting('reminders', s.reminders);
+            await backend.putSetting('weather', s.weather);
           }, { resolvesOfflineDrain: true });
           void upload
             .then(() => {
@@ -1454,6 +1478,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         enqueue('putSetting(reminders)', () => backend.putSetting('reminders', merged));
         return [];
       },
+      updateWeather: (patch) => {
+        // Same strict-then-normalize policy as reminders: a hand-crafted
+        // object with secret-like keys or bad coordinates is rejected and
+        // nothing is applied or queued.
+        const current = normalizeWeatherSettings(stateRef.current.weather);
+        const mergedRaw = { ...current, ...patch };
+        const errors = weatherSettingsErrors(mergedRaw);
+        if (errors.length) return errors;
+        const merged = normalizeWeatherSettings(mergedRaw);
+        applyState((s) => ({ ...s, weather: merged }));
+        enqueue('putSetting(weather)', () => backend.putSetting('weather', merged));
+        return [];
+      },
       resetLowStockAlert: () => {
         applyState((s) => ({ ...s, lowStockAlertedAt: null }));
         // An explicit reset also cancels any latch still queued for
@@ -1806,6 +1843,7 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
     setTimezone: denyReadOnly,
     setLowStockThreshold: denyReadOnly,
     updateReminders: denyReadOnly,
+    updateWeather: denyReadOnly,
     resetLowStockAlert: denyReadOnly,
     importData: denyReadOnly,
     setRule: denyReadOnly,

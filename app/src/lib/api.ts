@@ -58,6 +58,8 @@ async function req<T>(
   }
 }
 
+import type { WeatherLocation, WeatherStatus } from '../../shared/weather.ts';
+
 /** Non-secret notification configuration reported by GET /api/health. */
 export interface HealthResponse {
   ok: boolean;
@@ -65,6 +67,10 @@ export interface HealthResponse {
     reminders?: boolean;
     attackAlerts?: boolean;
   };
+}
+
+export interface WeatherGeocodeResponse {
+  results: WeatherLocation[];
 }
 
 /**
@@ -97,6 +103,12 @@ function seg(value: string): string {
 
 export const api = {
   getHealth: () => req<HealthResponse>('GET', '/api/health'),
+
+  /** Safe runtime weather status (never upstream details). */
+  getWeather: () => req<WeatherStatus>('GET', '/api/weather'),
+  /** City search. POST keeps the searched city out of request-log URLs. */
+  geocodeWeather: (query: string) =>
+    req<WeatherGeocodeResponse>('POST', '/api/weather/geocode', { query }),
 
   exportAll: () => req<ExportEnvelope>('GET', '/api/export'),
   importAll: (payload: unknown) =>

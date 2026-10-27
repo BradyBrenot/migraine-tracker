@@ -1,3 +1,5 @@
+import type { WeatherSettings } from '../../shared/weather.ts';
+
 export interface PainPoint {
   ts: string; // ISO timestamp
   level: number; // 0-10
@@ -97,6 +99,8 @@ export interface ReminderSettings {
   lowStock: boolean;
   checkIn: boolean;
   exercise: boolean;
+  /** Optional weather pressure-drop forecasts (default true; separate runtime feature). */
+  weather: boolean;
   /** Local waking window 'HH:MM'; end must be after start (no overnight). */
   wakingStart: string;
   wakingEnd: string;
@@ -128,6 +132,12 @@ export interface TrackerState {
   lowStockThreshold: number;
   /** Non-secret per-type reminder times/toggles/waking window. */
   reminders: ReminderSettings;
+  /**
+   * Optional Open-Meteo pressure-drop forecast settings (non-secret saved city
+   * coordinates + threshold). Disabled by default; runtime forecast data and
+   * episode/delivery bookkeeping are never part of this state.
+   */
+  weather: WeatherSettings;
   /**
    * One-shot low-stock alert latch: the ISO instant the user-visible alert
    * fired, or null while armed. Reminder-safe non-secret setting — re-arms

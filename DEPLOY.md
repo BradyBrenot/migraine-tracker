@@ -157,6 +157,44 @@ Behavior to expect:
   **not** proof the phone displayed the notification (Do Not Disturb, battery
   optimization, revoked topic permissions, and client sync delays all matter).
 
+### Weather pressure-drop alerts (optional)
+
+Weather is an optional feature, **disabled by default**; nothing is fetched and
+no notification is scheduled until it is enabled in Settings with a saved city.
+
+- **Setup:** Settings → Weather → search for a city, choose a result, set the
+  pressure-drop threshold (default `5` hPa), enable the toggle, save. The city
+  search text and the chosen coordinates are sent to Open-Meteo
+  (`geocoding-api.open-meteo.com` / `api.open-meteo.com`). There is no API key,
+  no new environment variable, and nothing to add to the Compose service.
+  Attribution: [open-meteo.com](https://open-meteo.com/).
+- **Scope:** only pressure drops are assessed. A warning means the hourly
+  mean-sea-level pressure falls by at least the configured threshold between the
+  current baseline and the following 24 hours. `5` hPa is a configurable
+  starting point, not a validated clinical threshold. Temperature, humidity and
+  current pressure are informational only and never trigger an alert. There is
+  no medical prediction or risk score.
+- **Notifications:** at most one ntfy reminder per pressure-drop episode. It
+  obeys the personal reminder master switch, the "Weather pressure drops"
+  per-type switch, and the configured waking hours, so it can be delayed or
+  suppressed by them. The message contains the drop magnitude and target time
+  only, not the saved city.
+- **Failure behavior:** if an upstream refresh fails, the Home card keeps the
+  last successful forecast (explicitly marked as possibly out of date) or shows
+  a calm error message. A stale, loading, or errored forecast never sends an
+  ntfy message; the pending episode waits for a successful refresh and expires
+  when its target time has passed.
+- **Privacy/backup:** only the saved city and threshold are settings (they are
+  included in `/api/export` and nightly backups). Forecast and episode/delivery
+  state stay internal and are excluded from exports and backups.
+- **Upstream terms/privacy:** the free Open-Meteo API is non-commercial and
+  rate-limited, and its data is provided under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Per
+  [Open-Meteo's terms](https://open-meteo.com/en/terms), troubleshooting logs
+  may contain the requested coordinates and are deleted after 90 days.
+- Delivery keeps the existing at-least-once caveat: a crash between ntfy
+  accepting the weather message and the app recording success can resend it.
+
 ### Attack start/end alerts
 
 Subscribe a second device (or the partner's phone) to the `NTFY_ATTACK_URL`

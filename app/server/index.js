@@ -27,6 +27,7 @@ import { attackViewUrl, resolveAttackConfig, resolveReminderConfig } from './rem
 import { createNtfyTransport } from './ntfy.js';
 import { createReminderEngine } from './reminders.js';
 import { startReminderScheduler } from './scheduler.js';
+import { createWeatherClient, createWeatherService } from './weather.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR ?? join(__dirname, 'data');
@@ -62,6 +63,21 @@ if (reminderConfig.enabled && attackConfig.enabled
 
 let reminderScheduler = null;
 let reminderEngine = null;
+
+// Optional weather: the polling service always exists so the Home card works
+// without ntfy, but it no-ops (zero upstream fetches) while the feature is
+// disabled or has no saved city. A successful refresh wakes the reminder
+// scheduler so a new pressure-drop episode can deliver promptly. No new env
+// vars/secrets.
+const weatherClient = createWeatherClient({});
+const weatherService = createWeatherService({
+  db,
+  client: weatherClient,
+  log: console.warn,
+  onRefresh: () => {
+    void reminderScheduler?.tick();
+  },
+});
 if (reminderConfig.enabled || attackConfig.enabled) {
   reminderEngine = createReminderEngine({
     db,
@@ -81,6 +97,8 @@ if (reminderConfig.enabled || attackConfig.enabled) {
         publicAppUrl: attackViewUrl(attackConfig.publicAppUrl),
       })
       : null,
+    // Synchronous latest-weather getter: the engine never fetches in a tick.
+    getWeather: () => weatherService.getStatus(),
     now: () => Date.now(),
     log: console.warn,
   });
@@ -102,11 +120,20 @@ const app = await buildApp({
   distDir: DIST_DIR,
   logger: true,
   onAttackChange,
+  weather: weatherService,
+  onWeatherChange: () => {
+    void weatherService.invalidate();
+  },
   notificationStatus: {
     reminders: reminderConfig.enabled,
     attackAlerts: attackConfig.enabled,
   },
 });
+
+// Always run the weather poller (GUI needs it without ntfy). It no-ops while
+// disabled/unconfigured; `invalidate()` after settings changes refreshes
+// immediately, and the ~15 minute interval is the fallback.
+weatherService.start();
 
 // ── nightly JSON backup dump ─────────────────────────────────────────
 // Writes a full export to <DATA_DIR>/backups/migraine-YYYY-MM-DD.json once
@@ -127,6 +154,7 @@ app.listen({ port: PORT, host: '0.0.0.0' }).then(() => {
 
 const shutdown = async () => {
   try {
+    await weatherService.stop();
     await reminderScheduler?.stop();
   } finally {
     await app.close();

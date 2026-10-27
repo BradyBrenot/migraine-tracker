@@ -20,6 +20,10 @@ import {
   normalizeReminderSettings, preventiveDue, preventiveOccurrenceKey,
   stockOccurrenceKey, transientWindow,
 } from '../shared/reminders.ts';
+import {
+  WEATHER_WARNING_LEAD, WEATHER_WARNING_TITLE,
+  normalizeWeatherSettings, weatherOccurrenceKey, weatherSignature,
+} from '../shared/weather.ts';
 
 const PREVENTIVE_MEDS = [
   { id: 'emgality', name: 'Emgality' },
@@ -61,6 +65,7 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 
 export function createReminderEngine({
   db, transport, attackTransport = null, now = () => Date.now(), log = () => {},
+  getWeather = null,
 } = {}) {
   // At least one topic is required; the other may be null (an attack-only or
   // personal-only engine). Personal rows are left pending (never sent, never
@@ -84,10 +89,26 @@ export function createReminderEngine({
       : DEFAULT_LOW_STOCK_THRESHOLD;
     return {
       reminders: normalizeReminderSettings(raw.reminders),
+      weather: normalizeWeatherSettings(raw.weather),
       timeZone,
       threshold,
       planned: isPlainObject(raw.planned) ? raw.planned : {},
     };
+  }
+
+  /**
+   * Latest weather runtime snapshot from the injected getter. Synchronous by
+   * contract: the engine never performs network I/O inside a tick. Unknown or
+   * throwing getters read as null (no weather conclusion).
+   */
+  function readWeatherSnapshot() {
+    if (typeof getWeather !== 'function') return null;
+    try {
+      const value = getWeather();
+      return isPlainObject(value) ? value : null;
+    } catch {
+      return null;
+    }
   }
 
   function buildContext(nowMs, settings) {
@@ -99,6 +120,7 @@ export function createReminderEngine({
       settings,
       timeZone: settings.timeZone,
       day: localDayKey(nowMs, settings.timeZone),
+      weather: readWeatherSnapshot(),
       meds,
       dayStates: db.prepare('SELECT day, status FROM day_states').all(),
       workouts: db.prepare('SELECT performed_at, kind FROM workouts').all()
@@ -152,6 +174,54 @@ export function createReminderEngine({
     db.prepare(`INSERT INTO reminder_state (key, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
       .run(LOW_STATE_KEY, JSON.stringify(state), nowIso);
+  }
+
+  // ── weather episode state (internal, never exported) ───────────────
+  // Stored alongside the low-stock latch in reminder_state. The signature
+  // (rounded coords + threshold + drop direction) makes identical settings
+  // stable across restarts while a changed city/threshold deliberately rearms.
+  const WEATHER_STATE_KEY = 'weather';
+
+  function emptyWeatherState() {
+    return {
+      phase: 'armed', signature: null, episodeKey: null, episodeStartedAt: null,
+      targetTimeMs: null,
+    };
+  }
+
+  function readWeatherState() {
+    const row = db.prepare('SELECT value FROM reminder_state WHERE key = ?')
+      .get(WEATHER_STATE_KEY);
+    if (!row) return emptyWeatherState();
+    try {
+      const value = JSON.parse(row.value);
+      if (isPlainObject(value) && (value.phase === 'armed' || value.phase === 'warning')) {
+        return {
+          phase: value.phase,
+          signature: typeof value.signature === 'string' ? value.signature : null,
+          episodeKey: typeof value.episodeKey === 'string' ? value.episodeKey : null,
+          episodeStartedAt: typeof value.episodeStartedAt === 'string'
+            ? value.episodeStartedAt : null,
+          // Legacy/malformed internal state has no target: treat it as unknown
+          // (null) instead of trusting it for the missed-clear check.
+          targetTimeMs: typeof value.targetTimeMs === 'number'
+            && Number.isFinite(value.targetTimeMs) ? value.targetTimeMs : null,
+        };
+      }
+    } catch {
+      // Corrupt internal state: treat as armed; the next warning re-alerts.
+    }
+    return emptyWeatherState();
+  }
+
+  function writeWeatherState(state, nowIso) {
+    db.prepare(`INSERT INTO reminder_state (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+      .run(WEATHER_STATE_KEY, JSON.stringify(state), nowIso);
+  }
+
+  function weatherStateIsArmed(state) {
+    return state.phase === 'armed' && state.signature === null && state.episodeKey === null;
   }
 
   // ── occurrence bookkeeping ─────────────────────────────────────────
@@ -378,6 +448,96 @@ export function createReminderEngine({
     // Unknown stock: never alert. Existing pending rows are left in place but
     // send-time relevance returns false, so they cannot deliver.
 
+    // Weather pressure-drop episode (optional; one notification per episode).
+    // Rules:
+    // - disabled/unconfigured: clear state and pending rows (deliberate config).
+    // - loading/error/stale/unknown: leave state and pending rows intact; a
+    //   transient upstream failure must never destroy or burn an episode.
+    // - ready + a warning with a finite target: create a stable episode key on
+    //   clear->warning (or when the signature changed) and ensure exactly one
+    //   pending occurrence. If the recorded target has already passed without a
+    //   ready clear ever being observed (server/app downtime, master switch off,
+    //   or an upstream gap) and the new warning target is later, the old
+    //   forecast episode completed unobserved: that is a NEW episode and must
+    //   notify again. A target that merely moves before the recorded target
+    //   passes stays one episode and never re-alerts.
+    // - ready + no warning: clear, skip pending rows, and rearm.
+    // - ready + malformed warning: leave state and pending rows intact (unknown
+    //   data must not create, destroy, or burn an episode).
+    const weatherSettings = settings.weather;
+    let weatherState = readWeatherState();
+    const weatherSnapshot = ctx.weather;
+    const weatherWarning = weatherSnapshot && isPlainObject(weatherSnapshot.warning)
+      ? weatherSnapshot.warning
+      : null;
+    const weatherReady = !!weatherSnapshot
+      && weatherSnapshot.status === 'ready'
+      && weatherSnapshot.stale !== true;
+    if (!weatherSettings.enabled || !weatherSettings.location) {
+      if (!weatherStateIsArmed(weatherState)) {
+        weatherState = emptyWeatherState();
+        writeWeatherState(weatherState, nowIso);
+      }
+      skipped += skipPending("AND type = 'weather'", [], 'condition_gone', nowIso);
+    } else if (
+      weatherReady
+      && weatherWarning
+      && typeof weatherWarning.targetTimeMs === 'number'
+      && Number.isFinite(weatherWarning.targetTimeMs)
+    ) {
+      const signature = weatherSignature(weatherSettings);
+      const warningTargetMs = weatherWarning.targetTimeMs;
+      const recordedTargetMs = weatherState.targetTimeMs;
+      const sameEpisode = weatherState.phase === 'warning'
+        && weatherState.signature === signature
+        && !!weatherState.episodeKey;
+      // The recorded target is over and the forecast now warns for a LATER
+      // target: the earlier episode completed while no clear was observed.
+      const missedClear = sameEpisode
+        && Number.isFinite(recordedTargetMs)
+        && warningTargetMs > recordedTargetMs
+        && recordedTargetMs <= nowMs;
+      if (!sameEpisode || missedClear) {
+        weatherState = {
+          phase: 'warning',
+          signature,
+          episodeKey: nowIso,
+          episodeStartedAt: nowIso,
+          targetTimeMs: warningTargetMs,
+        };
+        writeWeatherState(weatherState, nowIso);
+      } else if (recordedTargetMs !== warningTargetMs) {
+        // Same episode with a moved forecast target: remember the new target
+        // so a future passed target can be recognized without re-alerting now.
+        weatherState = { ...weatherState, targetTimeMs: warningTargetMs };
+        writeWeatherState(weatherState, nowIso);
+      }
+      const currentKey = weatherOccurrenceKey(weatherState.signature, weatherState.episodeKey);
+      if (reminders.weather) {
+        generated += ensurePending({
+          key: currentKey,
+          type: 'weather',
+          scheduledAt: nowIso,
+          nowIso,
+        });
+      }
+      skipped += skipPending(
+        "AND type = 'weather' AND key <> ?",
+        [currentKey], 'condition_gone', nowIso,
+      );
+    } else if (weatherReady && !weatherWarning) {
+      // Ready and no warning: the condition is gone. Clear + rearm so a later
+      // drop is a new episode.
+      if (!weatherStateIsArmed(weatherState)) {
+        weatherState = emptyWeatherState();
+        writeWeatherState(weatherState, nowIso);
+      }
+      skipped += skipPending("AND type = 'weather'", [], 'condition_gone', nowIso);
+    }
+    // Otherwise (no snapshot, loading, error, stale, malformed warning,
+    // unconfigured status): state/pending stay as they are and send-time
+    // relevance blocks delivery.
+
     // Daily check-in: one occurrence per local day; transient grace window.
     if (reminders.checkIn) {
       const window = transientWindow(
@@ -443,7 +603,43 @@ export function createReminderEngine({
     if (type === 'stock') return reminders.lowStock;
     if (type === 'checkin') return reminders.checkIn;
     if (type === 'exercise') return reminders.exercise;
+    if (type === 'weather') return reminders.weather;
     return false;
+  }
+
+  /**
+   * Send-time weather relevance.
+   * - 'skip': the signature/episode no longer matches, the warning is gone, or
+   *   the forecast target time has passed (terminal condition_gone).
+   * - 'wait': the forecast is unknown/loading/error/stale. The row is not sent
+   *   and NOT burned; a transient upstream failure must not destroy a pending
+   *   episode. A later successful refresh makes it deliverable again.
+   * - 'send': same signature, active warning, target still in the future.
+   */
+  function weatherRelevance(row, ctx) {
+    const reminders = ctx.settings.reminders;
+    if (!reminders.weather) return 'wait';
+    const weatherSettings = ctx.settings.weather;
+    if (!weatherSettings.enabled || !weatherSettings.location) return 'skip';
+    const state = readWeatherState();
+    if (state.phase !== 'warning' || !state.episodeKey || !state.signature) return 'skip';
+    if (state.signature !== weatherSignature(weatherSettings)) return 'skip';
+    if (weatherOccurrenceKey(state.signature, state.episodeKey) !== row.key) return 'skip';
+    const snapshot = ctx.weather;
+    if (
+      !snapshot
+      || snapshot.status !== 'ready'
+      || snapshot.stale === true
+      || snapshot.status === 'error'
+    ) {
+      return 'wait';
+    }
+    const warning = snapshot.warning;
+    if (!isPlainObject(warning)) return 'skip';
+    const targetTimeMs = warning.targetTimeMs;
+    if (typeof targetTimeMs !== 'number' || !Number.isFinite(targetTimeMs)) return 'skip';
+    if (targetTimeMs <= ctx.nowMs) return 'skip';
+    return 'send';
   }
 
   function occurrenceRelevant(row, ctx) {
@@ -495,6 +691,7 @@ export function createReminderEngine({
       });
       return assessment.suppressed === null;
     }
+    if (row.type === 'weather') return weatherRelevance(row, ctx) === 'send';
     return false;
   }
 
@@ -617,6 +814,27 @@ export function createReminderEngine({
         body: 'Log how you feel today: Well, Off, or Attack. One tap is enough.',
       };
     }
+    if (row.type === 'weather') {
+      const warning = ctx.weather && isPlainObject(ctx.weather.warning)
+        ? ctx.weather.warning : null;
+      // Privacy: the notification carries only drop magnitude + target time.
+      // The saved city never leaves the app for ntfy (the message may pass
+      // through a hosted ntfy server), so no place/location is included.
+      const detail = warning
+        && typeof warning.dropHpa === 'number'
+        && Number.isFinite(warning.dropHpa)
+        && typeof warning.targetTimeMs === 'number'
+        && Number.isFinite(warning.targetTimeMs)
+        ? ` About ${Math.round(warning.dropHpa * 10) / 10} hPa lower by `
+          + `${formatInstant(new Date(warning.targetTimeMs).toISOString(), timeZone)}.`
+        : '';
+      return {
+        title: WEATHER_WARNING_TITLE,
+        // Cautious wording only: no likelihood/prediction/risk language.
+        body: `${WEATHER_WARNING_LEAD}${detail} `
+          + 'This is a configurable alert, not a medical prediction.',
+      };
+    }
     const assessment = assessExercise({
       workouts: ctx.workouts,
       dayStates: ctx.dayStates,
@@ -710,7 +928,20 @@ export function createReminderEngine({
           // persistent condition resumes when the user re-enables it.
           continue;
         }
-        if (!occurrenceRelevant(row, ctx)) {
+        if (row.type === 'weather') {
+          const relevance = weatherRelevance(row, ctx);
+          if (relevance === 'wait') {
+            // Unknown/loading/error/stale forecast: not deliverable, but the
+            // pending episode is preserved for a later successful refresh.
+            continue;
+          }
+          if (relevance === 'skip') {
+            skipped += skipPending(
+              'AND key = ?', [row.key], 'condition_gone', nowIso,
+            );
+            continue;
+          }
+        } else if (!occurrenceRelevant(row, ctx)) {
           skipped += skipPending(
             'AND key = ?', [row.key], 'condition_gone', nowIso,
           );

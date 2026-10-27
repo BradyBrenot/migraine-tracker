@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  Upload, Trash2, FileDown, FileUp, AlertTriangle, Pill, Plus,
+  Upload, Trash2, FileDown, FileUp, AlertTriangle, Pill, Plus, CloudRain,
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { ApiError, api } from '@/lib/api';
@@ -16,6 +16,17 @@ import {
 } from '../../shared/reminders.ts';
 import { parseBackup } from '../../shared/backup.ts';
 import type { BackupRecordKey, ParsedBackup } from '../../shared/backup.ts';
+import {
+  DEFAULT_WEATHER_SETTINGS,
+  MAX_PRESSURE_DROP_THRESHOLD_HPA,
+  MIN_PRESSURE_DROP_THRESHOLD_HPA,
+  PRESSURE_DROP_THRESHOLD_STEP_HPA,
+  formatWeatherLocation,
+  normalizeWeatherSettings,
+  weatherSettingsErrors,
+  type WeatherLocation,
+  type WeatherSettings,
+} from '../../shared/weather.ts';
 import type { ReminderSettings, TrackerState } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -145,6 +156,12 @@ export default function Settings() {
   const [baselineAt, setBaselineAt] = useState<string | null>(null);
   /** null = follow the persisted settings; otherwise an unsaved form draft. */
   const [reminderDraft, setReminderDraft] = useState<ReminderSettings | null>(null);
+  /** null = follow the persisted weather settings; otherwise an unsaved draft. */
+  const [weatherDraft, setWeatherDraft] = useState<WeatherSettings | null>(null);
+  const [weatherQuery, setWeatherQuery] = useState('');
+  const [weatherResults, setWeatherResults] = useState<WeatherLocation[]>([]);
+  const [weatherSearchBusy, setWeatherSearchBusy] = useState(false);
+  const [weatherSearchError, setWeatherSearchError] = useState<string | null>(null);
   const [attackAlertStatus, setAttackAlertStatus] =
     useState<AttackAlertStatus>('checking');
   const now = useNow();
@@ -213,6 +230,38 @@ export default function Settings() {
 
   function editReminders(patch: Partial<ReminderSettings>) {
     setReminderDraft({ ...reminderForm, ...patch });
+  }
+
+  const savedWeather = normalizeWeatherSettings(state.weather ?? DEFAULT_WEATHER_SETTINGS);
+  const weatherForm = weatherDraft ?? savedWeather;
+  const weatherErrors = weatherSettingsErrors(weatherForm);
+  const weatherDirty = JSON.stringify(weatherForm) !== JSON.stringify(savedWeather);
+  const savedWeatherPlace = formatWeatherLocation(savedWeather.location);
+
+  function editWeather(patch: Partial<WeatherSettings>) {
+    setWeatherDraft({ ...weatherForm, ...patch });
+  }
+
+  async function searchCities() {
+    const query = weatherQuery.trim();
+    if (query.length < 2) {
+      setWeatherSearchError('Enter at least 2 characters to search.');
+      return;
+    }
+    setWeatherSearchBusy(true);
+    setWeatherSearchError(null);
+    try {
+      const response = await api.geocodeWeather(query);
+      const results = Array.isArray(response?.results) ? response.results : [];
+      setWeatherResults(results);
+      if (results.length === 0) setWeatherSearchError('No matching cities found.');
+    } catch {
+      // Non-blocking, fixed text. Never echo upstream details.
+      setWeatherResults([]);
+      setWeatherSearchError('City search is unavailable right now.');
+    } finally {
+      setWeatherSearchBusy(false);
+    }
   }
 
   const tzValue = tzDraft ?? state.timezone;
@@ -780,6 +829,193 @@ export default function Settings() {
         )}
       </section>
 
+      {/* weather (optional pressure-drop forecast) */}
+      <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
+        <h2 className="flex items-center gap-2 text-base font-bold">
+          <CloudRain className="h-4 w-4" /> Weather
+        </h2>
+        <p className="mt-1 text-sm text-slate-400">
+          Optional Open-Meteo pressure-drop forecast. Disabled by default; the app
+          keeps working without it, and saving a city sends the search text and
+          coordinates to Open-Meteo (no API key). Attribution:{' '}
+          <a
+            href="https://open-meteo.com/"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-slate-200"
+          >
+            open-meteo.com
+          </a>
+          .
+        </p>
+
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2">
+          <div>
+            <Label htmlFor="weather-enabled" className="text-slate-200">
+              Enable weather warnings
+            </Label>
+            <p className="text-xs text-slate-400">
+              Pressure drops only. Temperature and humidity are informational.
+            </p>
+          </div>
+          <Switch
+            id="weather-enabled"
+            aria-label="Enable weather warnings"
+            checked={weatherForm.enabled}
+            onCheckedChange={(checked) => editWeather({ enabled: checked })}
+          />
+        </div>
+
+        <div className="mt-3 rounded-lg border border-slate-800 px-3 py-2">
+          <p className="text-sm text-slate-200">
+            City:{' '}
+            <span className="font-semibold">
+              {savedWeatherPlace || 'none saved'}
+            </span>
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Input
+              aria-label="Search for a city"
+              placeholder="e.g. Boston"
+              className="h-9 max-w-xs"
+              value={weatherQuery}
+              onChange={(e) => setWeatherQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void searchCities();
+                }
+              }}
+            />
+            <Button
+              variant="outline"
+              className="h-9"
+              onClick={() => void searchCities()}
+              disabled={weatherSearchBusy}
+            >
+              {weatherSearchBusy ? 'Searching…' : 'Search'}
+            </Button>
+            {weatherForm.location && (
+              <Button
+                variant="outline"
+                className="h-9"
+                onClick={() => editWeather({ location: null })}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+          {weatherSearchError && (
+            <p role="alert" className="mt-2 text-xs text-slate-300">
+              {weatherSearchError}
+            </p>
+          )}
+          {weatherResults.length > 0 && (
+            <ul aria-label="City search results" className="mt-2 space-y-1">
+              {weatherResults.map((result) => (
+                <li key={`${result.id}-${result.latitude}-${result.longitude}`}>
+                  <button
+                    type="button"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-sm hover:bg-slate-800"
+                    onClick={() => {
+                      editWeather({ location: result });
+                      setWeatherResults([]);
+                      setWeatherQuery('');
+                      setWeatherSearchError(null);
+                    }}
+                  >
+                    <span className="font-semibold text-slate-200">{result.name}</span>
+                    <span className="ml-2 text-xs text-slate-400">
+                      {[result.admin1, result.country].filter(Boolean).join(', ')}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {weatherForm.location && weatherForm.location !== savedWeather.location && (
+            <p className="mt-2 text-xs text-amber-300">
+              Unsaved city:{' '}
+              {formatWeatherLocation(weatherForm.location)}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="weather-threshold">Pressure drop threshold (hPa)</Label>
+            <Input
+              id="weather-threshold"
+              aria-label="Pressure drop threshold (hPa)"
+              type="number"
+              min={MIN_PRESSURE_DROP_THRESHOLD_HPA}
+              max={MAX_PRESSURE_DROP_THRESHOLD_HPA}
+              step={PRESSURE_DROP_THRESHOLD_STEP_HPA}
+              inputMode="decimal"
+              aria-invalid={weatherErrors.some((e) => e.includes('pressureDropThresholdHpa'))}
+              className="h-9 w-28"
+              value={weatherForm.pressureDropThresholdHpa}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (!Number.isFinite(value)) return;
+                editWeather({ pressureDropThresholdHpa: value });
+              }}
+            />
+          </div>
+          <p className="max-w-sm text-xs text-slate-400">
+            5 hPa is a configurable starting point, not a validated clinical
+            cutoff. Only drops are checked; no rise alerts.
+          </p>
+        </div>
+
+        <p className="mt-3 text-xs text-slate-400">
+          Pressure drops may be a trigger for some people — this is not a medical
+          prediction or a likelihood score, and it never changes your logging.
+          Reminders honor the weather per-type switch, the master switch, and
+          waking hours, and send at most once per forecast episode.
+        </p>
+
+        {weatherErrors.length > 0 && (
+          <div role="alert" className="mt-3 rounded-lg bg-rose-950/50 px-3 py-2 text-xs text-rose-200">
+            {weatherErrors.map((error) => <p key={error}>{error}</p>)}
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button
+            disabled={weatherErrors.length > 0 || !weatherDirty}
+            onClick={() => {
+              const errors = store.updateWeather(weatherForm);
+              if (errors.length) {
+                toast.error('Weather settings not saved', {
+                  description: errors.join('; '),
+                });
+                return;
+              }
+              setWeatherDraft(null);
+              setWeatherResults([]);
+              setWeatherSearchError(null);
+              toast.success('Weather settings saved');
+            }}
+          >
+            Save weather settings
+          </Button>
+          {weatherDirty && weatherErrors.length === 0 && (
+            <button
+              type="button"
+              className="text-xs text-slate-400 underline underline-offset-2 hover:text-slate-200"
+              onClick={() => {
+                setWeatherDraft(null);
+                setWeatherResults([]);
+                setWeatherSearchError(null);
+              }}
+            >
+              Discard changes
+            </button>
+          )}
+        </div>
+      </section>
+
       {/* reminders */}
       <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
         <h2 className="text-base font-bold">Reminders</h2>
@@ -821,6 +1057,7 @@ export default function Settings() {
             ['lowStock', 'Low Nurtec stock', 'Once per low-stock episode'],
             ['checkIn', 'Daily check-in', 'When no Well/Off/Attack is logged'],
             ['exercise', 'Exercise', 'When this Sunday-week is behind goals'],
+            ['weather', 'Weather pressure drops', 'Once per forecast episode, if weather is set up'],
           ] as const).map(([key, label, hint]) => (
             <div
               key={key}

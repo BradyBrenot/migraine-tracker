@@ -164,6 +164,7 @@ function browserExport(overrides: Record<string, unknown> = {}) {
     lowStockThreshold: 2,
     lowStockAlertedAt: null,
     reminders: { ...DEFAULT_REMINDER_SETTINGS },
+    weather: { enabled: false, location: null, pressureDropThresholdHpa: 5 },
     seeded: true,
     ...overrides,
   };
@@ -183,6 +184,7 @@ function makeState(partial: Partial<TrackerState> = {}): TrackerState {
     timezone: 'UTC',
     lowStockThreshold: 2,
     reminders: DEFAULT_REMINDER_SETTINGS,
+    weather: { enabled: false, location: null, pressureDropThresholdHpa: 5 },
     lowStockAlertedAt: null,
     seeded: false,
     ...partial,

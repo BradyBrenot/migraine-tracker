@@ -57,6 +57,7 @@ const REMINDERS = {
   lowStock: true,
   checkIn: true,
   exercise: true,
+  weather: true,
   wakingStart: '09:00',
   wakingEnd: '21:00',
   checkInTime: '18:00',

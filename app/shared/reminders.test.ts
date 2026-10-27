@@ -48,13 +48,14 @@ describe('DEFAULT_REMINDER_SETTINGS', () => {
       lowStock: true,
       checkIn: true,
       exercise: true,
+      weather: true,
       wakingStart: '09:00',
       wakingEnd: '21:00',
       checkInTime: '18:00',
       exerciseTime: '18:30',
       graceMinutes: 120,
     });
-    expect(Object.keys(DEFAULT_REMINDER_SETTINGS)).toHaveLength(10);
+    expect(Object.keys(DEFAULT_REMINDER_SETTINGS)).toHaveLength(11);
     expect(reminderSettingsErrors(DEFAULT_REMINDER_SETTINGS)).toEqual([]);
     expect(reservedReminderSettingKeys(DEFAULT_REMINDER_SETTINGS)).toEqual([]);
 
@@ -709,6 +710,40 @@ describe('reminder settings validation and normalization', () => {
     // A truly partial object fills every omitted field from the defaults.
     expect(normalizeReminderSettings({ lowStock: false }))
       .toEqual({ ...DEFAULT_REMINDER_SETTINGS, lowStock: false });
+  });
+
+  it('accepts a legacy reminder object without weather and defaults it on', () => {
+    // Pre-weather clients/backups omit the toggle entirely: this must stay valid.
+    const legacy = {
+      enabled: true,
+      preventive: false,
+      lowStock: true,
+      checkIn: false,
+      exercise: true,
+      wakingStart: '09:00',
+      wakingEnd: '21:00',
+      checkInTime: '18:00',
+      exerciseTime: '18:30',
+      graceMinutes: 90,
+    };
+    expect('weather' in legacy).toBe(false);
+    expect(reminderSettingsErrors(legacy)).toEqual([]);
+
+    const normalized = normalizeReminderSettings(legacy);
+    expect(normalized.weather).toBe(true);
+    expect(normalized).toEqual({ ...DEFAULT_REMINDER_SETTINGS, ...legacy, weather: true });
+
+    // A present but non-boolean weather value is still rejected, and existing
+    // required toggles are never weakened.
+    expect(reminderSettingsErrors({ ...DEFAULT_REMINDER_SETTINGS, weather: 'yes' }))
+      .toEqual(['weather must be true or false']);
+    expect(reminderSettingsErrors({ ...DEFAULT_REMINDER_SETTINGS, weather: null }))
+      .toEqual(['weather must be true or false']);
+    for (const key of ['enabled', 'preventive', 'lowStock', 'checkIn', 'exercise'] as const) {
+      const legacyMissing = { ...DEFAULT_REMINDER_SETTINGS } as Record<string, unknown>;
+      delete legacyMissing[key];
+      expect(reminderSettingsErrors(legacyMissing), key).toEqual([`${key} must be true or false`]);
+    }
   });
 
   it('falls back independently for invalid booleans, times, and grace', () => {

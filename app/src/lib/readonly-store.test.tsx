@@ -150,6 +150,7 @@ function writerState(): TrackerState {
     timezone: 'UTC',
     lowStockThreshold: 2,
     reminders: DEFAULT_REMINDER_SETTINGS,
+    weather: { enabled: false, location: null, pressureDropThresholdHpa: 5 },
     lowStockAlertedAt: null,
     seeded: false,
   };
@@ -425,6 +426,7 @@ describe('ReadOnlyStoreProvider', () => {
       ['setTimezone', () => store.setTimezone('UTC')],
       ['setLowStockThreshold', () => store.setLowStockThreshold(2)],
       ['updateReminders', () => store.updateReminders({})],
+      ['updateWeather', () => store.updateWeather({ enabled: true })],
       ['resetLowStockAlert', () => store.resetLowStockAlert()],
       ['importData', () => store.importData([], [])],
       ['setRule', () => store.setRule('nurtec', 15, 30)],

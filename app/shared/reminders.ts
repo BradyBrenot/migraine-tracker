@@ -37,6 +37,7 @@ export const DEFAULT_REMINDER_SETTINGS: ReminderSettings = {
   lowStock: true,
   checkIn: true,
   exercise: true,
+  weather: true,
   wakingStart: '09:00',
   wakingEnd: '21:00',
   checkInTime: '18:00',
@@ -97,6 +98,13 @@ export function reminderSettingsErrors(value: unknown): string[] {
   for (const key of ['enabled', 'preventive', 'lowStock', 'checkIn', 'exercise'] as const) {
     if (typeof value[key] !== 'boolean') errors.push(`${key} must be true or false`);
   }
+  // `weather` was added after the first reminder payloads shipped. It stays
+  // optional on input so older clients and legacy backups/rows still validate
+  // (normalizeReminderSettings fills the true default), but a present value
+  // must be a boolean — a malformed toggle is never silently accepted.
+  if (value.weather !== undefined && typeof value.weather !== 'boolean') {
+    errors.push('weather must be true or false');
+  }
   for (const key of ['wakingStart', 'wakingEnd', 'checkInTime', 'exerciseTime'] as const) {
     if (!isValidTimeOfDay(value[key])) errors.push(`${key} must be a 24-hour HH:MM time`);
   }
@@ -135,7 +143,7 @@ export function normalizeReminderSettings(value: unknown): ReminderSettings {
   const out: ReminderSettings = { ...DEFAULT_REMINDER_SETTINGS };
   if (!isPlainObject(value)) return out;
 
-  for (const key of ['enabled', 'preventive', 'lowStock', 'checkIn', 'exercise'] as const) {
+  for (const key of ['enabled', 'preventive', 'lowStock', 'checkIn', 'exercise', 'weather'] as const) {
     if (typeof value[key] === 'boolean') out[key] = value[key];
   }
 

@@ -1,7 +1,12 @@
 import { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, AlertTriangle, CalendarPlus } from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { usageDaysInWindow, daysSinceLast } from '@/lib/usage';
+import {
+  NURTEC_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast, limitState,
+  medUnionDaysInWindow, painkillerBreakdown, painkillerMismatchNote,
+  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule,
+  usageDaysInWindow, type UsageRule,
+} from '@/lib/usage';
 import { useNow } from '@/lib/clock';
 import {
   MED_CATALOG, MED_MAP, allMedIds, medAbbr, medColor, medName,
@@ -93,59 +98,120 @@ interface BarSegment {
 
 /**
  * Concise accessible name for a calendar day cell: keep the configured-zone
- * date, then add the attack/medication counts the visual chips encode.
+ * date, then add the attack/medication counts the visual chips encode. Peak
+ * pain and preventive doses are included because the visual chips cannot spell
+ * them out.
  */
 function dayCellLabel(day: DayData, timeZone: string): string {
   const label = formatDayLabel(day.key, timeZone, true);
   const details: string[] = [];
   if (day.attacks.length > 0) {
-    details.push(`${day.attacks.length} attack${day.attacks.length === 1 ? '' : 's'}`);
+    const peak = day.maxPain >= 0 ? `, peak ${day.maxPain} of 10` : '';
+    details.push(`${day.attacks.length} attack${day.attacks.length === 1 ? '' : 's'}${peak}`);
+  }
+  if (day.attacks.some((a) => a.end === null)) {
+    // Ongoing has no motion cue, so the accessible name must say it.
+    details.push('attack ongoing');
   }
   if (day.meds.length > 0) {
     details.push(`${day.meds.length} medication${day.meds.length === 1 ? '' : 's'}`);
   }
+  const preventives = day.meds.filter((m) => MED_MAP[m.medId]?.kind === 'preventive');
+  if (preventives.length > 0) {
+    const names = [...new Set(preventives.map((m) => medName(m.medId)))].join(', ');
+    details.push(`preventive: ${names}`);
+  }
   return `${label}, ${details.length > 0 ? details.join(', ') : 'no attacks or medications'}`;
 }
 
-function MedLimitBar({ medId }: { medId: string }) {
-  const { state } = useStore();
-  const now = useNow();
-  const rule = state.rules[medId];
-  if (!rule) return null;
-  const used = usageDaysInWindow(state.meds, medId, rule.windowDays, now, state.timezone);
-  const pct = Math.min(100, (used / rule.limit) * 100);
-  const over = used > rule.limit;
-  const near = !over && used >= rule.limit - 3;
+/**
+ * Up to four med chips fit a phone-width day cell (two per row); anything
+ * beyond that collapses to "+n". Preventive chips are always kept, so
+ * truncation can never hide a scheduled preventive dose.
+ */
+const MAX_DAY_CHIPS = 4;
+
+/**
+ * The two compact decision cards that sit above the month grid. They are always
+ * side by side in ONE row (even at 360px) and are promoted with a coral ring
+ * while an attack is active.
+ */
+function DecisionCard({
+  medId, name, used, rule, detail, over, near, promoted, title,
+}: {
+  medId: string | null;
+  name: string;
+  used: number;
+  rule: UsageRule;
+  detail: string;
+  over: boolean;
+  near: boolean;
+  promoted: boolean;
+  title: string;
+}) {
+  // A zero limit means "any use is already over": an unused bar stays empty
+  // instead of showing a full, healthy-looking track.
+  const pct = rule.limit > 0
+    ? Math.min(100, (used / rule.limit) * 100)
+    : used > 0
+      ? 100
+      : 0;
   const barColor = over ? STATUS.danger : near ? STATUS.warn : STATUS.ok;
+  // The visible number/bar is compact by design (the detail line truncates), so
+  // the full state is exposed to assistive tech on the group itself.
+  const statusText = over ? 'over limit' : near ? 'near limit' : 'within limit';
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
-      <div className="flex items-baseline justify-between">
-        <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-200">
+    <div
+      role="group"
+      aria-label={`${name}: ${used} of ${rule.limit} allowed days in the last ${rule.windowDays} days, ${statusText}`}
+      title={title}
+      className={`min-w-0 rounded-xl border bg-slate-900 p-2.5 ${
+        promoted ? 'border-attack-border ring-1 ring-attack-border/70' : 'border-slate-800'
+      }`}
+    >
+      <div className="flex items-center gap-1.5">
+        {medId ? (
           <span
-            className="flex h-4 w-4 items-center justify-center rounded text-[9px] font-black"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-black"
             style={{ background: medColor(medId), color: textOn(medColor(medId)) }}
           >
             {medAbbr(medId)}
           </span>
-          {medName(medId)}
-        </span>
-        <span className="text-sm font-bold tabular-nums" style={{ color: over || near ? barColor : '#94a3b8' }}>
-          {used} / {rule.limit} days
-        </span>
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-slate-700 text-[10px] font-black text-slate-100"
+          >
+            PK
+          </span>
+        )}
+        <span className="truncate text-xs font-semibold text-slate-200">{name}</span>
       </div>
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800">
+      <div className="mt-1 flex items-baseline gap-1">
+        <span className="text-2xl font-black leading-none tabular-nums text-slate-100">
+          {used}
+        </span>
+        <span className="text-xs tabular-nums text-slate-400">/ {rule.limit} days</span>
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-800">
         <div
+          data-decision-bar=""
           className="h-full rounded-full transition-all"
           style={{ width: `${pct}%`, background: barColor }}
         />
       </div>
-      <div className="mt-1 text-[11px] text-slate-400">
-        rolling {rule.windowDays} days
-        {over && <span className="ml-1 font-semibold" style={{ color: STATUS.danger }}>— overuse risk!</span>}
+      <div className="mt-1 truncate text-[11px] text-slate-400" title={detail}>
+        {detail}
       </div>
+      {over && (
+        <div className="mt-0.5 text-[11px] font-semibold" style={{ color: STATUS.danger }}>
+          over limit
+        </div>
+      )}
     </div>
   );
 }
+
 
 function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (medId: string) => void }) {
   const { state } = useStore();
@@ -411,9 +477,32 @@ export default function CalendarPage() {
   );
   const monthName = monthNameFormatter.format(new Date(dayKeyStartMs(cursor, state.timezone)));
 
-  const overuseFlags = Object.entries(state.rules).filter(
-    ([id, r]) => usageDaysInWindow(state.meds, id, r.windowDays, now, state.timezone) >= r.limit - 3,
+  // Decision-card numbers. Both med groups resolve their persisted rules the
+  // same way every other screen does, so a partial import cannot produce NaN
+  // or an unexplained badge. Painkillers are a single MOH day budget: different
+  // painkillers on one day count once.
+  const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
+  const nurtecUsed = usageDaysInWindow(
+    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
   );
+  const painkillerRule = resolveSharedPainkillerRule(state.rules);
+  const painkillerUsed = medUnionDaysInWindow(
+    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
+  );
+  const painkillerNames = painkillerBreakdown(
+    state.meds, painkillerRule.windowDays, now, state.timezone,
+  ).map((entry) => medName(entry.medId));
+  const painkillerDetail = painkillerNames.length > 0
+    ? `last ${painkillerRule.windowDays}d · ${painkillerNames.join(' + ')}`
+    : `last ${painkillerRule.windowDays}d · none logged`;
+  const painkillerRulesMismatch = painkillerRulesDiffer(state.rules);
+  const nurtecUsage = limitState(nurtecUsed, nurtecRule.limit);
+  const painkillerUsage = limitState(painkillerUsed, painkillerRule.limit);
+  const nurtecOver = nurtecUsage === 'over';
+  const nurtecNear = nurtecUsage === 'near';
+  const painkillerOver = painkillerUsage === 'over';
+  const painkillerNear = painkillerUsage === 'near';
+  const intakeWatch = nurtecOver || nurtecNear || painkillerOver || painkillerNear;
 
   const monthBounds = useMemo(() => ({
     startMs: dayKeyStartMs(cursor, state.timezone),
@@ -443,45 +532,56 @@ export default function CalendarPage() {
   }, [parsedAttacks, cursor, year, month, monthBounds, state.timezone]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <h1 className="sr-only">Calendar</h1>
-      {/* ── med usage strip ─────────────────────────────────── */}
+      {/* ── two compact decision cards, one row, above the grid ── */}
       <section>
-        <h2 className="mb-2 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-400">
-          Medication limits
-          {overuseFlags.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <h2 className="text-xs font-bold uppercase tracking-wide text-slate-400">
+            Medication limits
+          </h2>
+          {intakeWatch && (
             <span
-              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold normal-case"
+              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold normal-case"
               style={{ background: '#E69F0022', color: STATUS.warn }}
             >
               <AlertTriangle className="h-3 w-3" /> watch your intake
             </span>
           )}
-        </h2>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          {MED_CATALOG.filter((m) => m.defaultRule).map((m) => (
-            <MedLimitBar key={m.id} medId={m.id} />
-          ))}
         </div>
-        <h2 className="mb-2 mt-4 text-sm font-bold uppercase tracking-wide text-slate-400">
-          Preventive schedule
-        </h2>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {MED_CATALOG.filter((m) => m.kind === 'preventive').map((m) => (
-            <PreventiveCard
-              key={m.id}
-              medId={m.id}
-              onSchedule={readOnly ? undefined : (id) => {
-                setScheduleMed(id);
-                setScheduleDate(state.planned[id] ?? '');
-              }}
-            />
-          ))}
+        <div className="grid grid-cols-2 gap-2">
+          <DecisionCard
+            medId="nurtec"
+            name="Nurtec"
+            used={nurtecUsed}
+            rule={nurtecRule}
+            detail={`last ${nurtecRule.windowDays}d · rolling`}
+            over={nurtecOver}
+            near={nurtecNear}
+            promoted={!!store.activeAttack}
+            title={`Nurtec: ${nurtecUsed} of ${nurtecRule.limit} allowed days in the last ${nurtecRule.windowDays} days`}
+          />
+          <DecisionCard
+            medId={null}
+            name="Painkillers"
+            used={painkillerUsed}
+            rule={painkillerRule}
+            detail={painkillerDetail}
+            over={painkillerOver}
+            near={painkillerNear}
+            promoted={!!store.activeAttack}
+            title={`Painkillers (Tylenol, Ibuprofen, Naproxen): ${painkillerUsed} of ${painkillerRule.limit} allowed days in the last ${painkillerRule.windowDays} days`}
+          />
         </div>
+        {painkillerRulesMismatch && (
+          <p className="mt-1.5 text-[11px] leading-snug text-slate-400">
+            {painkillerMismatchNote(readOnly, painkillerRule)}
+          </p>
+        )}
       </section>
 
       {/* ── month grid ──────────────────────────────────────── */}
-      <section className="rounded-2xl border border-slate-800 bg-slate-900 p-3 shadow-sm sm:p-4">
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-sm sm:p-4">
         <div className="mb-3 flex items-center justify-between">
           <button
             onClick={() => setCursor((c) => addMonths(c, -1))}
@@ -549,29 +649,46 @@ export default function CalendarPage() {
                         {Number(key.slice(8, 10))}
                       </span>
 
-                      {/* med letter chips */}
-                      {d.meds.length > 0 && (
-                        <div className="mt-auto flex flex-wrap gap-0.5 pt-0.5">
-                          {d.meds.slice(0, 5).map((m) => {
-                            const c = medColor(m.medId);
-                            return (
-                              <span
-                                key={m.id}
-                                className="flex h-[15px] min-w-[15px] items-center justify-center rounded px-0.5 text-[9px] font-black leading-none"
-                                style={{ background: c, color: textOn(c) }}
-                                title={medName(m.medId)}
-                              >
-                                {medAbbr(m.medId)}
+                      {/* med letter chips — preventive doses are pinned ahead
+                          of acute chips so truncation never hides them */}
+                      {d.meds.length > 0 && (() => {
+                        const preventiveChips = d.meds.filter(
+                          (m) => MED_MAP[m.medId]?.kind === 'preventive',
+                        );
+                        const acuteChips = d.meds.filter(
+                          (m) => MED_MAP[m.medId]?.kind !== 'preventive',
+                        );
+                        const shown = [
+                          ...preventiveChips,
+                          ...acuteChips.slice(
+                            0,
+                            Math.max(0, MAX_DAY_CHIPS - preventiveChips.length),
+                          ),
+                        ];
+                        const hidden = d.meds.length - shown.length;
+                        return (
+                          <div className="mt-auto flex flex-wrap gap-0.5 pt-0.5">
+                            {shown.map((m) => {
+                              const c = medColor(m.medId);
+                              return (
+                                <span
+                                  key={m.id}
+                                  className="flex h-5 min-w-5 items-center justify-center rounded px-0.5 text-xs font-bold leading-none"
+                                  style={{ background: c, color: textOn(c) }}
+                                  title={medName(m.medId)}
+                                >
+                                  {medAbbr(m.medId)}
+                                </span>
+                              );
+                            })}
+                            {hidden > 0 && (
+                              <span className="text-xs leading-none text-slate-400">
+                                +{hidden}
                               </span>
-                            );
-                          })}
-                          {d.meds.length > 5 && (
-                            <span className="text-[9px] leading-none text-slate-400">
-                              +{d.meds.length - 5}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                            )}
+                          </div>
+                        );
+                      })()}
                     </button>
                   );
                 })}
@@ -582,12 +699,14 @@ export default function CalendarPage() {
                 {week.bars.map((bar) => {
                   const color = painColor(bar.attack.peakPain);
                   const widthPct = ((bar.to - bar.from) / 7) * 100;
-                  return (
+                   return (
                     <div
                       key={bar.attack.id + wi}
-                      className={`absolute h-2.5 ${bar.attack.end === null ? 'animate-pulse' : ''} ${
-                        bar.continuesLeft ? '' : 'rounded-l-full'
-                      } ${bar.continuesRight ? '' : 'rounded-r-full'}`}
+                      // No motion is used for "ongoing" (it can last days), so a
+                      // bright inset ring marks a still-running bar.
+                      className={`absolute h-2.5 ${bar.attack.end === null ? 'ring-2 ring-inset ring-slate-100/90' : ''} ${
+                        bar.continuesLeft ? '' : 'rounded-l-full'} ${
+                        bar.continuesRight ? '' : 'rounded-r-full'}`}
                       style={{
                         left: `${(bar.from / 7) * 100}%`,
                         width: `${widthPct}%`,
@@ -595,8 +714,8 @@ export default function CalendarPage() {
                         background: color,
                       }}
                       title={`Attack, peak ${bar.attack.peakPain >= 0 ? `${bar.attack.peakPain}/10` : '?'}${
-                        bar.endBeforeStart ? ' — end before start' : ''
-                      }`}
+                        bar.attack.end === null ? ' — ongoing' : ''
+                      }${bar.endBeforeStart ? ' — end before start' : ''}`}
                     >
                       {widthPct >= 4 && bar.attack.peakPain >= 0 && (
                         <span
@@ -663,6 +782,25 @@ export default function CalendarPage() {
         </div>
       </section>
 
+      {/* ── preventive schedule (below the grid, not collapsible) ── */}
+      <section>
+        <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-400">
+          Preventive schedule
+        </h2>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {MED_CATALOG.filter((m) => m.kind === 'preventive').map((m) => (
+            <PreventiveCard
+              key={m.id}
+              medId={m.id}
+              onSchedule={readOnly ? undefined : (id) => {
+                setScheduleMed(id);
+                setScheduleDate(state.planned[id] ?? '');
+              }}
+            />
+          ))}
+        </div>
+      </section>
+
       {/* ── day detail sheet ────────────────────────────────── */}
       <Sheet open={!!selData} onOpenChange={(o) => !o && setSelected(null)}>
         <SheetContent
@@ -705,7 +843,7 @@ export default function CalendarPage() {
                 {selData.attacks.length === 0 && selData.meds.length === 0
                   && (selectedWellness?.workouts.length ?? 0) === 0 && (
                   <p className="py-6 text-center text-sm text-slate-400">
-                    Nothing logged this day 🎉
+                    Nothing logged this day.
                   </p>
                 )}
                 {selData.attacks.map((a) => {

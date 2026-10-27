@@ -20,7 +20,7 @@ export default function NotFound({ partner = false }: { partner?: boolean }) {
       </p>
       <Link
         to={partner ? '/view' : '/'}
-        className="mt-4 inline-flex min-h-11 items-center rounded-lg bg-white px-4 text-sm font-semibold text-slate-950 transition-colors hover:bg-slate-200"
+        className={`mt-4 inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90`}
       >
         {partner ? 'Back to partner view' : 'Back to log'}
       </Link>

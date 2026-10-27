@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Activity, Clock, Dumbbell, Package, Pill } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { useNow } from '@/lib/clock';
-import { usageDaysInWindow } from '@/lib/usage';
+import { NURTEC_DEFAULT_RULE, resolveRule, usageDaysInWindow } from '@/lib/usage';
 import { nurtecInventory } from '@/lib/inventory';
 import { medColor, medName, painColor } from '@/lib/meds';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
@@ -123,8 +123,12 @@ export default function PartnerHome() {
   );
 
   const nurtecStock = nurtecInventory(state, now);
-  const nurtecRuleLimit = state.rules.nurtec?.limit ?? 15;
-  const nurtecUse = usageDaysInWindow(state.meds, 'nurtec', 30, now, state.timezone);
+  // Same resolved rule the writer's Home and the Calendar use: a partial or
+  // malformed imported rule falls back per field instead of printing NaN.
+  const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
+  const nurtecUse = usageDaysInWindow(
+    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
+  );
 
   const startMs = activeAttack ? Date.parse(activeAttack.start) : Number.NaN;
   const durationMs = Number.isFinite(startMs) ? Math.max(0, now - startMs) : null;
@@ -183,10 +187,7 @@ export default function PartnerHome() {
         <section className="overflow-hidden rounded-2xl border border-rose-900 bg-gradient-to-br from-rose-950 to-slate-950 shadow-sm">
           <div className="p-5">
             <div className="flex items-center gap-2 text-sm font-semibold text-rose-300">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-600" />
-              </span>
+              <span className="h-2.5 w-2.5 rounded-full bg-attack" aria-hidden="true" />
               Attack in progress
             </div>
             <div className="mt-2 text-4xl font-black tabular-nums tracking-tight text-slate-100">
@@ -214,7 +215,7 @@ export default function PartnerHome() {
                 </span>
               )}
             </div>
-            <p className="mt-2 text-xs text-slate-400">Rest — no exercise needed.</p>
+            <p className="mt-2 text-xs text-slate-300">Rest if you need to — recovery comes first.</p>
 
             {/* Attack-linked medications only — distinct from all meds today. */}
             <div className="mt-4 border-t border-rose-900/60 pt-3">
@@ -282,7 +283,7 @@ export default function PartnerHome() {
             : todayState === 'off'
               ? 'Easy day — resting and taking it slow.'
               : todayState === 'attack'
-                ? 'Rest — no exercise needed.'
+                ? 'Rest if you need to — recovery comes first.'
                 : 'No check-in yet today.'}
         </p>
 
@@ -340,7 +341,7 @@ export default function PartnerHome() {
           </span>
           <span className="flex items-center gap-1 text-xs text-slate-400">
             <Clock className="h-3.5 w-3.5" />
-            {nurtecUse} / {nurtecRuleLimit} days used in the last 30
+            {nurtecUse} / {nurtecRule.limit} days used in the last {nurtecRule.windowDays}
           </span>
         </div>
         <p className="mt-1 text-xs text-slate-400">

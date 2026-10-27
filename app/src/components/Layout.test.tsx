@@ -8,8 +8,16 @@ const store = vi.hoisted(() => ({
   sync: { status: 'synced', pending: 0, diverged: false },
 }));
 
+/** Captures the props Layout passes to the generated Toaster wrapper. */
+const toasterProps = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
+
 vi.mock('@/lib/store', () => ({ useStore: () => store }));
-vi.mock('@/components/ui/sonner', () => ({ Toaster: () => null }));
+vi.mock('@/components/ui/sonner', () => ({
+  Toaster: (props: Record<string, unknown>) => {
+    toasterProps.last = props;
+    return null;
+  },
+}));
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
@@ -60,17 +68,31 @@ describe('writer shell accessibility and responsive breakpoints', () => {
     expect(main.className).not.toContain('md:pb-10');
   });
 
-  it('keeps the header on one line with a truncating brand and shrink-proof pills', () => {
+  it('keeps the header on one line with a truncating route title and shrink-proof pills', () => {
     renderLayout();
 
-    const brand = screen.getByText(/Migraine Tracker/);
-    expect(brand.className).toContain('min-w-0');
-    expect(brand.className).toContain('truncate');
-    expect(brand.parentElement?.className).toContain('flex-nowrap');
+    // The header shows the current page, not brand text, and is not a heading.
+    const title = document.querySelector('[data-testid="shell-title"]') as HTMLElement;
+    expect(title.textContent).toBe('Log');
+    expect(title.tagName).toBe('SPAN');
+    expect(screen.queryByRole('heading', { name: 'Log' })).toBeNull();
+    expect(title.className).toContain('min-w-0');
+    expect(title.className).toContain('truncate');
+    expect(title.parentElement?.className).toContain('flex-nowrap');
 
-    // The sync pill keeps its full label instead of being squeezed by the brand.
+    // The sync pill keeps its full label instead of being squeezed by the title.
     const syncPill = screen.getByTitle(/^Sync:/);
     expect(syncPill.className).toContain('shrink-0');
+  });
+
+  it('labels unknown writer routes as Not found instead of a brand line', () => {
+    render(
+      <MemoryRouter initialEntries={['/nope']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+    const title = document.querySelector('[data-testid="shell-title"]') as HTMLElement;
+    expect(title.textContent).toBe('Not found');
   });
 
   it('exposes both navigation landmarks with their five writer links', () => {
@@ -79,5 +101,19 @@ describe('writer shell accessibility and responsive breakpoints', () => {
     for (const label of ['Log', 'Calendar', 'Reports', 'History', 'Settings']) {
       expect(screen.getAllByRole('link', { name: label })).toHaveLength(2);
     }
+  });
+});
+
+describe('writer Toaster placement', () => {
+  it('puts toasts at the bottom, clear of the sticky header and mobile nav', () => {
+    renderLayout();
+
+    expect(toasterProps.last?.position).toBe('bottom-center');
+    // The offset must clear the fixed bottom nav (plus iOS safe area).
+    const offset = toasterProps.last?.offset as { bottom?: string } | undefined;
+    expect(offset?.bottom).toContain('4.75rem');
+    expect(offset?.bottom).toContain('safe-area-inset-bottom');
+    const mobileOffset = toasterProps.last?.mobileOffset as { bottom?: string } | undefined;
+    expect(mobileOffset?.bottom).toContain('4.75rem');
   });
 });

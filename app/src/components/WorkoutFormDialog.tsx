@@ -98,7 +98,7 @@ function Toggle({
       onClick={onClick}
       className={`rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors active:scale-95 ${
         active
-          ? 'border-transparent bg-white text-slate-950'
+          ? 'border-transparent bg-primary text-primary-foreground'
           : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-500'
       }`}
     >

@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon } from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { usageDaysInWindow } from '@/lib/usage';
+import {
+  NURTEC_DEFAULT_RULE, limitState, resolveRule, usageDaysInWindow,
+} from '@/lib/usage';
 import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { MED_CATALOG, painColor, medColor, medName, textOn } from '@/lib/meds';
@@ -34,21 +36,21 @@ function nurtecStockBadge(stock: NurtecInventory): {
     return {
       // Short enough for a 61px card at 360px; the `title` carries the detail.
       text: 'no count',
-      className: 'bg-slate-800 text-slate-400',
+      className: 'bg-slate-800 text-slate-300',
       title: 'No starting count recorded — add one in Settings.',
     };
   }
   if (stock.level === 'negative') {
     return {
       text: `−${Math.abs(stock.quantity)} stock`,
-      className: 'bg-rose-950 text-rose-300',
+      className: 'bg-red-950 text-red-300',
       title: 'Recorded stock is negative — correct it in Settings.',
     };
   }
   return {
     text: `${stock.quantity} left`,
     className:
-      stock.level === 'low' ? 'bg-amber-950 text-amber-300' : 'bg-slate-800 text-slate-400',
+      stock.level === 'low' ? 'bg-amber-950 text-amber-300' : 'bg-slate-800 text-slate-300',
     title: 'Optimistic count from this device — the server inventory count is authoritative.',
   };
 }
@@ -100,6 +102,14 @@ function doseAgeText(ageMs: number): string {
   return ageMs < 60_000 ? '<1m' : fmtDuration(ageMs);
 }
 
+/**
+ * Attack-day guidance. The Log page deliberately keeps wellness and movement
+ * available during an attack (the user explicitly overrode the old
+ * hide-everything state), so the copy must never claim exercise is impossible
+ * while the movement controls are on screen. It is guidance, not a rule.
+ */
+const ATTACK_GUIDANCE = 'Rest if you need to — movement is optional.';
+
 export default function Home() {
   const store = useStore();
   const { activeAttack, state, serverMode } = store;
@@ -109,6 +119,17 @@ export default function Home() {
   const [editOpen, setEditOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [pastMedOpen, setPastMedOpen] = useState(false);
+
+  /**
+   * Latest committed state for deferred callbacks. Toast actions are created
+   * during an event and can fire much later; reading the render closure would
+   * act on a stale snapshot (e.g. an Undo that reopens the previous attack
+   * after a new one has started).
+   */
+  const latestStateRef = useRef(state);
+  useEffect(() => {
+    latestStateRef.current = state;
+  }, [state]);
 
   // Today is the configured-zone local day (same rule as PartnerHome and the
   // weekly workout goals), not the browser's day. Invalid timestamps are
@@ -121,8 +142,18 @@ export default function Home() {
     }).sort((a, b) => b.ts.localeCompare(a.ts));
   }, [state.meds, state.timezone, todayKey]);
 
-  // Nurtec usage badge for the quick grid
-  const nurtecDays = usageDaysInWindow(state.meds, 'nurtec', 30, now, state.timezone);
+  // Nurtec usage badge for the quick grid. The configured rule (not a hardcoded
+  // 15/30) drives the denominator and the window; a partial imported rule falls
+  // back per field instead of rendering NaN or "undefinedd".
+  const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
+  const nurtecDays = usageDaysInWindow(
+    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
+  );
+  // Shared severity rule: over only past the limit; near needs a used day, so
+  // an untouched low limit never warns.
+  const nurtecUsage = limitState(nurtecDays, nurtecRule.limit);
+  const nurtecOver = nurtecUsage === 'over';
+  const nurtecNear = nurtecUsage === 'near';
   // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
   const nurtecStock = nurtecInventory(state, now);
   const nurtecBadge = nurtecStockBadge(nurtecStock);
@@ -180,29 +211,56 @@ export default function Home() {
   );
 
   // Short guidance for the wellness card. The status pill already names the
-  // day, so these describe what the status means instead of repeating it.
+  // day, so these describe what the status means instead of repeating it. An
+  // active attack wins for guidance (an earlier explicit Well record must not
+  // read "Normal routine today" under an active-attack banner).
+  const guidanceState = activeAttack ? 'attack' : todayState;
   const wellnessGuidance =
-    todayState === 'well'
+    guidanceState === 'well'
       ? 'Normal routine today.'
-      : todayState === 'off'
+      : guidanceState === 'off'
         ? 'Easy day — a 10-min walk counts (Cardio · Low).'
-        : todayState === 'attack'
-          ? 'Rest — no exercise needed.'
+        : guidanceState === 'attack'
+          ? ATTACK_GUIDANCE
           : 'How was today?';
 
   function handleStart() {
-    store.startAttack();
+    const attack = store.startAttack();
     toast.success('Attack started — hang in there 💜', {
       description: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      action: {
+        label: 'Undo',
+        onClick: () => store.deleteAttack(attack.id),
+      },
     });
     setPainOpen(true);
   }
 
   function handleEnd() {
     if (!activeAttack) return;
-    store.endAttack(activeAttack.id);
+    const { id } = activeAttack;
+    store.endAttack(id);
     toast.success('Attack ended — logged.', {
       description: `Duration: ${fmtDuration(Date.now() - new Date(activeAttack.start).getTime())}`,
+      action: {
+        // Reopening is a normal end-patch through the same queue, so undo keeps
+        // the offline/dirty bookkeeping identical to any other write. It must
+        // never run while a DIFFERENT attack is active: the user may have
+        // started attack B after this toast appeared, and reopening A would
+        // leave two open attacks and divert later dose association.
+        label: 'Undo',
+        onClick: () => {
+          const latest = latestStateRef.current;
+          const otherActive = latest.attacks.find((a) => a.end === null && a.id !== id);
+          if (otherActive) {
+            toast.warning('Another attack is in progress', {
+              description: 'End the current attack before reopening the earlier one.',
+            });
+            return;
+          }
+          store.updateAttack(id, { end: null });
+        },
+      },
     });
   }
 
@@ -261,29 +319,31 @@ export default function Home() {
   return (
     <div className="mx-auto max-w-xl space-y-4 sm:space-y-5">
       <h1 className="sr-only">Migraine log</h1>
-      {/* ── Active attack banner / start button ─────────────────── */}
+
+      {/* ── Active attack / start ───────────────────────────────── */}
       {activeAttack ? (
-        <section className="overflow-hidden rounded-2xl border border-rose-900 bg-gradient-to-br from-rose-950 to-slate-950 shadow-sm">
-          <div className="p-5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold text-rose-300">
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
-                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-600" />
-                </span>
-                Attack in progress
+        <section
+          aria-labelledby="active-attack-title"
+          className="overflow-hidden rounded-xl border border-attack-border bg-gradient-to-br from-attack-muted to-slate-950 shadow-sm"
+        >
+          <div className="p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-attack">
+                <span className="h-2.5 w-2.5 rounded-full bg-attack" aria-hidden="true" />
+                <h2 id="active-attack-title">Attack in progress</h2>
               </div>
               <button
+                type="button"
                 onClick={() => setEditOpen(true)}
-                className="flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-200"
+                className="inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-900/60 hover:text-slate-100"
               >
                 <PenLine className="h-3.5 w-3.5" /> details
               </button>
             </div>
-            <div className="mt-2 text-4xl font-black tabular-nums tracking-tight text-slate-100">
+            <div className="mt-1.5 text-4xl font-black tabular-nums tracking-tight text-slate-50">
               {fmtDuration(now - new Date(activeAttack.start).getTime())}
             </div>
-            <div className="mt-1 text-sm text-slate-400">
+            <div className="mt-1 text-sm text-slate-300">
               started {fmtDateFull(activeAttack.start)} at {fmtTime(activeAttack.start)}
               {activeAttack.peakPain >= 0 && (
                 <>
@@ -294,57 +354,43 @@ export default function Home() {
                 </>
               )}
             </div>
-            {/* Rest guidance lives here because the wellness card is hidden
-                while an attack is active (it can never re-enable exercise). */}
-            <p className="mt-2 text-xs text-slate-400">Rest — no exercise needed.</p>
           </div>
-          <div className="grid grid-cols-2 divide-x border-t border-rose-900">
+
+          {/* Primary action: pain is the one-tap thing you reach for mid-attack. */}
+          <div className="border-t border-attack-border/70 p-3">
             <button
+              type="button"
               onClick={() => setPainOpen(true)}
-              className="flex items-center justify-center gap-2 bg-slate-900/60 py-4 text-base font-semibold text-slate-200 transition-colors hover:bg-slate-900"
+              className="flex min-h-14 w-full items-center justify-center gap-2 rounded-lg bg-attack text-base font-bold text-attack-foreground transition-colors hover:bg-attack/90 active:scale-[0.99]"
             >
-              <Gauge className="h-5 w-5 text-rose-500" />
+              <Gauge className="h-5 w-5" />
               Log pain
             </button>
-            <button
-              onClick={handleEnd}
-              className="flex items-center justify-center gap-2 bg-slate-900/60 py-4 text-base font-semibold text-slate-200 transition-colors hover:bg-slate-900"
-            >
-              <Square className="h-5 w-5 text-emerald-400" />
-              Attack ended
-            </button>
+            {/* Secondary + destructive-adjacent, visually separated below. */}
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-xs text-slate-400">Ended or easing?</span>
+              <Button
+                variant="outline"
+                onClick={handleEnd}
+                className="h-11 gap-1.5 border-slate-700 bg-slate-900/70 px-3 text-slate-200 hover:bg-slate-800 hover:text-slate-50"
+              >
+                <Square className="h-4 w-4 text-emerald-400" />
+                Attack ended
+              </Button>
+            </div>
           </div>
         </section>
       ) : (
         <button
           onClick={handleStart}
-          className="group flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 py-5 text-xl font-bold text-white transition-colors hover:bg-red-500 active:scale-[0.98] sm:py-8"
+          className="group flex min-h-14 w-full items-center justify-center gap-3 rounded-xl bg-attack py-4 text-lg font-bold text-attack-foreground transition-colors hover:bg-attack/90 active:scale-[0.99] sm:min-h-20 sm:py-6 sm:text-xl"
         >
-          <Play className="h-7 w-7 transition-transform group-hover:scale-110" />
+          <Play className="h-6 w-6 transition-transform group-hover:scale-110" />
           {attackOverlapsToday ? 'Log another attack' : 'Start attack now'}
         </button>
       )}
 
-      {/* ── Today's wellness ────────────────────────────────────── */}
-      {/* Hidden during an active attack: the banner owns guidance then, and an
-          earlier Well/Off record must never re-enable exercise logging. */}
-      {!activeAttack && (
-        <section className="rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
-          <div className="p-3">
-            <DayCheckIn guidance={wellnessGuidance} effectiveStatus={todayState} />
-          </div>
-          {todayState !== 'attack' && (
-            <div className="border-t border-slate-800/70 px-3 py-2.5">
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Movement
-              </p>
-              <WorkoutQuickLog />
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ── Medications ─────────────────────────────────────────── */}
+      {/* ── Medications (immediately after the attack controls) ─── */}
       <section>
         <div className="mb-1.5 flex items-center justify-between sm:mb-2">
           <h2 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-400">
@@ -357,41 +403,42 @@ export default function Home() {
             <button
               key={m.id}
               onClick={() => handleMed(m.id)}
-              className="flex flex-col rounded-xl border bg-slate-900 p-2.5 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
+              className="flex min-h-20 flex-col rounded-xl border border-slate-800 bg-slate-900 p-2.5 text-left shadow-sm transition-colors hover:border-slate-700 active:scale-[0.97] sm:p-3"
             >
               <span
-                className="mb-1.5 block h-1 w-6 rounded-full sm:h-1.5 sm:w-8"
+                className="mb-1.5 block h-1.5 w-8 rounded-full"
                 style={{ background: m.color }}
               />
-              <span className="break-words text-sm font-semibold leading-tight sm:text-base">
+              <span className="break-words text-sm font-semibold leading-tight text-slate-100 sm:text-base">
                 {m.name}
               </span>
               <span
-                className="truncate text-[10px] text-slate-400 sm:text-[11px]"
+                className="truncate text-xs text-slate-400"
                 title={m.kindLabel}
               >
                 {m.kindLabel}
               </span>
               {recentDoseHints.has(m.id) && (
-                <span className="block break-words text-[10px] leading-tight tabular-nums text-slate-400 sm:text-[11px]">
+                <span className="block break-words text-xs leading-tight tabular-nums text-slate-400">
                   {recentDoseHints.get(m.id)}
                 </span>
               )}
               {m.id === 'nurtec' && (
                 <span className="mt-auto flex flex-wrap items-center gap-1 pt-1.5">
                   <span
-                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
-                      nurtecDays >= 13
-                        ? 'bg-rose-950 text-rose-300'
-                        : nurtecDays >= 10
+                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums ${
+                      nurtecOver
+                        ? 'bg-red-950 text-red-300'
+                        : nurtecNear
                           ? 'bg-amber-950 text-amber-300'
-                          : 'bg-slate-800 text-slate-300'
+                          : 'bg-slate-800 text-slate-200'
                     }`}
+                    title={`Nurtec: ${nurtecDays} of ${nurtecRule.limit} allowed days in the last ${nurtecRule.windowDays} days`}
                   >
-                    {nurtecDays}/15
+                    {nurtecDays}/{nurtecRule.limit}
                   </span>
                   <span
-                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${nurtecBadge.className}`}
+                    className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-bold ${nurtecBadge.className}`}
                     title={nurtecBadge.title}
                   >
                     {nurtecBadge.text}
@@ -401,24 +448,53 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
+      </section>
+
+      {/* ── Today's wellness + movement (kept during an attack, never hidden) */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900">
+        <div className="p-3">
+          <DayCheckIn
+            guidance={wellnessGuidance}
+            effectiveStatus={todayState}
+            displayOverride={activeAttack ? 'attack' : null}
+          />
+        </div>
+        <div className="border-t border-slate-800/70 px-3 py-2.5">
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            Movement
+          </p>
+          <WorkoutQuickLog />
+        </div>
+      </section>
+
+      {/* ── Preventive medication (after wellness, always visible) ── */}
+      <section aria-labelledby="preventive-heading">
+        <h2
+          id="preventive-heading"
+          className="mb-1.5 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-400"
+        >
+          <Pill className="h-4 w-4" /> Preventive
+        </h2>
+        <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
           {preventives.map((m) => (
             <button
               key={m.id}
               onClick={() => handleMed(m.id)}
-              className="flex items-center gap-3 rounded-xl border bg-slate-900 p-2.5 text-left shadow-sm transition-all hover:shadow active:scale-[0.97] sm:p-3"
+              className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-800 bg-slate-900 p-2.5 text-left shadow-sm transition-colors hover:border-slate-700 active:scale-[0.97] sm:p-3"
             >
               <span className="h-8 w-1.5 rounded-full" style={{ background: m.color }} />
-              <span>
-                <span className="block font-semibold leading-tight">{m.name}</span>
-                <span className="block text-[11px] text-slate-400">{m.kindLabel}</span>
+              <span className="min-w-0">
+                <span className="block truncate font-semibold leading-tight text-slate-100">
+                  {m.name}
+                </span>
+                <span className="block truncate text-xs text-slate-400">{m.kindLabel}</span>
               </span>
             </button>
           ))}
         </div>
       </section>
 
-      {/* ── Weather (optional, after primary logging controls) ──── */}
+      {/* ── Weather (optional, non-blocking, after primary controls) ── */}
       <WeatherCard />
 
       {/* ── Today's meds ────────────────────────────────────────── */}
@@ -431,7 +507,7 @@ export default function Home() {
             {todaysMeds.map((m) => (
               <div
                 key={m.id}
-                className="flex items-center gap-3 rounded-lg border bg-slate-900 px-3 py-2 text-sm"
+                className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
               >
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: medColor(m.medId) }} />
                 <span className="font-medium">{medName(m.medId)}</span>
@@ -444,7 +520,7 @@ export default function Home() {
       )}
 
       {/* ── Secondary actions ───────────────────────────────────── */}
-      <section className="grid grid-cols-2 gap-2">
+      <section className="grid grid-cols-2 gap-2" aria-label="Other logging">
         <Button
           variant="outline"
           className="h-11 gap-1.5 border-slate-800 bg-slate-900/40 px-2 text-slate-300 hover:bg-slate-900 hover:text-slate-100"
@@ -471,14 +547,14 @@ export default function Home() {
           this is still local mode. It also requires an entirely empty local
           state because `loadDemoData` would replace any existing records. */}
       {!serverMode && !state.seeded && !hasAnyRecords && (
-        <div className="rounded-xl border border-dashed bg-slate-900 p-4 text-center text-sm text-slate-400">
+        <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900 p-4 text-center text-sm text-slate-400">
           <p>No data yet. This demo stores everything in your browser only.</p>
           <button
             onClick={() => {
               store.loadDemoData();
               toast.success('Demo data loaded — check the Calendar & Reports tabs');
             }}
-            className="mt-2 font-semibold text-slate-100 underline underline-offset-2"
+            className="mt-2 inline-flex min-h-11 items-center font-semibold text-slate-100 underline underline-offset-2"
           >
             Load 75 days of demo data
           </button>
@@ -496,7 +572,7 @@ export default function Home() {
               <button
                 key={n}
                 onClick={() => handlePain(n)}
-                className="rounded-xl py-4 text-xl font-black shadow-sm transition-transform active:scale-95"
+                className="min-h-12 rounded-xl py-3 text-xl font-black shadow-sm transition-transform active:scale-95"
                 style={{ background: painColor(n), color: textOn(painColor(n)) }}
               >
                 {n}
@@ -504,7 +580,7 @@ export default function Home() {
             ))}
             <button
               onClick={() => handlePain(0)}
-              className="col-span-2 rounded-xl bg-slate-700 py-4 text-xl font-black text-slate-300 transition-transform active:scale-95"
+              className="col-span-2 min-h-12 rounded-xl bg-slate-700 py-3 text-xl font-black text-slate-100 transition-transform active:scale-95"
             >
               0
             </button>

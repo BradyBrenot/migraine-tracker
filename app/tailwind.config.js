@@ -22,6 +22,12 @@ module.exports = {
           DEFAULT: "hsl(var(--destructive) / <alpha-value>)",
           foreground: "hsl(var(--destructive-foreground) / <alpha-value>)",
         },
+        attack: {
+          DEFAULT: "hsl(var(--attack) / <alpha-value>)",
+          foreground: "hsl(var(--attack-foreground) / <alpha-value>)",
+          muted: "hsl(var(--attack-muted) / <alpha-value>)",
+          border: "hsl(var(--attack-border) / <alpha-value>)",
+        },
         muted: {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",

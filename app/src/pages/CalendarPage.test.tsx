@@ -6,6 +6,7 @@ import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, TrackerState, Workout } from '@/types';
 import { dayKeyStartMs, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
+import { painkillerMismatchNote } from '@/lib/usage';
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -592,5 +593,251 @@ describe('CalendarPage accessible day cells', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Schedule next Emgality' }));
     const dateInput = await screen.findByLabelText('Date');
     expect((dateInput as HTMLInputElement).type).toBe('date');
+  });
+});
+
+describe('CalendarPage decision cards and aggregate painkillers', () => {
+  const TZ = 'UTC';
+
+  function med(id: string, medId: string, ts: string): MedEvent {
+    return {
+      id, medId, ts, dose: '', quantity: null, attackId: null, notes: '', source: 'manual',
+    };
+  }
+
+  /** Nurtec + Painkillers cards, exactly two in one row, before the grid. */
+  function renderWithCards(): { nurtec: HTMLElement; painkillers: HTMLElement } {
+    const nurtec = screen.getByTitle(/^Nurtec:/);
+    const painkillers = screen.getByTitle(/^Painkillers/);
+    const grid = document.querySelector('[data-day]') as HTMLElement;
+    // Both cards precede the first day cell.
+    expect(nurtec.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(painkillers.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // One row at every width: a two-column grid with no responsive stacking.
+    const row = nurtec.parentElement as HTMLElement;
+    expect(row.className).toContain('grid-cols-2');
+    expect(row.contains(painkillers)).toBe(true);
+    return { nurtec, painkillers };
+  }
+
+  it('keeps both cards above the grid and promotes them during an attack', async () => {
+    seedState({ timezone: TZ });
+    mountCalendar();
+    await waitForSync();
+
+    let cards = renderWithCards();
+    expect(cards.nurtec.className).not.toContain('ring-attack-border');
+
+    cleanup();
+    const now = Date.now();
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('active', now - 60 * 60 * 1000, null)],
+    });
+    mountCalendar();
+    await waitForSync();
+
+    cards = renderWithCards();
+    expect(cards.nurtec.className).toContain('ring-attack-border');
+    expect(cards.painkillers.className).toContain('ring-attack-border');
+  });
+
+  it('counts one MoH day for different painkillers taken on the same day', async () => {
+    const day = midMonthDay(TZ);
+    const nextDay = day.slice(0, 8) + String(Number(day.slice(8, 10)) + 1).padStart(2, '0');
+    const at = (key: string, hour: number) =>
+      new Date(dayKeyStartMs(key, TZ) + hour * 60 * 60 * 1000).toISOString();
+    seedState({
+      timezone: TZ,
+      meds: [
+        med('t1', 'tylenol', at(day, 8)),
+        med('i1', 'ibuprofen', at(day, 12)),
+        med('n1', 'naproxen', at(nextDay, 9)),
+      ],
+    });
+
+    mountCalendar();
+    await waitForSync();
+    const { painkillers } = renderWithCards();
+
+    // Two dates, three different meds and three doses: TWO medication days.
+    expect(painkillers.textContent).toContain('2');
+    expect(painkillers.textContent).toContain('/ 15 days');
+    // The compact detail names which painkillers contributed.
+    expect(painkillers.textContent).toContain('Tylenol');
+    expect(painkillers.title).toContain('2 of 15 allowed days');
+  });
+
+  it('resolves mismatched painkiller rules conservatively and explains it', async () => {
+    seedState({
+      timezone: TZ,
+      rules: {
+        tylenol: { limit: 8, windowDays: 30 },
+        ibuprofen: { limit: 15, windowDays: 45 },
+        naproxen: { limit: 10, windowDays: 30 },
+      },
+    });
+
+    mountCalendar();
+    await waitForSync();
+    const { painkillers } = renderWithCards();
+
+    // Lowest limit, widest window.
+    expect(painkillers.textContent).toContain('/ 8 days');
+    expect(screen.getByText(/lowest limit \(8\)/)).toBeTruthy();
+    expect(screen.getByText(/widest window/)).toBeTruthy();
+    expect(screen.queryByText(/NaN|undefined/)).toBeNull();
+  });
+
+  it('never drops a preventive chip when the day cell truncates acute chips', async () => {
+    const day = midMonthDay(TZ);
+    const at = new Date(dayKeyStartMs(day, TZ) + 9 * 60 * 60 * 1000).toISOString();
+    seedState({
+      timezone: TZ,
+      meds: [
+        med('p1', 'emgality', at),
+        med('t1', 'tylenol', at),
+        med('t2', 'tylenol', at),
+        med('t3', 'tylenol', at),
+        med('t4', 'tylenol', at),
+        med('t5', 'tylenol', at),
+      ],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    const cell = document.querySelector<HTMLElement>(`[data-day="${day}"]`);
+    if (!cell) throw new Error('day cell missing');
+    // The preventive dose is pinned first and survives the 4-chip cap (one
+    // preventive + three acute chips), so two acute chips collapse.
+    expect(cell.querySelector('[title="Emgality"]')).toBeTruthy();
+    expect(cell.querySelectorAll('[title="Tylenol"]')).toHaveLength(3);
+    expect(cell.textContent).toContain('+2');
+    // Accessible name carries the preventive information too.
+    expect(cell.getAttribute('aria-label')).toContain('preventive: Emgality');
+  });
+
+  it('summarises the full decision-card state for assistive tech', async () => {
+    seedState({ timezone: TZ, rules: { nurtec: { limit: 2, windowDays: 30 } } });
+    mountCalendar();
+    await waitForSync();
+
+    const nurtec = screen.getByRole('group', {
+      name: /^Nurtec: 0 of 2 allowed days in the last 30 days, within limit$/,
+    });
+    expect(nurtec).toBeTruthy();
+    expect(screen.getByRole('group', {
+      name: /^Painkillers: 0 of 15 allowed days in the last 30 days, within limit$/,
+    })).toBeTruthy();
+
+    // A low but UNUSED limit must not warn anywhere.
+    expect(screen.queryByText('watch your intake')).toBeNull();
+
+    cleanup();
+    seedState({
+      timezone: TZ,
+      rules: { nurtec: { limit: 2, windowDays: 30 } },
+      meds: [med('low-limit-dose', 'nurtec', new Date().toISOString())],
+    });
+    mountCalendar();
+    await waitForSync();
+
+    // Reaching the limit is "near", not over.
+    expect(screen.getByRole('group', {
+      name: /^Nurtec: 1 of 2 allowed days in the last 30 days, near limit$/,
+    })).toBeTruthy();
+    expect(screen.getByText('watch your intake')).toBeTruthy();
+  });
+
+  it('marks an ongoing attack without motion and states it in the day name', async () => {
+    const now = Date.now();
+    const startMs = now - 60 * 60 * 1000;
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('ongoing-cue', startMs, null)],
+    });
+    mountCalendar();
+    await waitForSync();
+
+    const cell = document.querySelector<HTMLElement>(`[data-day="${localDayKey(startMs, TZ)}"]`);
+    if (!cell) throw new Error('day cell missing');
+    expect(cell.getAttribute('aria-label')).toContain('attack ongoing');
+
+    // The bar itself is static but visually distinct (inset ring, no pulse).
+    const bar = document.querySelector<HTMLElement>('[title*="— ongoing"]');
+    expect(bar).toBeTruthy();
+    expect(bar!.className).toContain('ring-2');
+    expect(bar!.className).not.toContain('animate-pulse');
+  });
+
+  it('tells the read-only viewer who can change mismatched rules', () => {
+    // The partner has no Settings route, so its copy must not direct the reader
+    // there; the writer copy keeps the action.
+    const rule = { limit: 8, windowDays: 45 };
+    const writer = painkillerMismatchNote(false, rule);
+    const partner = painkillerMismatchNote(true, rule);
+
+    expect(writer).toContain('lowest limit (8)');
+    expect(writer).toContain('widest window (45d)');
+    expect(writer).toContain('until you save one shared rule in Settings.');
+
+    expect(partner).toContain('This read-only view cannot change it');
+    expect(partner).toContain('the writer app');
+    expect(partner).not.toContain('until you save');
+    expect(partner).toContain('lowest limit (8)');
+  });
+
+  it('renders the preventive schedule below the month grid', async () => {
+    seedState({ timezone: TZ });
+    mountCalendar();
+    await waitForSync();
+
+    const grid = document.querySelector('[data-day]') as HTMLElement;
+    const schedule = screen.getByRole('button', { name: 'Schedule next Emgality' });
+    expect(grid.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('CalendarPage zero-limit decision card', () => {
+  const TZ = 'UTC';
+
+  function cardBar(card: HTMLElement): HTMLElement {
+    const bar = card.querySelector('[data-decision-bar]');
+    if (!bar) throw new Error('decision bar missing');
+    return bar as HTMLElement;
+  }
+
+  it('shows an empty bar for an unused zero limit and a full bar once used', async () => {
+    seedState({ timezone: TZ, rules: { nurtec: { limit: 0, windowDays: 30 } } });
+    mountCalendar();
+    await waitForSync();
+
+    const unused = screen.getByTitle(/^Nurtec:/);
+    expect(cardBar(unused).style.width).toBe('0%');
+    // 0 used with a 0 limit is not "over": over means used > limit.
+    expect(unused.textContent).not.toContain('over limit');
+
+    cleanup();
+    seedState({
+      timezone: TZ,
+      rules: { nurtec: { limit: 0, windowDays: 30 } },
+      meds: [{
+        id: 'zero-limit-dose',
+        medId: 'nurtec',
+        ts: new Date().toISOString(),
+        dose: '75 mg',
+        quantity: 1,
+        attackId: null,
+        notes: '',
+        source: 'manual',
+      }],
+    });
+    mountCalendar();
+    await waitForSync();
+
+    const used = screen.getByTitle(/^Nurtec:/);
+    expect(cardBar(used).style.width).toBe('100%');
+    expect(used.textContent).toContain('over limit');
   });
 });

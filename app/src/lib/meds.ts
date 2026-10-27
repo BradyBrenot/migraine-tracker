@@ -164,13 +164,53 @@ export function painTint(level: number): string {
   return `rgba(${r}, ${g}, ${b}, 0.22)`;
 }
 
-/** Readable text color (near-black or white) on top of a hex background. */
+/** Relative luminance per WCAG 2.x (sRGB, gamma-corrected). */
+export function relativeLuminance(hex: string): number {
+  const channels = hexToRgb(hex);
+  if (channels === null) return 0;
+  const [r, g, b] = channels.map((value) => {
+    const c = value / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio between two hex colors (1..21). */
+export function contrastRatio(a: string, b: string): number {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  const lighter = Math.max(la, lb);
+  const darker = Math.min(la, lb);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const value = hex.trim().replace(/^#/, '');
+  const full = value.length === 3
+    ? value.split('').map((c) => c + c).join('')
+    : value;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return null;
+  return [
+    parseInt(full.slice(0, 2), 16),
+    parseInt(full.slice(2, 4), 16),
+    parseInt(full.slice(4, 6), 16),
+  ];
+}
+
+/** Candidate foregrounds for colored chips/bars (black ink vs. white). */
+export const DARK_INK = '#000000';
+export const LIGHT_INK = '#ffffff';
+
+/**
+ * Readable text color on top of a hex background, chosen by WCAG contrast
+ * rather than a naive brightness average. Every Okabe-Ito medication color,
+ * every custom medication color, and every cividis pain step resolves to
+ * at least 4.5:1 with the returned ink.
+ */
 export function textOn(hex: string): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-  return lum > 150 ? '#0b1120' : '#f8fafc';
+  return contrastRatio(hex, DARK_INK) >= contrastRatio(hex, LIGHT_INK)
+    ? DARK_INK
+    : LIGHT_INK;
 }
 
 /** Status colors (Okabe-Ito) that stay distinguishable under deuteranomaly. */

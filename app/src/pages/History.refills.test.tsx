@@ -178,7 +178,7 @@ function applyApiDefaults(backend: MockedBackend): void {
 }
 
 function openRefillsTab(): void {
-  activateTab(/Rx pickups/);
+  activateTab(/Pickups/);
 }
 
 function activateTab(name: RegExp): void {
@@ -227,7 +227,7 @@ describe('History Rx pickups tablets', () => {
     await waitForSync();
     openRefillsTab();
 
-    fireEvent.click(screen.getByRole('button', { name: /Add Rx pickup/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add pickup/ }));
     expect(tabletsInput().value).toBe('8');
     expect(screen.getByRole('button', { name: 'Nurtec' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: 'Tylenol' }).getAttribute('aria-pressed')).toBe('false');
@@ -262,7 +262,7 @@ describe('History Rx pickups tablets', () => {
       await waitForSync();
       openRefillsTab();
 
-      fireEvent.click(screen.getByRole('button', { name: /Add Rx pickup/ }));
+      fireEvent.click(screen.getByRole('button', { name: /Add pickup/ }));
 
       // The pickup must land on the configured LOCAL day so stock/refill
       // math counts it on the right day.

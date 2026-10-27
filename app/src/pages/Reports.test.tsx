@@ -307,7 +307,7 @@ describe('Reports selected-month cards', () => {
     await waitForSync();
 
     await waitFor(() => expect(screen.getByText('2 days · 3 doses')).toBeTruthy());
-    expect(screen.getByText('1 days · 1 doses')).toBeTruthy();
+    expect(screen.getByText('1 day · 1 dose')).toBeTruthy();
 
     const medSection = screen.getByText('Medication days').closest('section');
     if (!medSection) throw new Error('medication days section not found');
@@ -315,7 +315,7 @@ describe('Reports selected-month cards', () => {
 
     // Nurtec has the most distinct days this month: full width; Tylenol 1/2.
     expect(medUsageBarWidth('2 days · 3 doses')).toBe('100%');
-    expect(medUsageBarWidth('1 days · 1 doses')).toBe('50%');
+    expect(medUsageBarWidth('1 day · 1 dose')).toBe('50%');
   });
 });
 
@@ -340,7 +340,7 @@ describe('Reports rolling medication window', () => {
     expect(screen.getByRole('button', { name: '3mo' }).getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('omits the rolling parenthetical for a malformed legacy rule', async () => {
+  it('resolves a malformed legacy rule to the catalog window instead of NaN', async () => {
     seedState({
       // Legacy/imported shape with no windowDays.
       rules: { nurtec: { limit: 15 } } as unknown as TrackerState['rules'],
@@ -350,9 +350,11 @@ describe('Reports rolling medication window', () => {
     mountReports();
     await waitForSync();
 
-    await waitFor(() => expect(screen.getByText('1 days · 1 doses')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('1 day · 1 dose')).toBeTruthy());
     expect(screen.queryByText(/NaN|undefinedd/)).toBeNull();
-    expect(screen.queryByText(/\(\d+\/15 in /)).toBeNull();
+    // The missing window falls back per field to the 30-day default rather than
+    // dropping the rolling count (or rendering "undefinedd").
+    expect(screen.getByText('(1/15 in 30d)')).toBeTruthy();
   });
 
   it('renders a zero limit as an over-limit count instead of dropping it', async () => {
@@ -367,6 +369,165 @@ describe('Reports rolling medication window', () => {
     await waitForSync();
 
     const count = await screen.findByText('(1/0 in 30d)');
-    expect(count.className).toContain('text-rose-400');
+    expect(count.className).toContain('text-red-400');
+  });
+
+  it('labels the export range as download-only and keeps it separate from the charts', async () => {
+    seedState({});
+    mountReports();
+    await waitForSync();
+
+    const group = screen.getByRole('group', { name: 'Report range (download only)' });
+    expect(group).toBeTruthy();
+    expect(within(group).getByRole('button', { name: '12mo' })).toBeTruthy();
+    // The three areas are clearly separated; the month section is a historical
+    // summary, not "this month".
+    expect(screen.getByRole('heading', { name: 'Monthly summary' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'This month' })).toBeNull();
+    expect(screen.getByRole('heading', { name: '12-month trends' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Report download' })).toBeTruthy();
+    // Triggers/symptoms are scoped to the monthly summary, above the trends.
+    const monthly = screen.getByRole('heading', { name: 'Monthly summary' });
+    const trends = screen.getByRole('heading', { name: '12-month trends' });
+    const triggers = screen.getByRole('heading', { name: 'Top triggers' });
+    const symptoms = screen.getByRole('heading', { name: 'Top symptoms' });
+    expect(monthly.closest('section')!.contains(triggers)).toBe(true);
+    expect(monthly.closest('section')!.contains(symptoms)).toBe(true);
+    expect(
+      Boolean(triggers.compareDocumentPosition(trends) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true);
+    expect(
+      Boolean(symptoms.compareDocumentPosition(trends) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true);
+    // Preventive scheduling lives on Calendar only; the duplicate panel is gone.
+    expect(screen.queryByText('Preventive timing')).toBeNull();
+    // The charts have their own fixed captions and live outside the group.
+    expect(screen.getByText(/Always the last 12 months/)).toBeTruthy();
+    expect(
+      within(group).queryByText('Attack days per month'),
+    ).toBeNull();
+  });
+});
+
+describe('Reports combined painkiller MOH summary', () => {
+  it('shows one aggregate count instead of three per-med rolling numbers', async () => {
+    seedState({
+      meds: [
+        makeMed({ id: 'tylenol-1', medId: 'tylenol', ts: '2026-10-05T08:00:00.000Z' }),
+        makeMed({ id: 'ibuprofen-1', medId: 'ibuprofen', ts: '2026-10-05T12:00:00.000Z' }),
+        makeMed({ id: 'naproxen-1', medId: 'naproxen', ts: '2026-10-07T09:00:00.000Z' }),
+      ],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    // Same-day Tylenol + Ibuprofen are ONE day; plus Naproxen on another day.
+    await waitFor(() => expect(screen.getByText('Painkillers combined')).toBeTruthy());
+    expect(screen.getByText('2 / 15 days in the last 30 days')).toBeTruthy();
+    // The aggregate state is a labelled group, not just a truncated sentence.
+    expect(screen.getByRole('group', {
+      name: 'Painkillers medication-overuse summary',
+    })).toBeTruthy();
+
+    // Each med keeps its own monthly day/dose row.
+    expect(screen.getAllByText(/1 day · 1 dose/)).toHaveLength(3);
+
+    // No misleading per-med rolling counts for the shared-limit painkillers.
+    expect(screen.queryByText(/\(\d+\/\d+ in \d+d\)/)).toBeNull();
+  });
+
+  it('keeps the individual rolling parenthetical for Nurtec only', async () => {
+    seedState({
+      rules: { nurtec: { limit: 4, windowDays: 7 } },
+      meds: [makeMed({ id: 'nurtec-1', ts: '2026-10-27T08:00:00.000Z' })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    expect(await screen.findByText('(1/4 in 7d)')).toBeTruthy();
+    expect(screen.queryByText('Painkillers combined')).toBeNull();
+  });
+
+  it('resolves mismatched and partial painkiller rules without NaN', async () => {
+    seedState({
+      rules: {
+        tylenol: { limit: 8, windowDays: 30 },
+        ibuprofen: { limit: 15, windowDays: 45 },
+        naproxen: { limit: 10, windowDays: 30 },
+      },
+      meds: [makeMed({ id: 'tylenol-1', medId: 'tylenol', ts: '2026-10-05T08:00:00.000Z' })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    // Lowest limit (8) + widest window (45) resolve the shared summary.
+    expect(await screen.findByText('1 / 8 days in the last 45 days')).toBeTruthy();
+    expect(screen.getByText(/Saved painkiller rules differ/)).toBeTruthy();
+    expect(screen.queryByText(/NaN|undefined/)).toBeNull();
+  });
+});
+
+describe('Reports near-limit semantics', () => {
+  it('treats reaching the Nurtec limit as near, not over', async () => {
+    seedState({
+      rules: { nurtec: { limit: 2, windowDays: 30 } },
+      meds: [
+        makeMed({ id: 'nurtec-a', ts: '2026-10-20T08:00:00.000Z' }),
+        makeMed({ id: 'nurtec-b', ts: '2026-10-21T08:00:00.000Z' }),
+      ],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    const count = await screen.findByText('(2/2 in 30d)');
+    expect(count.className).toContain('text-amber-300');
+    expect(count.className).not.toContain('text-red-400');
+  });
+
+  it('does not warn on an unused low shared limit, then warns near once used', async () => {
+    const rule = { limit: 2, windowDays: 30 };
+    // No painkiller events at all: no aggregate block, no warning.
+    seedState({ rules: { tylenol: rule, ibuprofen: rule, naproxen: rule } });
+    mountReports();
+    await waitForSync();
+    expect(screen.queryByRole('group', {
+      name: 'Painkillers medication-overuse summary',
+    })).toBeNull();
+    expect(screen.queryByText(/0 \/ 2 days/)).toBeNull();
+
+    cleanup();
+    seedState({
+      rules: { tylenol: rule, ibuprofen: rule, naproxen: rule },
+      meds: [makeMed({ id: 'pk-1', medId: 'tylenol', ts: '2026-10-20T08:00:00.000Z' })],
+    });
+    mountReports();
+    await waitForSync();
+
+    const summary = await screen.findByText('1 / 2 days in the last 30 days');
+    expect(summary.className).toContain('text-amber-300');
+    expect(summary.className).not.toContain('text-red-400');
+    expect(screen.queryByText(/NaN|undefined/)).toBeNull();
+  });
+
+  it('flags over only past the limit', async () => {
+    const rule = { limit: 2, windowDays: 30 };
+    seedState({
+      rules: { tylenol: rule, ibuprofen: rule, naproxen: rule },
+      meds: [
+        makeMed({ id: 'pk-1', medId: 'tylenol', ts: '2026-10-19T08:00:00.000Z' }),
+        makeMed({ id: 'pk-2', medId: 'ibuprofen', ts: '2026-10-20T08:00:00.000Z' }),
+        makeMed({ id: 'pk-3', medId: 'naproxen', ts: '2026-10-21T08:00:00.000Z' }),
+      ],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    const summary = await screen.findByText('3 / 2 days in the last 30 days');
+    expect(summary.className).toContain('text-red-400');
   });
 });

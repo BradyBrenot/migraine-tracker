@@ -245,9 +245,9 @@ describe('History in the read-only viewer', () => {
     expect(screen.queryByRole('button', { name: 'Add past workout' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
 
-    activateTab(/Rx pickups/);
+    activateTab(/Pickups/);
     await waitFor(() => expect(screen.getByText('CVS')).toBeTruthy());
-    expect(screen.queryByRole('button', { name: 'Add Rx pickup' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add pickup' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Edit\b/i })).toBeNull();
 
     activateTab(/Meds/);

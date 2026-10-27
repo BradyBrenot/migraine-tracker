@@ -5,9 +5,12 @@ import {
 } from 'recharts';
 import { Download, Clock, Activity, TrendingUp, CalendarX, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { usageDaysInWindow, daysSinceLast } from '@/lib/usage';
+import {
+  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, limitState, medUnionDaysInWindow,
+  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule, usageDaysInWindow,
+} from '@/lib/usage';
 import { useNow } from '@/lib/clock';
-import { MED_CATALOG, allMedIds, medColor, medName, painColor } from '@/lib/meds';
+import { MED_MAP, allMedIds, medColor, medName, painColor } from '@/lib/meds';
 import { fmtDuration } from '@/lib/format';
 import { buildMonthlyTrend, buildReportLines } from '@/lib/report';
 import {
@@ -22,17 +25,23 @@ const TOOLTIP_STYLE = {
   background: '#0f172a',
   border: '1px solid #1e293b',
   borderRadius: 8,
+  fontSize: 12,
+  color: '#e2e8f0',
 };
+
+/** A chart axis/legend label size that stays legible without crowding ticks. */
+const AXIS_TICK = { fontSize: 12, fill: '#94a3b8' } as const;
+const LEGEND_STYLE = { fontSize: 12, color: '#cbd5e1' } as const;
 
 function StatCard({
   icon: Icon, label, value, sub,
 }: { icon: React.ElementType; label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded-xl border bg-slate-900 p-4 shadow-sm">
+    <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
       <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
         <Icon className="h-3.5 w-3.5" /> {label}
       </div>
-      <div className="mt-1 text-2xl font-black tabular-nums">{value}</div>
+      <div className="mt-1 text-2xl font-black tabular-nums text-slate-100">{value}</div>
       {sub && <div className="text-xs text-slate-400">{sub}</div>}
     </div>
   );
@@ -185,6 +194,24 @@ export default function Reports() {
     nowMs: trendNow,
   }), [state.attacks, state.meds, timeZone, trendNow]);
 
+  // Shared painkiller (MOH) budget: ONE rolling count for Tylenol + Ibuprofen +
+  // Naproxen, resolved exactly like Calendar/Home so mismatched or partial
+  // imported rules cannot render NaN/undefined.
+  const painkillerRule = resolveSharedPainkillerRule(state.rules);
+  const painkillerRulesMismatch = painkillerRulesDiffer(state.rules);
+  const painkillerUsed = medUnionDaysInWindow(
+    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, timeZone,
+  );
+  const painkillerUsage = limitState(painkillerUsed, painkillerRule.limit);
+  const painkillerOver = painkillerUsage === 'over';
+  const painkillerNear = painkillerUsage === 'near';
+  const painkillerThisMonth = data.medUsage.some(
+    (m) => PAINKILLER_MED_IDS.includes(m.id as (typeof PAINKILLER_MED_IDS)[number]),
+  );
+  const showPainkillerSummary = painkillerThisMonth || painkillerUsed > 0;
+  const painkillerSummaryText =
+    `${painkillerUsed} / ${painkillerRule.limit} days in the last ${painkillerRule.windowDays} days`;
+
   /** Build a month-by-month Markdown report. */
   function downloadReport() {
     const lines = buildReportLines({
@@ -205,270 +232,326 @@ export default function Reports() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <h1 className="sr-only">Reports</h1>
-      {/* month picker + export -- wraps to separate rows at phone widths */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setCursor((c) => addMonths(c, -1))}
-            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
-            aria-label="Previous month"
-          >
-            <ChevronLeft className="h-5 w-5" />
-          </button>
-          <span className="min-w-32 text-center text-base font-bold text-slate-100">
-            {monthLabel}
-          </span>
-          <button
-            onClick={() => setCursor((c) => addMonths(c, 1))}
-            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
-            aria-label="Next month"
-          >
-            <ChevronRight className="h-5 w-5" />
-          </button>
-        </div>
-        {!readOnly && (
-          <div className="flex items-center gap-1.5">
-            <div className="flex gap-1 rounded-lg border bg-slate-900 p-1">
+
+      {/* ── Report download: the range belongs to the file, not the charts ── */}
+      {!readOnly && (
+        <section
+          aria-labelledby="report-download-title"
+          className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm"
+        >
+          <h2 id="report-download-title" className="text-sm font-bold">
+            Report download
+          </h2>
+          <p className="mt-1 text-xs text-slate-400">
+            Choose how much history the downloaded Markdown report covers. This range
+            applies only to the file — the charts below keep their own fixed windows.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div
+              role="group"
+              aria-label="Report range (download only)"
+              className="flex gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1"
+            >
               {(['3', '6', '12', 'all'] as const).map((s) => (
                 <button
                   key={s}
                   aria-pressed={reportSpan === s}
                   onClick={() => setReportSpan(s)}
-                  className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors ${
-                    reportSpan === s ? 'bg-white text-slate-950' : 'text-slate-400 hover:bg-slate-800'
+                  className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2.5 text-xs font-semibold transition-colors ${
+                    reportSpan === s
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-slate-300 hover:bg-slate-800'
                   }`}
                 >
                   {s === 'all' ? 'All' : `${s}mo`}
                 </button>
               ))}
             </div>
-            <Button variant="outline" size="sm" className="h-10 gap-1.5" onClick={downloadReport}>
-              <Download className="h-4 w-4" /> Report
+            <Button size="sm" className="h-10 gap-1.5" onClick={downloadReport}>
+              <Download className="h-4 w-4" /> Download report
             </Button>
           </div>
-        )}
-      </div>
-
-      {/* summary cards */}
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <StatCard
-          icon={Activity}
-          label="Attacks"
-          value={data.hasData ? String(data.attacks.length) : '—'}
-          sub={data.hasData ? undefined : 'no data this month'}
-        />
-        <StatCard
-          icon={CalendarX}
-          label="Days affected"
-          value={data.hasData ? String(data.daysLost) : '—'}
-          sub={data.hasData ? undefined : 'no data this month'}
-        />
-        <StatCard
-          icon={Clock}
-          label="Avg duration"
-          value={data.avgMs !== null ? fmtDuration(data.avgMs) : '—'}
-        />
-        <StatCard
-          icon={TrendingUp}
-          label="Avg peak pain"
-          value={data.avgPain !== null ? data.avgPain.toFixed(1) : '—'}
-          sub={data.avgPain !== null ? 'out of 10' : undefined}
-        />
-      </div>
-
-      {/* attack days per month — the MIDAS-style questionnaire metric */}
-      <section className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-        <h3 className="mb-1 text-sm font-bold">Attack days per month</h3>
-        <p className="mb-3 text-xs text-slate-400">
-          Last 12 months — the "how many migraine days per month" number from medical questionnaires
-        </p>
-        <ResponsiveContainer width="100%" height={210}>
-          <ComposedChart data={monthly}>
-            <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-            <YAxis yAxisId="left" allowDecimals={false} width={24} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-            <YAxis yAxisId="right" orientation="right" domain={[0, 10]} width={24} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-            <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
-            <Legend wrapperStyle={{ fontSize: 11, color: '#cbd5e1' }} />
-            <Bar yAxisId="left" dataKey="attackDays" name="Attack days" fill="#56B4E9" radius={[6, 6, 0, 0]} />
-            <Line
-              yAxisId="right"
-              dataKey="avgPain"
-              name="Avg peak pain"
-              stroke="#fde737"
-              strokeWidth={2}
-              dot={{ r: 2, fill: '#fde737' }}
-              connectNulls
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </section>
-
-      {/* medication days per month, stacked by med */}
-      <section className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-        <h3 className="mb-1 text-sm font-bold">Medication days per month</h3>
-        <p className="mb-3 text-xs text-slate-400">
-          Distinct days each med was used — spot overuse patterns at a glance
-        </p>
-        <ResponsiveContainer width="100%" height={210}>
-          <BarChart data={monthly}>
-            <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-            <YAxis allowDecimals={false} width={24} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-            <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
-            <Legend wrapperStyle={{ fontSize: 11, color: '#cbd5e1' }} />
-            {allMedIds(state.meds).map((id) => (
-              <Bar key={id} dataKey={id} name={medName(id)} stackId="meds" fill={medColor(id)} />
-            ))}
-          </BarChart>
-        </ResponsiveContainer>
-      </section>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* pain distribution */}
-        <section className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-          <h3 className="mb-1 text-sm font-bold">Peak pain distribution</h3>
-          <p className="mb-2 text-xs text-slate-400">
-            {monthLabel}
-          </p>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={data.painDist}>
-              <XAxis dataKey="level" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <YAxis allowDecimals={false} width={24} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <Tooltip
-                contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8 }}
-                labelStyle={{ color: '#e2e8f0' }}
-              />
-              <Bar dataKey="count" radius={[6, 6, 0, 0]}>
-                {data.painDist.map((_, i) => (
-                  <Cell key={i} fill={painColor(i + 1)} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
         </section>
+      )}
 
-        {/* med usage */}
-        <section className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-          <h3 className="mb-3 text-sm font-bold">Medication days</h3>
-          {data.medUsage.length ? (
-            <div className="space-y-3">
-              {data.medUsage.map((m) => {
-                const rule = state.rules[m.id];
-                // Legacy/imported rules can be partial. Only a positive integer
-                // window and a nonnegative integer limit (0 is meaningful: any
-                // use is over the limit) may drive the rolling count or its
-                // label; otherwise the parenthetical is omitted instead of
-                // computing with NaN or printing "undefinedd".
-                const windowDays = rule
-                  && Number.isInteger(rule.windowDays)
-                  && rule.windowDays > 0
-                  ? rule.windowDays
-                  : null;
-                const limit = rule
-                  && Number.isInteger(rule.limit)
-                  && rule.limit >= 0
-                  ? rule.limit
-                  : null;
-                const windowUsed = windowDays !== null
-                  ? usageDaysInWindow(state.meds, m.id, windowDays, now, state.timezone)
-                  : null;
-                return (
-                  <div key={m.name}>
-                    <div className="flex justify-between text-sm">
-                      <span className="font-medium">{m.name}</span>
-                      <span className="tabular-nums text-slate-400">
-                        {m.days} days · {m.doses} doses
-                        {windowDays !== null && limit !== null && windowUsed !== null && (
-                          <span
-                            className={`ml-1 font-semibold ${
-                              windowUsed >= limit ? 'text-rose-400' : ''
-                            }`}
-                          >
-                            ({windowUsed}/{limit} in {windowDays}d)
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-800">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          background: m.color,
-                          width: `${Math.min(100, (m.days / Math.max(1, data.medUsageMax)) * 100)}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="py-8 text-center text-sm text-slate-400">No meds logged this month</p>
-          )}
-        </section>
-      </div>
+      {/* ── Monthly summary ────────────────────────────────────── */}
+      <section aria-labelledby="report-month-title" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2
+            id="report-month-title"
+            className="text-sm font-bold uppercase tracking-wide text-slate-400"
+          >
+            Monthly summary
+          </h2>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCursor((c) => addMonths(c, -1))}
+              className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
+              aria-label="Previous month"
+            >
+              <ChevronLeft className="h-5 w-5" />
+            </button>
+            <span className="min-w-32 text-center text-base font-bold text-slate-100">
+              {monthLabel}
+            </span>
+            <button
+              onClick={() => setCursor((c) => addMonths(c, 1))}
+              className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-800"
+              aria-label="Next month"
+            >
+              <ChevronRight className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
 
-      {/* preventives timing */}
-      <section className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-        <h3 className="mb-3 text-sm font-bold">Preventive timing</h3>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {MED_CATALOG.filter((m) => m.kind === 'preventive').map((m) => {
-            const d = daysSinceLast(state.meds, m.id, now, state.timezone);
-            const interval = m.intervalDays ?? 30;
-            return (
-              <div key={m.id} className="flex items-center gap-3 rounded-lg bg-slate-800 p-3">
-                <span className="h-8 w-1.5 rounded-full" style={{ background: m.color }} />
-                <div className="flex-1">
-                  <div className="text-sm font-semibold">{m.name}</div>
-                  <div className="text-xs text-slate-400">
-                    {d === null
-                      ? 'never logged'
-                      : d >= interval
-                        ? `${d} days since last dose — overdue (every ~${interval}d)`
-                        : `${d} days since last dose — next in ~${interval - d}d`}
-                  </div>
-                </div>
-                {d !== null && d >= interval && (
-                  <span className="rounded-full bg-rose-950 px-2 py-0.5 text-[10px] font-bold text-rose-300">
-                    DUE
+        {/* summary cards */}
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <StatCard
+            icon={Activity}
+            label="Attacks"
+            value={data.hasData ? String(data.attacks.length) : '—'}
+            sub={data.hasData ? undefined : 'no data this month'}
+          />
+          <StatCard
+            icon={CalendarX}
+            label="Days affected"
+            value={data.hasData ? String(data.daysLost) : '—'}
+            sub={data.hasData ? undefined : 'no data this month'}
+          />
+          <StatCard
+            icon={Clock}
+            label="Avg duration"
+            value={data.avgMs !== null ? fmtDuration(data.avgMs) : '—'}
+          />
+          <StatCard
+            icon={TrendingUp}
+            label="Avg peak pain"
+            value={data.avgPain !== null ? data.avgPain.toFixed(1) : '—'}
+            sub={data.avgPain !== null ? 'out of 10' : undefined}
+          />
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          {/* pain distribution */}
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
+            <h3 className="mb-1 text-sm font-bold">Peak pain distribution</h3>
+            <p className="mb-2 text-xs text-slate-400">
+              {monthLabel}
+            </p>
+            <ResponsiveContainer width="100%" height={160}>
+              <BarChart data={data.painDist}>
+                <XAxis dataKey="level" tick={AXIS_TICK} />
+                <YAxis allowDecimals={false} width={24} tick={AXIS_TICK} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
+                <Bar dataKey="count" radius={[6, 6, 0, 0]}>
+                  {data.painDist.map((_, i) => (
+                    <Cell key={i} fill={painColor(i + 1)} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </section>
+
+          {/* med usage */}
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
+            <h3 className="mb-3 text-sm font-bold">Medication days</h3>
+            {showPainkillerSummary && (
+              <div
+                role="group"
+                aria-label="Painkillers medication-overuse summary"
+                className="mb-3 rounded-lg border border-slate-800 bg-slate-950/40 px-2.5 py-2"
+              >
+                <p className="text-xs text-slate-300">
+                  <span className="font-semibold text-slate-100">Painkillers combined</span>{' '}
+                  <span
+                    className={
+                      painkillerOver
+                        ? 'font-semibold text-red-400'
+                        : painkillerNear
+                          ? 'font-semibold text-amber-300'
+                          : 'tabular-nums text-slate-300'
+                    }
+                  >
+                    {painkillerSummaryText}
                   </span>
+                </p>
+                <p className="mt-0.5 text-[11px] leading-snug text-slate-400">
+                  Tylenol, Ibuprofen and Naproxen share one limit; different meds on
+                  one day count once.
+                </p>
+                {painkillerRulesMismatch && (
+                  <p className="mt-0.5 text-[11px] leading-snug text-amber-300">
+                    Saved painkiller rules differ — using the lowest limit and widest
+                    window.
+                  </p>
                 )}
               </div>
-            );
-          })}
+            )}
+            {data.medUsage.length ? (
+              <div className="space-y-3">
+                {data.medUsage.map((m) => {
+                  // Legacy/imported rules can be partial. Resolve each field
+                  // against the catalog default so a `{ limit: 15 }` rule still
+                  // gets a real window instead of printing NaN/undefined.
+                  // The three painkillers are excluded: they share ONE aggregate
+                  // MOH count shown above, so per-med rolling numbers would
+                  // overstate and contradict it.
+                  const isPainkiller = PAINKILLER_MED_IDS.includes(
+                    m.id as (typeof PAINKILLER_MED_IDS)[number],
+                  );
+                  const rule = isPainkiller ? null : state.rules[m.id];
+                  const resolved = rule
+                    ? resolveRule(rule, MED_MAP[m.id]?.defaultRule ?? PAINKILLER_DEFAULT_RULE)
+                    : null;
+                  const windowDays = resolved?.windowDays ?? null;
+                  const limit = resolved?.limit ?? null;
+                  const windowUsed = windowDays !== null
+                    ? usageDaysInWindow(state.meds, m.id, windowDays, now, state.timezone)
+                    : null;
+                  const daysLabel = `${m.days} ${m.days === 1 ? 'day' : 'days'}`;
+                  const dosesLabel = `${m.doses} ${m.doses === 1 ? 'dose' : 'doses'}`;
+                  // Same severity rule as Home/Calendar: over only past the
+                  // limit, near only with at least one used day.
+                  const rollingUsage = windowDays !== null && limit !== null && windowUsed !== null
+                    ? limitState(windowUsed, limit)
+                    : 'ok';
+                  return (
+                    <div key={m.name}>
+                      <div className="flex justify-between text-sm">
+                        <span className="font-medium">{m.name}</span>
+                        <span className="tabular-nums text-slate-400">
+                          {daysLabel} · {dosesLabel}
+                          {windowDays !== null && limit !== null && windowUsed !== null && (
+                            <span
+                              className={`ml-1 font-semibold ${
+                                rollingUsage === 'over'
+                                  ? 'text-red-400'
+                                  : rollingUsage === 'near'
+                                    ? 'text-amber-300'
+                                    : ''
+                              }`}
+                            >
+                              ({windowUsed}/{limit} in {windowDays}d)
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            background: m.color,
+                            width: `${Math.min(100, (m.days / Math.max(1, data.medUsageMax)) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="py-8 text-center text-sm text-slate-400">No meds logged this month</p>
+            )}
+          </section>
+        </div>
+
+        {/* triggers & symptoms — scoped to the selected month */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            { title: 'Top triggers', items: data.triggers },
+            { title: 'Top symptoms', items: data.symptoms },
+          ].map(({ title, items }) => (
+            <section
+              key={title}
+              className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm"
+            >
+              <h3 className="mb-3 text-sm font-bold">{title}</h3>
+              {items.length ? (
+                <div className="space-y-2">
+                  {items.map(([name, n]) => (
+                    <div key={name} className="flex items-center gap-2 text-sm">
+                      <span className="w-32 truncate">{name}</span>
+                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className="h-full rounded-full bg-slate-600"
+                          style={{ width: `${(n / items[0][1]) * 100}%` }}
+                        />
+                      </div>
+                      <span className="w-6 text-right text-xs tabular-nums text-slate-400">{n}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="py-4 text-center text-sm text-slate-400">None recorded</p>
+              )}
+            </section>
+          ))}
         </div>
       </section>
 
-      {/* triggers & symptoms */}
-      <div className="grid gap-4 sm:grid-cols-2">
-        {[
-          { title: 'Top triggers', items: data.triggers },
-          { title: 'Top symptoms', items: data.symptoms },
-        ].map(({ title, items }) => (
-          <section key={title} className="rounded-2xl border bg-slate-900 p-4 shadow-sm">
-            <h3 className="mb-3 text-sm font-bold">{title}</h3>
-            {items.length ? (
-              <div className="space-y-2">
-                {items.map(([name, n]) => (
-                  <div key={name} className="flex items-center gap-2 text-sm">
-                    <span className="w-32 truncate">{name}</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-800">
-                      <div
-                        className="h-full rounded-full bg-slate-700"
-                        style={{ width: `${(n / items[0][1]) * 100}%` }}
-                      />
-                    </div>
-                    <span className="w-6 text-right text-xs tabular-nums text-slate-400">{n}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="py-4 text-center text-sm text-slate-400">None recorded</p>
-            )}
-          </section>
-        ))}
-      </div>
+      {/* ── 12-month trends (fixed view, unaffected by the export range) ── */}
+      <section aria-labelledby="report-trends-title" className="space-y-3">
+        <div>
+          <h2
+            id="report-trends-title"
+            className="text-sm font-bold uppercase tracking-wide text-slate-400"
+          >
+            12-month trends
+          </h2>
+          <p className="mt-1 text-xs text-slate-400">
+            Always the last 12 months — independent of the month above and of the
+            download range.
+          </p>
+        </div>
+
+        {/* attack days per month — the MIDAS-style questionnaire metric */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
+          <h3 className="mb-1 text-sm font-bold">Attack days per month</h3>
+          <p className="mb-3 text-xs text-slate-400">
+            The “how many migraine days per month” number from medical questionnaires
+          </p>
+          <ResponsiveContainer width="100%" height={210}>
+            <ComposedChart data={monthly}>
+              <XAxis dataKey="month" tick={AXIS_TICK} />
+              <YAxis yAxisId="left" allowDecimals={false} width={28} tick={AXIS_TICK} />
+              <YAxis yAxisId="right" orientation="right" domain={[0, 10]} width={28} tick={AXIS_TICK} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
+              <Legend wrapperStyle={LEGEND_STYLE} />
+              <Bar yAxisId="left" dataKey="attackDays" name="Attack days" fill="#56B4E9" radius={[6, 6, 0, 0]} />
+              <Line
+                yAxisId="right"
+                dataKey="avgPain"
+                name="Avg peak pain"
+                stroke="#fde737"
+                strokeWidth={2}
+                dot={{ r: 2, fill: '#fde737' }}
+                connectNulls
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </section>
+
+        {/* medication days per month, stacked by med */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
+          <h3 className="mb-1 text-sm font-bold">Medication days per month</h3>
+          <p className="mb-3 text-xs text-slate-400">
+            Distinct days each med was used — spot overuse patterns at a glance
+          </p>
+          <ResponsiveContainer width="100%" height={210}>
+            <BarChart data={monthly}>
+              <XAxis dataKey="month" tick={AXIS_TICK} />
+              <YAxis allowDecimals={false} width={28} tick={AXIS_TICK} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
+              <Legend wrapperStyle={LEGEND_STYLE} />
+              {allMedIds(state.meds).map((id) => (
+                <Bar key={id} dataKey={id} name={medName(id)} stackId="meds" fill={medColor(id)} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </section>
+      </section>
     </div>
   );
 }

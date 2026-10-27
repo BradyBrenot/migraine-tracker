@@ -451,7 +451,7 @@ describe('Home wellness logging', () => {
     expect(api.putDayState).not.toHaveBeenCalled();
   });
 
-  it('suppresses exercise logging on an explicit attack day and still allows an override', async () => {
+  it('keeps movement available on an explicit attack day and still allows an override', async () => {
     const now = Date.now();
     const todayKey = localDayKey(now, 'UTC');
     seedState({ timezone: 'UTC', dayStates: [makeDayState(todayKey)] });
@@ -459,9 +459,11 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.queryByRole('button', { name: 'Strength' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Cardio' })).toBeNull();
-    expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
+    // Movement is never hidden: guidance is advisory, and the day state pill
+    // still names Attack.
+    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
+    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
     expect(screen.getByText('Attack')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Change' }));
@@ -488,13 +490,14 @@ describe('Home wellness logging', () => {
     await waitForSync();
 
     // Collapsed inferred Attack state: display pill + guidance, but no choices.
+    // Movement stays available because it is never inferred as impossible.
     expect(screen.getByText('Attack')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-    expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Strength/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Cardio/ })).toBeNull();
+    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
 
     // Change offers Well/Off only, and an explicit recovery choice wins.
     fireEvent.click(screen.getByRole('button', { name: 'Change' }));
@@ -507,7 +510,7 @@ describe('Home wellness logging', () => {
     expect(screen.getByText('Normal routine today.')).toBeTruthy();
   });
 
-  it('keeps an active attack over an earlier Well record and restores the card after it ends', async () => {
+  it('keeps an active attack over an earlier Well record and retains wellness + movement', async () => {
     const now = Date.now();
     const todayKey = localDayKey(now, 'UTC');
     seedState({
@@ -519,14 +522,16 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    // The banner owns rest guidance while active — exactly one instance in the DOM.
-    expect(screen.getAllByText('Rest — no exercise needed.')).toHaveLength(1);
-    // The whole wellness card is gone, so an earlier Well can never re-enable exercise.
-    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Note' })).toBeNull();
-    expect(screen.queryByText('This week:')).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Strength/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Cardio/ })).toBeNull();
+    // Exactly one guidance line (the wellness card); an earlier Well record can
+    // no longer flip the pill to "Well" while the banner says otherwise.
+    expect(screen.getAllByText('Rest if you need to — movement is optional.')).toHaveLength(1);
+    expect(screen.queryByText('Well')).toBeNull();
+    // The wellness controls and movement stay on screen during an attack.
+    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Note' })).toBeTruthy();
+    expect(screen.getByText('This week:')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
 
@@ -535,7 +540,7 @@ describe('Home wellness logging', () => {
     expect(screen.getByText('Well')).toBeTruthy();
     expect(screen.getByText('Normal routine today.')).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
-    expect(screen.queryByText('Rest — no exercise needed.')).toBeNull();
+    expect(screen.queryByText('Rest if you need to — movement is optional.')).toBeNull();
   });
 
   it('latches an Attack day record when a note is saved on an inferred attack day', async () => {
@@ -546,7 +551,7 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
+    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
 
@@ -587,7 +592,7 @@ describe('Home wellness logging', () => {
     mountHome();
     await waitForSync();
 
-    expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
+    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Note' }));
     fireEvent.change(screen.getByLabelText('Day note'), { target: { value: '   ' } });
@@ -636,9 +641,9 @@ describe('Home wellness logging', () => {
       expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-      expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
-      expect(screen.queryByRole('button', { name: /^Strength/ })).toBeNull();
-      expect(screen.queryByRole('button', { name: /^Cardio/ })).toBeNull();
+      expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
@@ -735,11 +740,11 @@ describe('Home wellness logging', () => {
     // Only the CTA creates the attack; logging pain patches it instead.
     expect(api.addAttack).toHaveBeenCalledTimes(1);
 
-    // The new attack drives the banner, hides the wellness card, and leaves the
-    // attack card as the single "Log pain" affordance.
+    // The new attack drives the banner; the wellness card and movement stay on
+    // screen, and the attack card remains the single "Log pain" affordance.
     await waitFor(() => expect(screen.getByText('Attack in progress')).toBeTruthy());
-    expect(screen.getByText('Rest — no exercise needed.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Strength/ })).toBeNull();
+    expect(screen.getByText('Rest if you need to — movement is optional.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Log pain' })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
 
@@ -1479,5 +1484,228 @@ describe('Home demo-data guard', () => {
     expect(screen.queryByText(DEMO_COPY)).toBeNull();
     expect(screen.queryByRole('button', { name: DEMO_BUTTON })).toBeNull();
     expect(api.importAll).not.toHaveBeenCalled();
+  });
+});
+
+describe('Home attack undo and configured Nurtec rule', () => {
+  it('offers Undo for starting an attack and deletes the just-created record', async () => {
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start attack now' }));
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(1));
+
+    const startCall = (sonner.toast.success as Mock).mock.calls.find(
+      ([message]) => String(message).startsWith('Attack started'),
+    );
+    expect(startCall).toBeTruthy();
+    const action = startCall![1].action as { label: string; onClick: () => void };
+    expect(action.label).toBe('Undo');
+
+    act(() => action.onClick());
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(0));
+    expect(api.deleteAttack).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers Undo for ending an attack and reopens it through the same queue', async () => {
+    seedState({ timezone: 'UTC', attacks: [makeAttack(Date.now())] });
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
+    await waitFor(() => expect(captured!.state.attacks[0].end).not.toBeNull());
+
+    const endCall = (sonner.toast.success as Mock).mock.calls.find(
+      ([message]) => String(message) === 'Attack ended — logged.',
+    );
+    expect(endCall).toBeTruthy();
+    const action = endCall![1].action as { label: string; onClick: () => void };
+    expect(action.label).toBe('Undo');
+
+    act(() => action.onClick());
+    await waitFor(() => expect(captured!.state.attacks[0].end).toBeNull());
+    // Reopening is an end-patch, never a delete.
+    expect(api.patchAttack).toHaveBeenLastCalledWith(
+      captured!.state.attacks[0].id,
+      expect.objectContaining({ end: null }),
+    );
+    expect(api.deleteAttack).not.toHaveBeenCalled();
+  });
+
+  it('derives the Nurtec badge from the configured rule and window', async () => {
+    const now = Date.now();
+    seedState({
+      timezone: 'UTC',
+      rules: { nurtec: { limit: 10, windowDays: 14 } },
+      meds: [
+        {
+          id: 'n1', medId: 'nurtec', ts: new Date(now - 86400000).toISOString(),
+          dose: '75 mg', quantity: 1, attackId: null, notes: '', source: 'manual',
+        },
+        {
+          id: 'n2', medId: 'nurtec', ts: new Date(now).toISOString(),
+          dose: '75 mg', quantity: 1, attackId: null, notes: '', source: 'manual',
+        },
+      ],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    const badge = screen.getByText('2/10');
+    expect(badge.getAttribute('title')).toContain('2 of 10 allowed days');
+    expect(badge.getAttribute('title')).toContain('last 14 days');
+  });
+});
+
+describe('Home content order (approved design)', () => {
+  function isBefore(a: Node, b: Node): boolean {
+    return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  it('puts acute medications after the start control, then wellness/movement, then preventives', async () => {
+    seedState({ timezone: 'UTC' });
+    mountHome();
+    await waitForSync();
+
+    const start = screen.getByRole('button', { name: 'Start attack now' });
+    const meds = screen.getByRole('heading', { name: 'Took a med' });
+    const movement = screen.getByText('Movement');
+    const well = screen.getByRole('button', { name: 'Well' });
+    const preventive = screen.getByRole('heading', { name: 'Preventive' });
+
+    expect(isBefore(start, meds)).toBe(true);
+    // Acute medication comes first; its grid holds no preventive buttons.
+    expect(isBefore(meds, well)).toBe(true);
+    expect(isBefore(meds, movement)).toBe(true);
+    expect(isBefore(well, movement)).toBe(true);
+    // Preventive medication stays visible, after wellness/movement.
+    expect(isBefore(movement, preventive)).toBe(true);
+    expect(screen.getByRole('button', { name: /Emgality/ })).toBeTruthy();
+    expect(screen.getByText('How was today?')).toBeTruthy();
+  });
+
+  it('keeps the same order while an attack is active (nothing hidden)', async () => {
+    seedState({ timezone: 'UTC', attacks: [makeAttack(Date.now())] });
+    mountHome();
+    await waitForSync();
+
+    const pain = screen.getByRole('button', { name: 'Log pain' });
+    const ended = screen.getByRole('button', { name: 'Attack ended' });
+    const meds = screen.getByRole('heading', { name: 'Took a med' });
+    const movement = screen.getByText('Movement');
+    const preventive = screen.getByRole('heading', { name: 'Preventive' });
+
+    expect(isBefore(pain, ended)).toBe(true);
+    expect(isBefore(ended, meds)).toBe(true);
+    expect(isBefore(meds, movement)).toBe(true);
+    expect(isBefore(movement, preventive)).toBe(true);
+    // Nothing is hidden or collapsed: the movement controls remain usable.
+    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+    const weather = screen.queryByRole('heading', { name: 'Weather' });
+    if (weather) expect(isBefore(preventive, weather)).toBe(true);
+  });
+});
+
+describe('Home attack undo safety', () => {
+  it('refuses to reopen an ended attack while another attack is active', async () => {
+    seedState({ timezone: 'UTC', attacks: [makeAttack(Date.now())] });
+    mountHome();
+    await waitForSync();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Attack ended' }));
+    await waitFor(() => expect(captured!.state.attacks[0].end).not.toBeNull());
+    const endCall = (sonner.toast.success as Mock).mock.calls.find(
+      ([message]) => String(message) === 'Attack ended — logged.',
+    );
+    expect(endCall).toBeTruthy();
+    const undoEnd = endCall![1].action as { onClick: () => void };
+
+    // Start attack B before the stale toast action is used.
+    fireEvent.click(screen.getByRole('button', { name: 'Log another attack' }));
+    await waitFor(() => expect(captured!.state.attacks).toHaveLength(2));
+    const attackB = captured!.state.attacks.find((a) => a.end === null);
+    expect(attackB).toBeTruthy();
+    // Dismiss the pain dialog the start CTA opened.
+    fireEvent.click(screen.getByRole('button', { name: '0' }));
+    await waitFor(() => expect(screen.queryByText('How bad is the pain right now?')).toBeNull());
+
+    act(() => undoEnd.onClick());
+
+    await waitFor(() => expect(sonner.toast.warning).toHaveBeenCalledWith(
+      'Another attack is in progress',
+      expect.anything(),
+    ));
+    // A stays ended; B is the only open attack.
+    expect(
+      captured!.state.attacks.filter((a) => a.end === null).map((a) => a.id),
+    ).toEqual([attackB!.id]);
+    expect(
+      captured!.state.attacks.find((a) => a.id !== attackB!.id)!.end,
+    ).not.toBeNull();
+
+    // Later logging is associated with B, never diverted back to A.
+    fireEvent.click(screen.getByRole('button', { name: /Nurtec/ }));
+    await waitFor(() => expect(captured!.state.meds).toHaveLength(1));
+    expect(captured!.state.meds[0].attackId).toBe(attackB!.id);
+  });
+});
+
+describe('Home acknowledgement and low-limit warnings', () => {
+  it('acknowledges an explicit day choice made while an attack is active', async () => {
+    const todayKey = localDayKey(Date.now(), 'UTC');
+    seedState({ timezone: 'UTC', attacks: [makeAttack(Date.now())] });
+    mountHome();
+    await waitForSync();
+
+    // Attack status stays primary under the banner.
+    expect(screen.getByText('Attack')).toBeTruthy();
+    expect(screen.queryByText(/day marked/)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+
+    await waitFor(() => expect(readPersisted().dayStates[0]).toMatchObject({
+      day: todayKey,
+      status: 'off',
+    }));
+    // Immediate, visible feedback for the recorded choice.
+    expect(screen.getByText('day marked Off')).toBeTruthy();
+    expect(screen.getByText('Attack')).toBeTruthy();
+  });
+
+  it('does not warn for an unused low limit but warns once a day is used', async () => {
+    seedState({ timezone: 'UTC', rules: { nurtec: { limit: 2, windowDays: 30 } } });
+    mountHome();
+    await waitForSync();
+
+    const nurtecCard = screen.getByRole('button', { name: /Nurtec/ });
+    const unused = within(nurtecCard).getByText('0/2');
+    expect(unused.className).toContain('bg-slate-800');
+    expect(unused.className).not.toContain('bg-amber-950');
+    expect(unused.className).not.toContain('bg-red-950');
+
+    cleanup();
+    seedState({
+      timezone: 'UTC',
+      rules: { nurtec: { limit: 2, windowDays: 30 } },
+      meds: [{
+        id: 'low-limit-dose',
+        medId: 'nurtec',
+        ts: new Date().toISOString(),
+        dose: '75 mg',
+        quantity: 1,
+        attackId: null,
+        notes: '',
+        source: 'manual',
+      }],
+    });
+    mountHome();
+    await waitForSync();
+
+    // 1/2 is near (reaching the limit is not over).
+    const used = within(screen.getByRole('button', { name: /Nurtec/ })).getByText('1/2');
+    expect(used.className).toContain('bg-amber-950');
+    expect(used.className).not.toContain('bg-red-950');
   });
 });

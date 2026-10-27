@@ -187,10 +187,12 @@ describe('Home weather placement', () => {
     const todayHeading = screen.getByRole('heading', { name: 'Today' });
     const nurtecButton = screen.getByRole('button', { name: /Nurtec/ });
 
-    expect(isBefore(start, well)).toBe(true);
-    expect(isBefore(well, medHeading)).toBe(true);
+    // Approved order: attack controls -> medications -> wellness/movement ->
+    // weather -> today's meds.
+    expect(isBefore(start, medHeading)).toBe(true);
     expect(isBefore(medHeading, nurtecButton)).toBe(true);
-    expect(isBefore(medHeading, weatherHeading)).toBe(true);
+    expect(isBefore(nurtecButton, well)).toBe(true);
+    expect(isBefore(well, weatherHeading)).toBe(true);
     expect(isBefore(weatherHeading, todayHeading)).toBe(true);
   });
 
@@ -216,11 +218,13 @@ describe('Home weather placement', () => {
     const pain = screen.getByRole('button', { name: 'Log pain' });
     const ended = screen.getByRole('button', { name: 'Attack ended' });
     const medHeading = screen.getByRole('heading', { name: 'Took a med' });
+    const movement = screen.getByText('Movement');
     const weatherHeading = screen.getByRole('heading', { name: 'Weather' });
 
     expect(isBefore(pain, ended)).toBe(true);
     expect(isBefore(ended, medHeading)).toBe(true);
-    expect(isBefore(medHeading, weatherHeading)).toBe(true);
+    expect(isBefore(medHeading, movement)).toBe(true);
+    expect(isBefore(movement, weatherHeading)).toBe(true);
   });
 
   it('hides the card entirely when weather is disabled', async () => {

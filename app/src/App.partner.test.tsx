@@ -149,7 +149,9 @@ describe('App route provider composition', () => {
       { timeout: 5000 },
     );
 
-    expect(screen.getByText(/Migraine Tracker/)).toBeTruthy();
+    expect(
+      (document.querySelector('[data-testid="shell-title"]') as HTMLElement).textContent,
+    ).toBe('Calendar');
     expect(screen.getAllByRole('link', { name: 'Calendar' })).toHaveLength(2);
     await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull());
   });

@@ -94,7 +94,10 @@ describe('PartnerLayout', () => {
     renderLayout();
     await waitFor(() => expect(screen.getByText('Live')).toBeTruthy());
 
-    expect(screen.getByText(/Migraine Tracker/)).toBeTruthy();
+    // The header carries the current page, not brand text.
+    expect(
+      (document.querySelector('[data-testid="shell-title"]') as HTMLElement).textContent,
+    ).toBe('Now');
     expect(screen.getByText('Partner view')).toBeTruthy();
     expect(screen.getByText('Read only')).toBeTruthy();
 
@@ -104,7 +107,8 @@ describe('PartnerLayout', () => {
 
     const [desktopNow] = screen.getAllByRole('link', { name: 'Now' });
     expect(desktopNow.getAttribute('href')).toBe('/view');
-    expect(desktopNow.className).toContain('bg-white');
+    // The active tab is exposed to assistive tech, not only via colour.
+    expect(desktopNow.getAttribute('aria-current')).toBe('page');
 
     // No Settings link and no writer sync pill / Toast surface.
     expect(screen.queryByRole('link', { name: /Settings/ })).toBeNull();

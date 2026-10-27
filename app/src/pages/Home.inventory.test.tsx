@@ -274,7 +274,7 @@ describe('Home Nurtec inventory display', () => {
     await waitForSync();
 
     const badge = screen.getByText('−3 stock');
-    expect(badge.className).toContain('text-rose-300');
+    expect(badge.className).toContain('text-red-300');
     expect(badge.getAttribute('title')).toContain('negative');
   });
 

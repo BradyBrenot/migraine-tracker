@@ -36,6 +36,7 @@ const CHOICES: DayStateStatus[] = ['well', 'off'];
 export default function DayCheckIn({
   guidance,
   effectiveStatus,
+  displayOverride,
 }: {
   guidance?: string;
   /**
@@ -43,6 +44,13 @@ export default function DayCheckIn({
    * explicit record exists; an explicit record always wins.
    */
   effectiveStatus?: DayStateStatus | null;
+  /**
+   * Display-only pill override. The Log page uses `attack` while an attack is
+   * actually in progress so an earlier explicit Well/Off record cannot make the
+   * card read "Well" under an active-attack banner. It never changes what a
+   * later choice or note saves.
+   */
+  displayOverride?: DayStateStatus | null;
 }) {
   const { state, setDayState } = useStore();
   const now = useNow();
@@ -56,7 +64,14 @@ export default function DayCheckIn({
   // Inferred Attack is display-only: no record, but real attacks cover today.
   const inferredAttack = !record && effectiveStatus === 'attack';
   const displayStatus: DayStateStatus | null =
-    record?.status ?? (inferredAttack ? 'attack' : null);
+    displayOverride ?? record?.status ?? (inferredAttack ? 'attack' : null);
+  // An active-attack display override keeps Attack primary, but an explicit
+  // Well/Off choice made during the attack must still be acknowledged here so
+  // the user sees that their choice was recorded.
+  const overrideNotice =
+    displayOverride && record && record.status !== displayOverride
+      ? `day marked ${STATUS_META[record.status].label}`
+      : null;
   const showChoices = editing || displayStatus === null;
 
   function choose(status: DayStateStatus) {
@@ -117,6 +132,11 @@ export default function DayCheckIn({
               {STATUS_META[displayStatus].label}
             </span>
           )
+        )}
+        {overrideNotice && !showChoices && (
+          <span role="status" className="text-xs font-medium text-slate-300">
+            {overrideNotice}
+          </span>
         )}
         {!showChoices && displayStatus ? (
           <div className="ml-auto flex shrink-0 items-center gap-1">

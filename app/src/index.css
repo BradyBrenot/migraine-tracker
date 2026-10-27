@@ -2,37 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Dark-only theme. A migraine tracker has no business being bright. */
+/*
+ * Dark-only, calm, low-glare clinical theme. A migraine tracker has no business
+ * being bright.
+ *
+ * The palette is intentionally narrow:
+ * - neutral surfaces climb in three steps (page -> card -> raised control);
+ * - `primary` is a restrained periwinkle brand accent, used for selected/primary
+ *   controls and the focus ring;
+ * - `attack` is a coral accent reserved for "an attack is happening now";
+ * - `destructive` is a deep red that carries white text at >= 7:1 contrast.
+ *
+ * `--background` matches the #020617 `theme-color`/`background_color` pinned in
+ * the HTML shells and both web app manifests. Change them together.
+ */
 @layer base {
   :root {
-    --background: 222 47% 6%;
+    --background: 228.6 84% 4.9%;
     --foreground: 213 31% 91%;
-    --card: 222 40% 10%;
+    --card: 222.2 47.4% 11.2%;
     --card-foreground: 213 31% 91%;
-    --popover: 222 44% 8%;
+    --popover: 222.2 47.4% 11.2%;
     --popover-foreground: 213 31% 91%;
-    --primary: 213 31% 91%;
-    --primary-foreground: 222 47% 8%;
-    --secondary: 217 33% 17%;
+    /* Restrained periwinkle: light enough for a 8.5:1 text label on it. */
+    --primary: 231 68% 74%;
+    --primary-foreground: 231 45% 12%;
+    --secondary: 217.2 32.6% 17.5%;
     --secondary-foreground: 213 31% 91%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 60%;
-    --accent: 217 33% 20%;
-    --accent-foreground: 213 31% 91%;
-    --destructive: 16 85% 55%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 20%;
+    --accent-foreground: 213 31% 93%;
+    /* Coral: "attack in progress" surfaces and actions. */
+    --attack: 8 86% 67%;
+    --attack-foreground: 8 60% 9%;
+    --attack-muted: 8 45% 15%;
+    --attack-border: 8 45% 32%;
+    /* Deep red: white label text stays legible (>= 7:1). */
+    --destructive: 0 70% 37%;
     --destructive-foreground: 0 0% 100%;
-    --border: 217 30% 18%;
-    --input: 217 30% 22%;
-    --ring: 204 80% 60%;
-    --radius: 0.625rem;
-    --sidebar-background: 222 44% 8%;
+    --border: 217.2 32.6% 20%;
+    --input: 217.2 32.6% 24%;
+    --ring: 231 68% 74%;
+    --radius: 0.75rem;
+    --sidebar-background: 222.2 47.4% 11.2%;
     --sidebar-foreground: 213 31% 91%;
-    --sidebar-primary: 213 31% 91%;
-    --sidebar-primary-foreground: 222 47% 8%;
-    --sidebar-accent: 217 33% 17%;
-    --sidebar-accent-foreground: 213 31% 91%;
-    --sidebar-border: 217 30% 18%;
-    --sidebar-ring: 204 80% 60%;
+    --sidebar-primary: 231 68% 74%;
+    --sidebar-primary-foreground: 231 45% 12%;
+    --sidebar-accent: 217.2 32.6% 20%;
+    --sidebar-accent-foreground: 213 31% 93%;
+    --sidebar-border: 217.2 32.6% 20%;
+    --sidebar-ring: 231 68% 74%;
     color-scheme: dark;
   }
 }
@@ -42,7 +62,11 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+  }
+  /* A calm, high-contrast selection colour instead of the browser default. */
+  ::selection {
+    @apply bg-primary/30 text-foreground;
   }
   /*
    * A single, visible keyboard-focus indicator for interactive controls. It is

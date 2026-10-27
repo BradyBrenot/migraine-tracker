@@ -12,11 +12,28 @@ interface BoundaryState {
 /**
  * Accessible placeholder while a route chunk downloads. The surrounding
  * Layout/PartnerLayout chrome stays mounted.
+ *
+ * It is a compact skeleton of a page (title block, card, two lines) instead of
+ * a blank "Loading…" line, but the live-region text is unchanged for assistive
+ * tech: `role="status"` + `aria-live="polite"` + a screen-reader "Loading…".
+ * The bars are decorative (`aria-hidden`), so the status region announces once.
  */
 function RouteLoading() {
   return (
-    <div role="status" aria-live="polite" className="py-10 text-center text-sm text-slate-400">
-      Loading…
+    <div role="status" aria-live="polite" className="animate-pulse space-y-4">
+      <span className="sr-only">Loading…</span>
+      <div aria-hidden="true" className="space-y-4">
+        <div className="h-5 w-32 rounded-md bg-slate-800" />
+        <div className="h-28 rounded-xl border border-slate-800 bg-slate-900/60" />
+        <div className="space-y-2">
+          <div className="h-3 w-full max-w-sm rounded bg-slate-800/80" />
+          <div className="h-3 w-2/3 max-w-xs rounded bg-slate-800/60" />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="h-16 rounded-xl border border-slate-800 bg-slate-900/60" />
+          <div className="h-16 rounded-xl border border-slate-800 bg-slate-900/60" />
+        </div>
+      </div>
     </div>
   );
 }

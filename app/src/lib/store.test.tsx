@@ -3161,3 +3161,33 @@ describe('narrow record PATCH payloads', () => {
     expect(currentStore().state.workouts[0].notes).toBe('');
   });
 });
+
+describe('setRules batch write', () => {
+  it('applies all rules in one state update and one whole-map settings write', async () => {
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.putSetting.mockClear();
+
+    const shared = { limit: 9, windowDays: 21 };
+    await act(async () => {
+      currentStore().setRules({
+        tylenol: { ...shared },
+        ibuprofen: { ...shared },
+        naproxen: { ...shared },
+      });
+    });
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    // ONE write for the whole resolved map, not three intermediate payloads.
+    expect(api.putSetting).toHaveBeenCalledTimes(1);
+    expect(api.putSetting).toHaveBeenCalledWith('rules', expect.objectContaining({
+      tylenol: shared,
+      ibuprofen: shared,
+      naproxen: shared,
+      // Untouched meds stay in the whole-map payload.
+      nurtec: expect.anything(),
+    }));
+    expect(currentStore().state.rules.tylenol).toEqual(shared);
+    expect(currentStore().state.rules.naproxen).toEqual(shared);
+  });
+});

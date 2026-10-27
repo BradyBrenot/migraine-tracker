@@ -261,7 +261,9 @@ describe('PartnerHome (read-only Now)', () => {
     expect(screen.queryByText('Well')).toBeNull();
     expect(screen.queryByText('Normal routine today.')).toBeNull();
     // Once on the active-attack card, once in Today's guidance.
-    expect(screen.getAllByText('Rest — no exercise needed.').length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText('Rest if you need to — recovery comes first.').length,
+    ).toBeGreaterThanOrEqual(2);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 

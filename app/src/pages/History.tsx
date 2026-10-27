@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Pencil, Trash2, Plus } from 'lucide-react';
+import { Pencil, Trash2, Plus, Search } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { allMedIds, medColor, medName, painColor, textOn } from '@/lib/meds';
 import { parseTabletQuantity } from '@/lib/inventory';
@@ -22,6 +22,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { DANGER_ACTION_CLASS } from '@/lib/ui';
 
 const WORKOUT_KIND_LABEL: Record<WorkoutKind, string> = {
   strength: 'Strength',
@@ -31,6 +32,44 @@ const WORKOUT_KIND_LABEL: Record<WorkoutKind, string> = {
 
 /** Nurtec's standard pack size, used as the new-pickup default. */
 const NURTEC_PACK_SIZE = '8';
+
+type HistoryTab = 'attacks' | 'meds' | 'refills' | 'workouts';
+
+/** Noun used by the filter hint/empty state for the active tab. */
+const TAB_NOUN: Record<HistoryTab, string> = {
+  attacks: 'attacks',
+  meds: 'medications',
+  refills: 'pickups',
+  workouts: 'workouts',
+};
+
+/** Case-insensitive "any of these fields contains the query" test. */
+function matchesQuery(fields: (string | number | null | undefined)[], needle: string): boolean {
+  if (!needle) return true;
+  return fields
+    .filter((field) => field !== null && field !== undefined && field !== '')
+    .join(' ')
+    .toLowerCase()
+    .includes(needle);
+}
+
+/** Neutral "nothing matched" state for the active text filter. */
+function FilterEmpty({
+  noun, query, onClear,
+}: { noun: string; query: string; onClear: () => void }) {
+  return (
+    <div className="rounded-xl border border-dashed border-slate-800 px-3 py-8 text-center text-sm text-slate-400">
+      <p>No {noun} match “{query.trim()}”.</p>
+      <button
+        type="button"
+        onClick={onClear}
+        className="mt-2 inline-flex min-h-11 items-center rounded-lg px-3 text-xs font-semibold text-slate-200 underline underline-offset-2 hover:text-slate-50"
+      >
+        Clear filter
+      </button>
+    </div>
+  );
+}
 
 export default function History() {
   const store = useStore();
@@ -52,6 +91,11 @@ export default function History() {
   const [refillNotes, setRefillNotes] = useState('');
   const [refillQuantity, setRefillQuantity] = useState('');
   const [deleteRefillId, setDeleteRefillId] = useState<string | null>(null);
+  // Active tab + a cross-field text filter. Counts in the tab bar always come
+  // from the full record arrays; the filter only narrows what is listed.
+  const [tab, setTab] = useState<HistoryTab>('attacks');
+  const [query, setQuery] = useState('');
+  const needle = query.trim().toLowerCase();
 
   const attacks = useMemo(
     () => [...state.attacks].sort((a, b) => b.start.localeCompare(a.start)),
@@ -101,6 +145,42 @@ export default function History() {
     }
     return gaps;
   }, [state.refills]);
+
+  // Filters run over the already-sorted arrays, so list order never changes.
+  const filteredAttacks = useMemo(() => {
+    if (!needle) return attacks;
+    return attacks.filter((a) => matchesQuery([
+      fmtDateFull(a.start),
+      fmtTime(a.start),
+      a.notes,
+      a.symptoms.join(' '),
+      a.triggers.join(' '),
+      a.peakPain >= 0 ? `${a.peakPain}/10` : '',
+      (medsByAttack.get(a.id) ?? []).map((m) => medName(m.medId)).join(' '),
+    ], needle));
+  }, [attacks, needle, medsByAttack]);
+
+  const filteredMeds = useMemo(() => {
+    if (!needle) return meds;
+    return meds.filter((m) => matchesQuery([
+      medName(m.medId), m.dose, m.notes, fmtDateFull(m.ts), fmtTime(m.ts),
+    ], needle));
+  }, [meds, needle]);
+
+  const filteredRefills = useMemo(() => {
+    if (!needle) return refills;
+    return refills.filter((r) => matchesQuery([
+      medName(r.medId), r.notes, r.date, r.quantity,
+    ], needle));
+  }, [refills, needle]);
+
+  const filteredWorkouts = useMemo(() => {
+    if (!needle) return workouts;
+    return workouts.filter((w) => matchesQuery([
+      WORKOUT_KIND_LABEL[w.kind], w.effort, w.notes,
+      fmtDateFull(w.performedAt), fmtTime(w.performedAt), w.durationMinutes,
+    ], needle));
+  }, [workouts, needle]);
 
   const refillQuantityParsed = parseTabletQuantity(refillQuantity);
   const canSaveRefill = refillDate !== '' && refillQuantityParsed.valid;
@@ -157,7 +237,14 @@ export default function History() {
   return (
     <div className="mx-auto max-w-2xl">
       <h1 className="sr-only">History</h1>
-      <Tabs defaultValue="attacks">
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          setTab(value as HistoryTab);
+          // A filter typed for one tab must never invisibly narrow another.
+          setQuery('');
+        }}
+      >
         {/* Compact labels keep the four tabs readable at phone widths; the
             full wording returns at sm+. Counts stay visible at every size and
             stack under the label at base, where the taller list keeps a
@@ -182,8 +269,7 @@ export default function History() {
             value="refills"
             className="flex-col gap-0 px-1 py-1 text-[11px] leading-tight sm:flex-row sm:gap-1.5 sm:px-2 sm:py-1 sm:text-sm"
           >
-            <span className="sm:hidden">Rx</span>
-            <span className="hidden sm:inline">Rx pickups</span>
+            Pickups
             <span className="tabular-nums">({refills.length})</span>
           </TabsTrigger>
           <TabsTrigger
@@ -195,6 +281,35 @@ export default function History() {
           </TabsTrigger>
         </TabsList>
 
+        {/* Text filter for the active tab. Tabs/counts above always describe the
+            full record sets; this only narrows the list below. */}
+        <div role="search" className="mt-3 flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+            />
+            <Input
+              id="history-filter"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label={`Filter ${TAB_NOUN[tab]}`}
+              placeholder={`Filter ${TAB_NOUN[tab]}…`}
+              className="h-11 pl-8"
+            />
+          </div>
+          {query !== '' && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              className="inline-flex h-11 shrink-0 items-center rounded-lg px-3 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
         <TabsContent value="attacks" className="mt-4 space-y-2">
           {!readOnly && (
             <Button variant="outline" className="mb-2 h-11 w-full gap-2" onClick={() => setNewAttackOpen(true)}>
@@ -204,7 +319,10 @@ export default function History() {
           {attacks.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No attacks logged yet.</p>
           )}
-          {attacks.map((a) => {
+          {attacks.length > 0 && filteredAttacks.length === 0 && (
+            <FilterEmpty noun="attacks" query={query} onClear={() => setQuery('')} />
+          )}
+          {filteredAttacks.map((a) => {
             const times = parseAttackTimes(a, now);
             // A valid finished end earlier than a valid start is surfaced as a
             // warning, but never blocked, hidden, or silently repaired. An
@@ -304,9 +422,12 @@ export default function History() {
           {meds.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No medications logged yet.</p>
           )}
-          {meds.length > 0 && (
+          {meds.length > 0 && filteredMeds.length === 0 && (
+            <FilterEmpty noun="medications" query={query} onClear={() => setQuery('')} />
+          )}
+          {filteredMeds.length > 0 && (
             <div className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-              {meds.map((m) => (
+              {filteredMeds.map((m) => (
                 <div key={m.id} className="flex items-center gap-3 px-3 py-2.5">
                   <span className="h-3 w-3 rounded-full" style={{ background: medColor(m.medId) }} />
                   <div className="flex-1">
@@ -348,19 +469,22 @@ export default function History() {
               className="mb-2 h-11 w-full gap-2"
               onClick={openNewRefill}
             >
-              <Plus className="h-4 w-4" /> Add Rx pickup
+              <Plus className="h-4 w-4" /> Add pickup
             </Button>
           )}
           <p className="text-xs text-slate-400">
-            Gepant refill pickups — refill cadence is a good historical signal for
+            Pharmacy pickups — refill cadence is a good historical signal for
             how bad things were, even in weeks you didn't track.
           </p>
           {refills.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No pickups logged yet.</p>
           )}
-          {refills.length > 0 && (
+          {refills.length > 0 && filteredRefills.length === 0 && (
+            <FilterEmpty noun="pickups" query={query} onClear={() => setQuery('')} />
+          )}
+          {filteredRefills.length > 0 && (
             <div className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-              {refills.map((r) => {
+              {filteredRefills.map((r) => {
                 const gap = refillGaps.get(r.id);
                 const c = medColor(r.medId);
                 return (
@@ -418,9 +542,12 @@ export default function History() {
           {workouts.length === 0 && (
             <p className="py-10 text-center text-sm text-slate-400">No workouts logged yet.</p>
           )}
-          {workouts.length > 0 && (
+          {workouts.length > 0 && filteredWorkouts.length === 0 && (
+            <FilterEmpty noun="workouts" query={query} onClear={() => setQuery('')} />
+          )}
+          {filteredWorkouts.length > 0 && (
             <div className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-              {workouts.map((w) => (
+              {filteredWorkouts.map((w) => (
                 <div key={w.id} className="flex items-center gap-3 px-3 py-2.5">
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold">
@@ -495,7 +622,7 @@ export default function History() {
           <Dialog open={refillOpen} onOpenChange={(o) => !o && closeRefill()}>
             <DialogContent className="sm:max-w-sm">
               <DialogHeader>
-                <DialogTitle>{refillEditId ? 'Edit Rx pickup' : 'Add Rx pickup'}</DialogTitle>
+                <DialogTitle>{refillEditId ? 'Edit pickup' : 'Add pickup'}</DialogTitle>
                 <DialogDescription>
                   {refillEditId
                     ? 'Update the pickup date, tablet count, or notes for this refill.'
@@ -592,6 +719,7 @@ export default function History() {
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
+                  className={DANGER_ACTION_CLASS}
                   onClick={() => { if (deleteRefillId) store.deleteRefill(deleteRefillId); setDeleteRefillId(null); }}
                 >
                   Delete
@@ -612,6 +740,7 @@ export default function History() {
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
+                  className={DANGER_ACTION_CLASS}
                   onClick={() => { if (deleteId) store.deleteAttack(deleteId); setDeleteId(null); }}
                 >
                   Delete
@@ -629,6 +758,7 @@ export default function History() {
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
+                  className={DANGER_ACTION_CLASS}
                   onClick={() => { if (deleteMedId) store.deleteMed(deleteMedId); setDeleteMedId(null); }}
                 >
                   Delete
@@ -646,6 +776,7 @@ export default function History() {
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
+                  className={DANGER_ACTION_CLASS}
                   onClick={() => { if (deleteWorkoutId) store.deleteWorkout(deleteWorkoutId); setDeleteWorkoutId(null); }}
                 >
                   Delete

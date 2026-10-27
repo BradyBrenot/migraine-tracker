@@ -1,8 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import type {
-  Attack, DayState, DayStateStatus, MedEvent, Refill, StockBaseline, TrackerState,
-  Workout, WorkoutEffort, WorkoutKind,
+  Attack, DayState, DayStateStatus, MedEvent, MedRule, Refill, StockBaseline,
+  TrackerState, Workout, WorkoutEffort, WorkoutKind,
 } from '@/types';
 import { MED_CATALOG } from '@/lib/meds';
 import { uid } from '@/lib/format';
@@ -651,6 +651,12 @@ export interface StoreApi {
   // bulk
   importData: (attacks: Attack[], meds: MedEvent[]) => void;
   setRule: (medId: string, limit: number, windowDays: number) => void;
+  /**
+   * Apply several medication rules in ONE state update and ONE
+   * `putSetting('rules', …)` write (the whole resolved map). Used by the shared
+   * Painkillers control so one save is one server write, not three.
+   */
+  setRules: (patch: Record<string, MedRule>) => void;
   setDoseDefault: (medId: string, dose: string) => void;
   setPlannedDose: (medId: string, date: string | null) => void;
   loadDemoData: () => void;
@@ -1442,6 +1448,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         applyState((s) => ({ ...s, rules }));
         enqueue('putSetting(rules)', () => backend.putSetting('rules', rules));
       },
+      setRules: (patch) => {
+        // One state update and one whole-map write: a shared rule that touches
+        // three meds must not enqueue three intermediate server payloads.
+        const rules = { ...stateRef.current.rules, ...patch };
+        applyState((s) => ({ ...s, rules }));
+        enqueue('putSetting(rules)', () => backend.putSetting('rules', rules));
+      },
       setDoseDefault: (medId, dose) => {
         const doses = { ...stateRef.current.doses, [medId]: dose };
         applyState((s) => ({ ...s, doses }));
@@ -1856,6 +1869,7 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
     resetLowStockAlert: denyReadOnly,
     importData: denyReadOnly,
     setRule: denyReadOnly,
+    setRules: denyReadOnly,
     setDoseDefault: denyReadOnly,
     setPlannedDose: denyReadOnly,
     loadDemoData: denyReadOnly,

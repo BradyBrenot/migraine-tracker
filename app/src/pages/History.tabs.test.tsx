@@ -203,11 +203,9 @@ describe('History tab bar', () => {
     expect(medications.className).toContain('hidden');
     expect(medications.className).toContain('sm:inline');
 
-    const rx = screen.getByText('Rx');
-    expect(rx.className).toContain('sm:hidden');
-    const rxPickups = screen.getByText('Rx pickups');
-    expect(rxPickups.className).toContain('hidden');
-    expect(rxPickups.className).toContain('sm:inline');
+    const pickups = screen.getByText('Pickups');
+    expect(pickups).toBeTruthy();
+    expect(screen.queryByText('Rx')).toBeNull();
 
     // Attacks and Workouts are short enough to serve at every width.
     expect(screen.getByText('Attacks')).toBeTruthy();
@@ -222,10 +220,92 @@ describe('History tab bar', () => {
     activateTab(/Workouts/);
     expect(await screen.findByText('Add past workout')).toBeTruthy();
 
-    activateTab(/Rx pickups/);
-    expect(await screen.findByText('Add Rx pickup')).toBeTruthy();
+    activateTab(/Pickups/);
+    expect(await screen.findByText('Add pickup')).toBeTruthy();
 
     activateTab(/Meds/);
     expect(await screen.findByText('Add past medication')).toBeTruthy();
+  });
+
+  it('filters the active tab without changing the counts', async () => {
+    const today = new Date().toISOString();
+    seedState({
+      attacks: [
+        {
+          id: 'a-note', start: today, end: today, painLog: [], peakPain: 4,
+          symptoms: [], triggers: [], aura: null, notes: 'after lunch', source: 'manual',
+        },
+        {
+          id: 'a-other', start: today, end: today, painLog: [], peakPain: 7,
+          symptoms: ['Nausea'], triggers: [], aura: null, notes: '', source: 'manual',
+        },
+      ],
+    });
+    mountHistory();
+    await waitForSync();
+
+    // Counts describe the full record set.
+    expect(screen.getByText('(2)')).toBeTruthy();
+
+    const filter = screen.getByLabelText('Filter attacks') as HTMLInputElement;
+    fireEvent.change(filter, { target: { value: 'nausea' } });
+
+    expect(screen.queryByText('after lunch')).toBeNull();
+    expect(screen.getByText('(2)')).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: 'zzz' } });
+    expect(screen.getByText('No attacks match “zzz”.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }));
+    expect((screen.getByLabelText('Filter attacks') as HTMLInputElement).value).toBe('');
+    expect(screen.getAllByText('after lunch')).toHaveLength(1);
+  });
+});
+
+describe('History tab filter scope', () => {
+  it('clears the filter when switching tabs so it cannot invisibly filter the next tab', async () => {
+    seedState({
+      meds: [{
+        id: 'med-1',
+        medId: 'tylenol',
+        ts: new Date().toISOString(),
+        dose: '500 mg',
+        quantity: null,
+        attackId: null,
+        notes: '',
+        source: 'manual',
+      }],
+      attacks: [{
+        id: 'attack-1',
+        start: new Date().toISOString(),
+        end: new Date().toISOString(),
+        painLog: [],
+        peakPain: 4,
+        symptoms: [],
+        triggers: [],
+        aura: null,
+        notes: 'after lunch',
+        source: 'manual',
+      }],
+    });
+    mountHistory();
+    await waitForSync();
+
+    const attackFilter = screen.getByLabelText('Filter attacks') as HTMLInputElement;
+    fireEvent.change(attackFilter, { target: { value: 'zzz' } });
+    expect(screen.getByText('No attacks match “zzz”.')).toBeTruthy();
+
+    activateTab(/Meds/);
+
+    // The next tab starts unfiltered, so its records are visible.
+    const medFilter = screen.getByLabelText('Filter medications') as HTMLInputElement;
+    expect(medFilter.value).toBe('');
+    expect(await screen.findByText('Tylenol')).toBeTruthy();
+    expect(screen.queryByText(/No medications match/)).toBeNull();
+
+    // And returning to attacks is unfiltered too.
+    activateTab(/Attacks/);
+    expect((screen.getByLabelText('Filter attacks') as HTMLInputElement).value).toBe('');
+    expect(screen.getByText('after lunch')).toBeTruthy();
   });
 });

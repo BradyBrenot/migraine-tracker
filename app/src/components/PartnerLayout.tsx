@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router';
+import { NavLink, Outlet, useLocation } from 'react-router';
 import { BarChart3, CalendarDays, Home, List, Lock } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import RouteBoundary from '@/components/RouteBoundary';
@@ -11,6 +11,19 @@ const tabs = [
   { to: '/view/history', label: 'History', icon: List },
 ] as const;
 
+/** Header label for the current partner route (never a heading). */
+const ROUTE_TITLES: Record<string, string> = {
+  '/view': 'Now',
+  '/view/calendar': 'Calendar',
+  '/view/reports': 'Reports',
+  '/view/history': 'History',
+};
+
+function routeTitle(pathname: string): string {
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+  return ROUTE_TITLES[normalized] ?? 'Not found';
+}
+
 interface ViewerStatus {
   label: string;
   cls: string;
@@ -22,7 +35,7 @@ function viewerStatus(serverMode: boolean, status: SyncStatus): ViewerStatus {
   if (status === 'synced') {
     return {
       label: 'Live',
-      cls: 'border-slate-800 text-slate-400',
+      cls: 'border-slate-700 text-slate-400',
       dot: 'bg-emerald-500',
       title: 'Showing the latest server data',
     };
@@ -45,7 +58,7 @@ function viewerStatus(serverMode: boolean, status: SyncStatus): ViewerStatus {
   return {
     label: 'Updating',
     cls: 'border-sky-900 bg-sky-950/60 text-sky-300',
-    dot: 'bg-sky-400 animate-pulse',
+    dot: 'bg-sky-400',
     title: 'Loading the latest server data',
   };
 }
@@ -70,18 +83,31 @@ function StatusPill() {
  * Settings link, no link back to the writer app, and no Toaster/mutation UI.
  */
 export default function PartnerLayout() {
+  const { pathname } = useLocation();
+  const title = routeTitle(pathname);
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       {/* First focusable element: keyboard users can jump the nav on every page. */}
       <a
         href="#main-content"
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-slate-950 focus:shadow-lg"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-primary-foreground focus:shadow-lg"
       >
         Skip to main content
       </a>
-      <header className="sticky top-0 z-30 border-b bg-slate-900/90 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
         <div className="mx-auto flex min-h-14 max-w-5xl flex-nowrap items-center gap-2 px-4 py-2">
-          <span className="min-w-0 truncate text-lg font-bold tracking-tight">🌀 Migraine Tracker</span>
+          <img
+            src="/icons/icon-192.png"
+            alt=""
+            aria-hidden="true"
+            className="h-6 w-6 shrink-0 rounded-md"
+          />
+          <span
+            data-testid="shell-title"
+            className="min-w-0 truncate text-base font-semibold tracking-tight text-slate-100"
+          >
+            {title}
+          </span>
           <span className="hidden shrink-0 rounded-full border border-slate-700 px-2 py-0.5 text-[11px] font-semibold text-slate-300 sm:inline">
             Partner view
           </span>
@@ -101,7 +127,7 @@ export default function PartnerLayout() {
                 className={({ isActive }) =>
                   `flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
                     isActive
-                      ? 'bg-white text-slate-950'
+                      ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/40'
                       : 'text-slate-300 hover:bg-slate-800'
                   }`
                 }
@@ -127,7 +153,7 @@ export default function PartnerLayout() {
       {/* mobile bottom nav */}
       <nav
         aria-label="Partner mobile primary"
-        className="fixed bottom-0 left-0 right-0 z-30 border-t bg-slate-900/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur lg:hidden"
+        className="fixed bottom-0 left-0 right-0 z-30 border-t border-slate-800/80 bg-slate-950/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur lg:hidden"
       >
         <div className="mx-auto grid max-w-lg grid-cols-4">
           {tabs.map(({ to, label, icon: Icon }) => (
@@ -136,8 +162,8 @@ export default function PartnerLayout() {
               to={to}
               end={to === '/view'}
               className={({ isActive }) =>
-                `flex min-w-0 flex-col items-center gap-0.5 py-2 text-[11px] font-medium ${
-                  isActive ? 'text-slate-100' : 'text-slate-400'
+                `flex min-h-11 min-w-0 flex-col items-center gap-0.5 py-2 text-[11px] font-medium ${
+                  isActive ? 'text-primary' : 'text-slate-400'
                 }`
               }
             >

@@ -27,7 +27,7 @@ function Chip({
       onClick={onClick}
       className={`inline-flex min-h-11 items-center rounded-full border px-3 text-sm font-medium transition-colors ${
         active
-          ? 'border-slate-900 bg-white text-slate-950'
+          ? 'border-primary bg-primary text-primary-foreground'
           : 'border-slate-600 bg-slate-900 text-slate-300 hover:border-slate-400'
       }`}
     >

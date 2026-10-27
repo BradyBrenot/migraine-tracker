@@ -9,6 +9,11 @@ import { nurtecInventory, parseTabletQuantity } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { fmtDateFull, fmtTime, toLocalInput } from '@/lib/format';
 import { MED_CATALOG, medColor } from '@/lib/meds';
+import {
+  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, painkillerRulesDiffer,
+  resolveRule, resolveSharedPainkillerRule,
+} from '@/lib/usage';
+import { DANGER_ACTION_CLASS } from '@/lib/ui';
 import { importMigraineBuddyCSV, type ImportResult } from '@/lib/mbImport';
 import { isValidTimeZone } from '../../shared/datetime.ts';
 import {
@@ -156,6 +161,10 @@ export default function Settings() {
   const [baselineAt, setBaselineAt] = useState<string | null>(null);
   /** null = follow the persisted settings; otherwise an unsaved form draft. */
   const [reminderDraft, setReminderDraft] = useState<ReminderSettings | null>(null);
+  /** null = follow the persisted rules; otherwise an unsaved shared-painkiller draft. */
+  const [sharedRuleDraft, setSharedRuleDraft] = useState<
+    { limit: string; windowDays: string } | null
+  >(null);
   /** null = follow the persisted weather settings; otherwise an unsaved draft. */
   const [weatherDraft, setWeatherDraft] = useState<WeatherSettings | null>(null);
   const [weatherQuery, setWeatherQuery] = useState('');
@@ -268,6 +277,42 @@ export default function Settings() {
   const tzTrimmed = tzValue.trim();
   const tzValid = isValidTimeZone(tzTrimmed);
   const tzChanged = tzTrimmed !== state.timezone;
+
+  // Shared painkiller rule: ONE draft form saved explicitly to all three rule
+  // entries in a single state update + single settings write. Typing never
+  // persists an intermediate value.
+  const sharedPainkillerRule = resolveSharedPainkillerRule(state.rules);
+  const painkillerRulesMismatch = painkillerRulesDiffer(state.rules);
+  const sharedRuleForm = sharedRuleDraft ?? {
+    limit: String(sharedPainkillerRule.limit),
+    windowDays: String(sharedPainkillerRule.windowDays),
+  };
+  const sharedRuleLimit = sharedRuleForm.limit.trim() === ''
+    ? Number.NaN
+    : Number(sharedRuleForm.limit);
+  const sharedRuleWindow = sharedRuleForm.windowDays.trim() === ''
+    ? Number.NaN
+    : Number(sharedRuleForm.windowDays);
+  // A zero day limit is valid (any use is then over the limit).
+  const sharedRuleLimitValid = Number.isInteger(sharedRuleLimit)
+    && sharedRuleLimit >= 0
+    && sharedRuleLimit <= 31;
+  const sharedRuleWindowValid = Number.isInteger(sharedRuleWindow)
+    && sharedRuleWindow >= 7
+    && sharedRuleWindow <= 90;
+  const sharedRuleDirty = sharedRuleForm.limit !== String(sharedPainkillerRule.limit)
+    || sharedRuleForm.windowDays !== String(sharedPainkillerRule.windowDays);
+  const canSaveSharedRule = sharedRuleLimitValid && sharedRuleWindowValid && sharedRuleDirty;
+
+  function saveSharedPainkillerRule() {
+    if (!canSaveSharedRule) return;
+    const rule = { limit: sharedRuleLimit, windowDays: sharedRuleWindow };
+    store.setRules(
+      Object.fromEntries(PAINKILLER_MED_IDS.map((medId) => [medId, { ...rule }])),
+    );
+    setSharedRuleDraft(null);
+    toast.success('Painkiller rule saved for all three');
+  }
 
   const inventory = nurtecInventory(state, now);
   const baselineAtValue = baselineAt ?? toLocalInput(new Date(now));
@@ -534,39 +579,209 @@ export default function Settings() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h1 className="sr-only">Settings</h1>
-      {/* import */}
-      <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-base font-bold">
-          <Upload className="h-4 w-4" /> Import from Migraine Buddy
-        </h2>
+      {/* ── connection & sync (first: it explains where data lives) ── */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+        <h2 className="text-base font-bold">Connection &amp; sync</h2>
         <p className="mt-1 text-sm text-slate-400">
-          In Migraine Buddy: <em>Settings → Export → CSV</em>. Imports start/end times,
-          pain, medications, symptoms, triggers, and notes, mapping medications to your
-          catalog.
+          {store.sync.status === 'conflict' ? (
+            <>This device has changes that were never saved to the server, and the server holds its own copy. Nothing syncs until you resolve this below.</>
+          ) : store.sync.status === 'error' ? (
+            <>Connected to the backend, but some recent changes couldn&apos;t be saved there. They are safe on this device and marked <span className="font-semibold text-amber-300">unsynced</span>.</>
+          ) : store.sync.status === 'syncing' ? (
+            <>Connected to the backend server — syncing {store.sync.pending} change{store.sync.pending === 1 ? '' : 's'}…</>
+          ) : store.serverMode ? (
+            <>Connected to the backend server — your data is stored on the server and cached in this browser.</>
+          ) : (
+            <>No backend reachable — running in browser-only mode (data lives in local storage).</>
+          )}
         </p>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".csv,text/csv"
-          className="hidden"
-          onChange={handleFile}
-        />
-        <Button className="mt-3 gap-2" onClick={() => fileRef.current?.click()}>
-          <Upload className="h-4 w-4" /> Choose CSV file
-        </Button>
+
+        {store.sync.diverged && (
+          <div className="mt-3 rounded-xl border border-rose-900 bg-rose-950/40 p-4">
+            <h3 className="flex items-center gap-2 text-sm font-bold text-rose-200">
+              <AlertTriangle className="h-4 w-4" /> Unsynced changes on this device
+            </h3>
+            <p className="mt-1 text-sm text-slate-300">
+              Changes made here never reached the server, so the two copies differ.
+              Automatic merging isn&apos;t safe — deleted items would come back.
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-slate-400">
+              <li>Download this device&apos;s data as a JSON backup (recommended), then</li>
+              <li>replace this device&apos;s data with the server copy.</li>
+            </ol>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button variant="outline" className="gap-2" onClick={exportJSON}>
+                <FileDown className="h-4 w-4" /> Download this device&apos;s data
+              </Button>
+              <Button
+                className={`gap-2 ${DANGER_ACTION_CLASS}`}
+                onClick={() => setUseServerOpen(true)}
+              >
+                Use server copy…
+              </Button>
+            </div>
+          </div>
+        )}
       </section>
 
-      {/* med limits */}
-      <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
+      {/* ── time zone ──────────────────────────────────────────── */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+        <h2 className="text-base font-bold">Time zone</h2>
+        <p className="mt-1 text-sm text-slate-400">
+          Current: <span className="font-semibold text-slate-200">{state.timezone}</span>
+        </p>
+        <p className="mt-1 text-xs text-slate-400">
+          Controls local day and Sunday-start week buckets, including weekly workout goals.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Input
+            aria-label="Time zone"
+            aria-invalid={!tzValid}
+            value={tzValue}
+            placeholder="e.g. America/New_York"
+            className="h-11 max-w-xs sm:h-9"
+            onChange={(e) => setTzDraft(e.target.value)}
+          />
+          <Button
+            className="h-11 sm:h-9"
+            disabled={!tzValid || !tzChanged}
+            onClick={() => {
+              if (!tzValid) return;
+              store.setTimezone(tzTrimmed);
+              setTzDraft(null);
+            }}
+          >
+            Save
+          </Button>
+        </div>
+        {!tzValid && (
+          <p className="mt-2 text-xs text-rose-300">
+            Enter a valid IANA time zone, e.g. America/New_York.
+          </p>
+        )}
+      </section>
+
+      {/* ── medication rules & default doses ───────────────────── */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
         <h2 className="text-base font-bold">Medication limits</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Usage-day limits per rolling window — these drive the warning bars on the
-          Calendar tab. Standard MOH guidance: triptans/gepants ≤ 10–15 days/month,
+          Usage-day limits per rolling window — these drive the two decision cards on
+          Calendar. Standard MOH guidance: triptans/gepants ≤ 10–15 days/month,
           NSAIDs &amp; acetaminophen ≤ 15 days/month.
         </p>
-        <div className="mt-4 space-y-2">
+
+        {/* One shared Painkillers rule (Tylenol, Ibuprofen, Naproxen). */}
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span
+              aria-hidden="true"
+              className="flex h-5 w-5 items-center justify-center rounded bg-slate-700 text-[10px] font-black text-slate-100"
+            >
+              PK
+            </span>
+            <span className="text-sm font-semibold">Painkillers</span>
+            <span className="text-xs text-slate-400">Tylenol · Ibuprofen · Naproxen</span>
+            <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+              {sharedPainkillerRule.limit} day{sharedPainkillerRule.limit === 1 ? '' : 's'} /{' '}
+              {sharedPainkillerRule.windowDays}d window
+            </span>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <div className="min-w-0 space-y-1">
+              <Label
+                htmlFor="rule-painkillers-limit"
+                className="text-[11px] font-medium text-slate-400"
+              >
+                Max days
+              </Label>
+              <Input
+                id="rule-painkillers-limit"
+                aria-label="Painkillers max days"
+                type="number"
+                min={0}
+                max={31}
+                inputMode="numeric"
+                aria-invalid={sharedRuleDraft !== null && !sharedRuleLimitValid}
+                className="h-11 w-full sm:h-10"
+                value={sharedRuleForm.limit}
+                onChange={(e) => setSharedRuleDraft({ ...sharedRuleForm, limit: e.target.value })}
+              />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <Label
+                htmlFor="rule-painkillers-window"
+                className="text-[11px] font-medium text-slate-400"
+              >
+                Window days
+              </Label>
+              <Input
+                id="rule-painkillers-window"
+                aria-label="Painkillers window days"
+                type="number"
+                min={7}
+                max={90}
+                inputMode="numeric"
+                aria-invalid={sharedRuleDraft !== null && !sharedRuleWindowValid}
+                className="h-11 w-full sm:h-10"
+                value={sharedRuleForm.windowDays}
+                onChange={(e) => setSharedRuleDraft({
+                  ...sharedRuleForm,
+                  windowDays: e.target.value,
+                })}
+              />
+            </div>
+          </div>
+          {sharedRuleDraft !== null && !sharedRuleLimitValid && (
+            <p role="alert" className="mt-1 text-xs text-rose-300">
+              Max days must be a whole number from 0 to 31.
+            </p>
+          )}
+          {sharedRuleDraft !== null && !sharedRuleWindowValid && (
+            <p role="alert" className="mt-1 text-xs text-rose-300">
+              Window must be a whole number from 7 to 90 days.
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              className="h-11 sm:h-9"
+              disabled={!canSaveSharedRule}
+              onClick={saveSharedPainkillerRule}
+            >
+              Save shared rule
+            </Button>
+            {sharedRuleDirty && (
+              <button
+                type="button"
+                onClick={() => setSharedRuleDraft(null)}
+                className="inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-200 sm:min-h-9"
+              >
+                Discard
+              </button>
+            )}
+            {sharedRuleDirty && (
+              <span className="text-xs text-amber-300">Unsaved changes</span>
+            )}
+          </div>
+          <p className="mt-1.5 text-xs text-slate-400">
+            One shared limit for all three: saving writes the same rule to each.
+            What counts is distinct days, so two different painkillers on one day are
+            one medication day.
+          </p>
+          {painkillerRulesMismatch && (
+            <p className="mt-1.5 rounded-lg bg-amber-950/40 px-2 py-1.5 text-xs text-amber-200">
+              These meds have different saved rules. Until you save above, the app
+              conservatively uses the lowest limit ({sharedPainkillerRule.limit}) and the
+              widest window ({sharedPainkillerRule.windowDays} days).
+            </p>
+          )}
+        </div>
+
+        <div className="mt-3 space-y-2">
           {MED_CATALOG.filter((m) => m.defaultRule).map((m) => {
-            const rule = state.rules[m.id] ?? m.defaultRule!;
+            const rule = resolveRule(state.rules[m.id], m.defaultRule ?? PAINKILLER_DEFAULT_RULE);
+            const sharedPainkiller = PAINKILLER_MED_IDS.includes(
+              m.id as (typeof PAINKILLER_MED_IDS)[number],
+            );
             return (
               <div key={m.id} className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
                 <div className="flex items-center gap-2">
@@ -576,52 +791,66 @@ export default function Settings() {
                   />
                   <span className="text-sm font-semibold">{m.name}</span>
                   <span className="ml-auto text-[11px] tabular-nums text-slate-400">
-                    {rule.limit} day{rule.limit === 1 ? '' : 's'} / {rule.windowDays}d window
+                    {sharedPainkiller
+                      ? 'shared painkiller rule above'
+                      : `${rule.limit} day${rule.limit === 1 ? '' : 's'} / ${rule.windowDays}d window`}
                   </span>
                 </div>
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <div className="min-w-0 space-y-1">
-                    <Label
-                      htmlFor={`rule-limit-${m.id}`}
-                      className="text-[11px] font-medium text-slate-400"
-                    >
-                      Max days
-                    </Label>
-                    <Input
-                      id={`rule-limit-${m.id}`}
-                      aria-label={`${m.name} max days`}
-                      type="number"
-                      min={1}
-                      max={31}
-                      inputMode="numeric"
-                      className="h-10 w-full"
-                      value={rule.limit}
-                      onChange={(e) =>
-                        store.setRule(m.id, Math.max(1, Number(e.target.value) || 1), rule.windowDays)
-                      }
-                    />
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <Label
-                      htmlFor={`rule-window-${m.id}`}
-                      className="text-[11px] font-medium text-slate-400"
-                    >
-                      Window days
-                    </Label>
-                    <Input
-                      id={`rule-window-${m.id}`}
-                      aria-label={`${m.name} window days`}
-                      type="number"
-                      min={7}
-                      max={90}
-                      inputMode="numeric"
-                      className="h-10 w-full"
-                      value={rule.windowDays}
-                      onChange={(e) =>
-                        store.setRule(m.id, rule.limit, Math.max(7, Number(e.target.value) || 30))
-                      }
-                    />
-                  </div>
+                <div className={`mt-2 grid gap-2 ${sharedPainkiller ? 'grid-cols-1' : 'grid-cols-3'}`}>
+                  {!sharedPainkiller && (
+                    <>
+                      <div className="min-w-0 space-y-1">
+                        <Label
+                          htmlFor={`rule-limit-${m.id}`}
+                          className="text-[11px] font-medium text-slate-400"
+                        >
+                          Max days
+                        </Label>
+                        <Input
+                          id={`rule-limit-${m.id}`}
+                          aria-label={`${m.name} max days`}
+                          type="number"
+                          min={1}
+                          max={31}
+                          inputMode="numeric"
+                          className="h-11 w-full sm:h-10"
+                          value={rule.limit}
+                          onChange={(e) =>
+                            store.setRule(
+                              m.id,
+                              Math.max(1, Number(e.target.value) || 1),
+                              rule.windowDays,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="min-w-0 space-y-1">
+                        <Label
+                          htmlFor={`rule-window-${m.id}`}
+                          className="text-[11px] font-medium text-slate-400"
+                        >
+                          Window days
+                        </Label>
+                        <Input
+                          id={`rule-window-${m.id}`}
+                          aria-label={`${m.name} window days`}
+                          type="number"
+                          min={7}
+                          max={90}
+                          inputMode="numeric"
+                          className="h-11 w-full sm:h-10"
+                          value={rule.windowDays}
+                          onChange={(e) =>
+                            store.setRule(
+                              m.id,
+                              rule.limit,
+                              Math.max(7, Number(e.target.value) || 30),
+                            )
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
                   <div className="min-w-0 space-y-1">
                     <Label
                       htmlFor={`rule-dose-${m.id}`}
@@ -632,7 +861,7 @@ export default function Settings() {
                     <Input
                       id={`rule-dose-${m.id}`}
                       aria-label={`${m.name} default dose`}
-                      className="h-10 w-full"
+                      className="h-11 w-full sm:h-10"
                       value={state.doses[m.id] ?? ''}
                       placeholder="—"
                       onChange={(e) => store.setDoseDefault(m.id, e.target.value)}
@@ -791,42 +1020,6 @@ export default function Settings() {
               </div>
             ))}
           </div>
-        )}
-      </section>
-
-      {/* time zone */}
-      <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
-        <h2 className="text-base font-bold">Time zone</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Current: <span className="font-semibold text-slate-200">{state.timezone}</span>
-        </p>
-        <p className="mt-1 text-xs text-slate-400">
-          Controls local day and Sunday-start week buckets, including weekly workout goals.
-        </p>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Input
-            aria-label="Time zone"
-            aria-invalid={!tzValid}
-            value={tzValue}
-            placeholder="e.g. America/New_York"
-            className="h-9 max-w-xs"
-            onChange={(e) => setTzDraft(e.target.value)}
-          />
-          <Button
-            disabled={!tzValid || !tzChanged}
-            onClick={() => {
-              if (!tzValid) return;
-              store.setTimezone(tzTrimmed);
-              setTzDraft(null);
-            }}
-          >
-            Save
-          </Button>
-        </div>
-        {!tzValid && (
-          <p className="mt-2 text-xs text-rose-400">
-            Enter a valid IANA time zone, e.g. America/New_York.
-          </p>
         )}
       </section>
 
@@ -1176,60 +1369,21 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* data */}
-      <section className="rounded-2xl border bg-slate-900 p-5 shadow-sm">
-        <h2 className="text-base font-bold">Data</h2>
+      {/* ── import / export / restore (routine, non-destructive) ── */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+        <h2 className="text-base font-bold">Backup, restore &amp; import</h2>
         <p className="mt-1 text-sm text-slate-400">
-          {store.sync.status === 'conflict' ? (
-            <>This device has changes that were never saved to the server, and the server holds its own copy. Nothing syncs until you resolve this below.</>
-          ) : store.sync.status === 'error' ? (
-            <>Connected to the backend, but some recent changes couldn&apos;t be saved there. They are safe on this device and marked <span className="font-semibold text-amber-300">unsynced</span>.</>
-          ) : store.sync.status === 'syncing' ? (
-            <>Connected to the backend server — syncing {store.sync.pending} change{store.sync.pending === 1 ? '' : 's'}…</>
-          ) : store.serverMode ? (
-            <>Connected to the backend server — your data is stored on the server and cached in this browser.</>
-          ) : (
-            <>No backend reachable — running in browser-only mode (data lives in local storage).</>
-          )}
+          Exporting is routine and never changes your data. Restore and import preview
+          what they will add before writing anything.
         </p>
 
-        {store.sync.diverged && (
-          <div className="mt-3 rounded-xl border border-rose-900 bg-rose-950/40 p-4">
-            <h3 className="flex items-center gap-2 text-sm font-bold text-rose-200">
-              <AlertTriangle className="h-4 w-4" /> Unsynced changes on this device
-            </h3>
-            <p className="mt-1 text-sm text-slate-300">
-              Changes made here never reached the server, so the two copies differ.
-              Automatic merging isn&apos;t safe — deleted items would come back.
-            </p>
-            <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-slate-400">
-              <li>Download this device&apos;s data as a JSON backup (recommended), then</li>
-              <li>replace this device&apos;s data with the server copy.</li>
-            </ol>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button variant="outline" className="gap-2" onClick={exportJSON}>
-                <FileDown className="h-4 w-4" /> Download this device&apos;s data
-              </Button>
-              <Button
-                className="gap-2 bg-rose-800 text-rose-100 hover:bg-rose-700"
-                onClick={() => setUseServerOpen(true)}
-              >
-                Use server copy…
-              </Button>
-            </div>
-          </div>
-        )}
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button variant="outline" className="gap-2" onClick={exportJSON}>
+        <div className="mt-4 border-t border-slate-800 pt-4">
+          <h3 className="text-sm font-semibold">Export backup</h3>
+          <p className="mt-1 text-xs text-slate-400">
+            A complete JSON copy of every record and non-secret setting.
+          </p>
+          <Button variant="outline" className="mt-2 gap-2" onClick={exportJSON}>
             <FileDown className="h-4 w-4" /> Export backup (JSON)
-          </Button>
-          <Button
-            variant="outline"
-            className="gap-2 text-rose-400 hover:text-rose-300"
-            onClick={() => setResetOpen(true)}
-          >
-            <Trash2 className="h-4 w-4" /> Erase everything
           </Button>
         </div>
 
@@ -1271,6 +1425,53 @@ export default function Settings() {
             </div>
           )}
         </div>
+
+        <div className="mt-4 border-t border-slate-800 pt-4">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Upload className="h-4 w-4" /> Import from Migraine Buddy
+          </h3>
+          <p className="mt-1 text-xs text-slate-400">
+            In Migraine Buddy: <em>Settings → Export → CSV</em>. Imports start/end times,
+            pain, medications, symptoms, triggers, and notes, mapping medications to your
+            catalog.
+          </p>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={handleFile}
+          />
+          <Button className="mt-3 gap-2" onClick={() => fileRef.current?.click()}>
+            <Upload className="h-4 w-4" /> Choose CSV file
+          </Button>
+        </div>
+      </section>
+
+      {/* ── danger zone: deliberately separated from routine export ── */}
+      <section
+        aria-labelledby="settings-danger-title"
+        className="rounded-xl border border-red-900/70 bg-red-950/20 p-5 shadow-sm"
+      >
+        <h2 id="settings-danger-title" className="text-base font-bold text-red-200">
+          Danger zone
+        </h2>
+        <p className="mt-1 text-sm text-slate-300">
+          Erasing permanently removes every record and non-secret setting
+          {store.serverMode ? ' on the server and in this browser' : ' in this browser'}.
+          Export a JSON backup above first if you might need it.
+        </p>
+        <Button
+          // The generated `outline` variant carries a `dark:bg-input/*` fill,
+          // which wins over a plain `bg-red-800` class in dark mode. The
+          // destructive variant keeps a deep-red surface whose `dark:` fill is
+          // also red, so this action always reads as destructive.
+          variant="destructive"
+          className="mt-3 gap-2"
+          onClick={() => setResetOpen(true)}
+        >
+          <Trash2 className="h-4 w-4" /> Erase everything
+        </Button>
       </section>
 
       {/* import preview dialog */}
@@ -1429,14 +1630,14 @@ export default function Settings() {
               {store.serverMode ? ' on the server and in this browser' : ' in this browser'}{' '}
               and restores this backup&apos;s records and non-secret settings.
               Download the current state first if you might need it — use{' '}
-              <span className="font-semibold">Export backup (JSON)</span> in the Data
-              section above.
+              <span className="font-semibold">Export backup (JSON)</span> in the
+              Backup, restore &amp; import section above.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={restoreBusy}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-rose-800 text-rose-50 hover:bg-rose-700"
+              className={DANGER_ACTION_CLASS}
               disabled={restoreBusy}
               onClick={(event) => {
                 // Keep the dialog open while the async restore runs; it is
@@ -1472,6 +1673,7 @@ export default function Settings() {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={resetBusy}>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              className={DANGER_ACTION_CLASS}
               disabled={resetBusy}
               onClick={(event) => {
                 // Keep the dialog open while the erase runs (Radix closes on
@@ -1500,7 +1702,7 @@ export default function Settings() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-rose-800 text-rose-50 hover:bg-rose-700"
+              className={DANGER_ACTION_CLASS}
               onClick={() => {
                 void store.resolveUseServer();
                 setUseServerOpen(false);

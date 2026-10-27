@@ -6,10 +6,42 @@
 // store's serialized write queue) instead of hanging forever.
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Bulk backup routes accept a 25 MiB body and one transaction may rewrite
+ * every row, so the ordinary 15s bound would abort a large (destructive)
+ * restore while the server is still working.
+ */
+const BULK_REQUEST_TIMEOUT_MS = 120_000;
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+/**
+ * A server response that was received and is not ok, so the HTTP status is
+ * known. Network failures and timeouts deliberately keep propagating as
+ * TypeError/AbortError instead: callers must be able to tell "the server
+ * rejected this" (4xx → nothing was written) from "no answer, outcome
+ * unknown". The message format is unchanged from the original plain Error.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly method: string;
+  readonly path: string;
+
+  constructor(method: string, path: string, status: number) {
+    super(`${method} ${path} → ${status}`);
+    this.name = 'ApiError';
+    this.method = method;
+    this.path = path;
+    this.status = status;
+  }
+}
+
+async function req<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  opts: { timeoutMs?: number } = {},
+): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(path, {
       method,
@@ -17,7 +49,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
+    if (!res.ok) throw new ApiError(method, path, res.status);
     // Await the body inside the try so a response whose body stalls is bounded
     // by the same timeout instead of hanging after the headers arrived.
     return await res.json() as T;
@@ -35,11 +67,35 @@ export interface HealthResponse {
   };
 }
 
+/**
+ * Canonical full-data snapshot returned by both GET /api/export and the
+ * atomic POST /api/restore. Record arrays are typed loosely here (the store
+ * casts validated records) and older servers may omit the newer arrays.
+ */
+export interface ExportEnvelope {
+  schemaVersion?: number;
+  exportedAt?: string;
+  attacks: unknown[];
+  meds: unknown[];
+  refills?: unknown[];
+  workouts?: unknown[];
+  dayStates?: unknown[];
+  stockBaselines?: unknown[];
+  settings: Record<string, unknown>;
+}
+
 export const api = {
   getHealth: () => req<HealthResponse>('GET', '/api/health'),
 
-  exportAll: () => req<{ attacks: unknown[]; meds: unknown[]; refills?: unknown[]; workouts?: unknown[]; dayStates?: unknown[]; stockBaselines?: unknown[]; settings: Record<string, unknown> }>('GET', '/api/export'),
-  importAll: (payload: unknown) => req('POST', '/api/import', payload),
+  exportAll: () => req<ExportEnvelope>('GET', '/api/export'),
+  importAll: (payload: unknown) =>
+    req('POST', '/api/import', payload, { timeoutMs: BULK_REQUEST_TIMEOUT_MS }),
+  /**
+   * Destructive, atomic replacement of every server record and restorable
+   * setting. The returned envelope is canonical, like GET /api/export.
+   */
+  restoreAll: (payload: unknown) =>
+    req<ExportEnvelope>('POST', '/api/restore', payload, { timeoutMs: BULK_REQUEST_TIMEOUT_MS }),
   resetAll: () => req('POST', '/api/reset'),
 
   addAttack: (a: unknown) => req('POST', '/api/attacks', a),

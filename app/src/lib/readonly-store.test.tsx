@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
+import type { ParsedBackup } from '../../shared/backup.ts';
 import type {
   Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout,
 } from '@/types';
@@ -12,6 +13,7 @@ vi.mock('@/lib/api', () => ({
   api: {
     exportAll: vi.fn(),
     importAll: vi.fn(),
+    restoreAll: vi.fn(),
     resetAll: vi.fn(),
     addAttack: vi.fn(),
     patchAttack: vi.fn(),
@@ -44,6 +46,7 @@ type StoreModule = typeof import('@/lib/store');
 interface MockedBackend {
   exportAll: Mock;
   importAll: Mock;
+  restoreAll: Mock;
   resetAll: Mock;
   addAttack: Mock;
   patchAttack: Mock;
@@ -155,6 +158,7 @@ function writerState(): TrackerState {
 function applyApiDefaults(backend: MockedBackend): void {
   backend.exportAll.mockResolvedValue(emptyExport());
   backend.importAll.mockResolvedValue(undefined);
+  backend.restoreAll.mockResolvedValue(emptyExport());
   backend.resetAll.mockResolvedValue(undefined);
   backend.addAttack.mockResolvedValue(undefined);
   backend.patchAttack.mockResolvedValue(undefined);
@@ -179,6 +183,7 @@ function applyApiDefaults(backend: MockedBackend): void {
 
 function expectNoWriterApiCalls(): void {
   expect(api.importAll).not.toHaveBeenCalled();
+  expect(api.restoreAll).not.toHaveBeenCalled();
   expect(api.resetAll).not.toHaveBeenCalled();
   expect(api.addAttack).not.toHaveBeenCalled();
   expect(api.patchAttack).not.toHaveBeenCalled();
@@ -443,5 +448,24 @@ describe('ReadOnlyStoreProvider', () => {
     expect(store.state.attacks.map((a) => a.id)).toEqual(['snapshot']);
     expectNoWriterApiCalls();
     expect(api.exportAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('denies JSON backup merge and replace on the viewer contract', async () => {
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [makeAttack('snapshot')] });
+    mountViewer();
+    await waitFor(() => expect(captured?.sync.status).toBe('synced'));
+
+    const store = captured!;
+    const backup = {
+      duplicateCounts: {
+        attacks: 0, meds: 0, refills: 0, workouts: 0, dayStates: 0, stockBaselines: 0,
+      },
+    } as unknown as ParsedBackup;
+
+    expect(() => store.mergeBackup(backup)).toThrow(/read-only/i);
+    await expect(store.replaceBackup(backup)).rejects.toThrow(/read-only/i);
+
+    expect(store.state.attacks.map((a) => a.id)).toEqual(['snapshot']);
+    expectNoWriterApiCalls();
   });
 });

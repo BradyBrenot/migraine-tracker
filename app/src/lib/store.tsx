@@ -15,6 +15,7 @@ import { currentStock } from '../../shared/inventory.ts';
 import {
   DEFAULT_REMINDER_SETTINGS, normalizeReminderSettings, reminderSettingsErrors,
 } from '../../shared/reminders.ts';
+import type { BackupRecordKey, ParsedBackup } from '../../shared/backup.ts';
 
 const STORAGE_KEY = 'migraine-tracker-v1';
 /** Separate key so the existing state cache keeps loading untouched. */
@@ -204,6 +205,312 @@ function serverSnapshotToState(data: ExportShape, fallbackTz: string): Partial<T
   return snapshot;
 }
 
+/** Every record type a backup can restore, in preview order. */
+const BACKUP_RECORD_KEYS: readonly BackupRecordKey[] = [
+  'attacks', 'meds', 'refills', 'workouts', 'dayStates', 'stockBaselines',
+];
+
+/**
+ * Identity used for additive dedup. A missing/null/empty id means the server
+ * will generate one, so such a record can never collide with an existing one.
+ */
+function backupIdKey(id: unknown): string {
+  return typeof id === 'string' ? id : '';
+}
+
+/**
+ * Keep only records an additive merge must add: day states key on `day`,
+ * everything else on `id`. An empty id has no identity yet — the server
+ * generates one — so it can never collide and always counts as new.
+ * `existingKeys` is mutated so repeated keys inside one backup window are not
+ * added twice (parseBackup already keeps the first of each non-empty key).
+ */
+function keepNewRecords<T>(
+  existingKeys: Set<string>,
+  incoming: readonly T[],
+  keyOf: (record: T) => string,
+): T[] {
+  const added: T[] = [];
+  for (const record of incoming) {
+    const key = keyOf(record);
+    if (key !== '') {
+      if (existingKeys.has(key)) continue;
+      existingKeys.add(key);
+    }
+    added.push(record);
+  }
+  return added;
+}
+
+/** The six record arrays a backup restores, keyed like TrackerState. */
+type BackupRecords = Pick<
+  TrackerState,
+  'attacks' | 'meds' | 'refills' | 'workouts' | 'dayStates' | 'stockBaselines'
+>;
+
+/**
+ * Copy every backup record into a fully-defaulted TrackerState record before
+ * it is sent OR applied.
+ *
+ * `parseBackup` validates but deliberately keeps the ORIGINAL objects, and a
+ * legal/legacy record may omit optional fields. The app — not the server —
+ * sorts and renders these records, so a raw record (a baseline without
+ * `createdAt`, an attack without `symptoms`) would crash a comparator or a
+ * page. The defaults below mirror the server mappers exactly
+ * (server/mappers.js): attacks default `source` to 'manual' (attackToRow),
+ * while the bulk import/restore paths default meds, refills, workouts and
+ * baselines to 'import'; absent `updatedAt`/`createdAt`/`ts` become "now".
+ *
+ * Ids: a blank/missing id gets one here so the local record, the wire payload
+ * and the server row share it (without this the optimistic copy could never
+ * edit or delete the server row). Day states are keyed by `day`, no id.
+ *
+ * Records are copied, never mutated; one timestamp is captured here so every
+ * defaulted time field in this merge/replace pass is identical locally and on
+ * the wire.
+ */
+function normalizedBackupRecords(backup: ParsedBackup): BackupRecords {
+  const nowIso = new Date().toISOString();
+  return {
+    attacks: backup.attacks.map((a): Attack => ({
+      id: a.id || uid(),
+      start: a.start,
+      end: a.end ?? null,
+      painLog: [...(a.painLog ?? [])],
+      peakPain: a.peakPain ?? -1,
+      symptoms: [...(a.symptoms ?? [])],
+      triggers: [...(a.triggers ?? [])],
+      aura: a.aura ?? null,
+      notes: a.notes ?? '',
+      source: a.source ?? 'manual',
+    })),
+    meds: backup.meds.map((m): MedEvent => ({
+      id: m.id || uid(),
+      medId: m.medId,
+      ts: m.ts ?? nowIso,
+      dose: m.dose ?? '',
+      quantity: m.quantity ?? null,
+      attackId: m.attackId ?? null,
+      notes: m.notes ?? '',
+      source: m.source ?? 'import',
+    })),
+    refills: backup.refills.map((r): Refill => ({
+      id: r.id || uid(),
+      medId: r.medId,
+      date: r.date,
+      quantity: r.quantity ?? null,
+      notes: r.notes ?? '',
+      source: r.source ?? 'import',
+    })),
+    workouts: backup.workouts.map((w): Workout => ({
+      id: w.id || uid(),
+      performedAt: w.performedAt,
+      kind: w.kind,
+      effort: w.effort,
+      durationMinutes: w.durationMinutes ?? null,
+      notes: w.notes ?? '',
+      source: w.source ?? 'import',
+    })),
+    dayStates: backup.dayStates.map((d): DayState => ({
+      day: d.day,
+      status: d.status,
+      notes: d.notes ?? '',
+      updatedAt: d.updatedAt ?? nowIso,
+    })),
+    stockBaselines: backup.stockBaselines.map((b): StockBaseline => ({
+      id: b.id || uid(),
+      medId: b.medId,
+      effectiveAt: b.effectiveAt,
+      quantity: b.quantity,
+      notes: b.notes ?? '',
+      source: b.source ?? 'import',
+      createdAt: b.createdAt ?? nowIso,
+    })),
+  };
+}
+
+// Sort orders match the store's own mutation conventions (see the array
+// updates below): attacks by start, meds by ts, refills by date, workouts by
+// performedAt, day states by day, baselines by effectiveAt then createdAt.
+const byAttackStart = (a: Attack, b: Attack): number => a.start.localeCompare(b.start);
+const byMedTs = (a: MedEvent, b: MedEvent): number => a.ts.localeCompare(b.ts);
+const byRefillDate = (a: Refill, b: Refill): number => a.date.localeCompare(b.date);
+const byWorkoutPerformedAt = (a: Workout, b: Workout): number =>
+  a.performedAt.localeCompare(b.performedAt);
+const byDayStateDay = (a: DayState, b: DayState): number => a.day.localeCompare(b.day);
+const byBaselineEffectiveAt = (a: StockBaseline, b: StockBaseline): number =>
+  a.effectiveAt.localeCompare(b.effectiveAt) || a.createdAt.localeCompare(b.createdAt);
+
+/** The settings a replacement restores, in TrackerState shape. */
+type RestoredSettings = Pick<
+  TrackerState,
+  | 'rules' | 'doses' | 'planned' | 'timezone' | 'lowStockThreshold'
+  | 'reminders' | 'lowStockAlertedAt'
+>;
+
+/**
+ * Effective replacement settings: every key present in the backup, and the
+ * same defaults `emptyState()` uses for absent ones. Deliberately NOT
+ * `serverSnapshotToState`, whose partial-hydration policy keeps the local
+ * threshold/reminders/timezone when the server omits them (a legacy server
+ * must not reset a local choice). A replacement is not hydration: it restores
+ * the backup exactly, so absent settings take DEFAULTS and therefore agree
+ * between browser-only and connected restores.
+ *
+ * This is the single projection used by both the local adoption and the
+ * connected wire payload (see `restorePayloadSettings`), so the server can
+ * never persist a different effective setting than the browser shows.
+ */
+function restoredSettingsFrom(backup: ParsedBackup): RestoredSettings {
+  return {
+    rules: { ...defaultRules(), ...((backup.settings.rules as TrackerState['rules']) ?? {}) },
+    doses: { ...DEFAULT_DOSES, ...((backup.settings.doses as Record<string, string>) ?? {}) },
+    planned: { ...((backup.settings.planned as Record<string, string>) ?? {}) },
+    timezone: backup.settings.timezone ?? systemTimeZone(),
+    lowStockThreshold: backup.settings.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD,
+    // The parser normalizes reminders when present, so absent means "not in
+    // the backup" → the defaults, exactly like a fresh state.
+    reminders: backup.settings.reminders ?? { ...DEFAULT_REMINDER_SETTINGS },
+    lowStockAlertedAt: backup.settings.lowStockAlert?.latchedAt ?? null,
+  };
+}
+
+/**
+ * Wire shape of a replacement's settings (server storage names). Sending the
+ * FULL defaulted projection matters: /api/restore stores only the keys present
+ * in the payload, so a legacy backup without settings would otherwise leave
+ * the server with none while the browser adopts defaults locally.
+ */
+function restorePayloadSettings(settings: RestoredSettings) {
+  return {
+    rules: settings.rules,
+    doses: settings.doses,
+    planned: settings.planned,
+    timezone: settings.timezone,
+    lowStockThreshold: settings.lowStockThreshold,
+    lowStockAlert: { latchedAt: settings.lowStockAlertedAt },
+    reminders: settings.reminders,
+  };
+}
+
+/**
+ * Full-replacement state from a parsed backup and its normalized records.
+ * Connected restores take RECORDS from the returned canonical envelope
+ * (server-generated fields, echoed ids) but the SAME `settings` projection
+ * that was sent to the server. `seeded` is a local-only marker; merge never
+ * touches it.
+ */
+function restoredBackupState(
+  backup: ParsedBackup,
+  records: BackupRecords,
+  settings: RestoredSettings,
+): TrackerState {
+  return {
+    attacks: [...records.attacks].sort(byAttackStart),
+    meds: [...records.meds].sort(byMedTs),
+    refills: [...records.refills].sort(byRefillDate),
+    workouts: [...records.workouts].sort(byWorkoutPerformedAt),
+    dayStates: [...records.dayStates].sort(byDayStateDay),
+    stockBaselines: [...records.stockBaselines].sort(byBaselineEffectiveAt),
+    ...settings,
+    seeded: backup.seeded ?? false,
+  };
+}
+
+/**
+ * Deep-compare idiom used by the rebase: the repo already compares reminder
+ * drafts with JSON.stringify, and these values are plain JSON data (the same
+ * thing that is persisted and sent on the wire), so structural differences
+ * are exactly what matters. Key order is stable for locally mutated records
+ * (spread keeps it), so this does not report spurious edits.
+ */
+function sameContent(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Three-way record rebase for a connected replacement.
+ *
+ * `base` is the state captured when replaceBackup was invoked, `current` the
+ * live state (writes made later are applied optimistically), and `restored`
+ * the replacement built from the server's canonical envelope. Later writes'
+ * server tasks are ALREADY QUEUED BEHIND the restore in the serialized queue,
+ * so once the queue drains the server holds the backup plus those later
+ * effects; keeping them locally is what makes the two agree. Rules per key
+ * (`id`; day states by `day`):
+ * - in `current` but not `base` → added after invocation → keep current;
+ * - in `base` but not `current` → deleted after invocation → must stay absent;
+ * - in both with different content → edited after invocation → keep current;
+ * - otherwise → the `restored` version (server-generated fields and ids).
+ *
+ * Known corner: any queued write that targets a record the restored backup
+ * does NOT contain hits a 404 after the restore, latching `failed`. That
+ * covers deletions (queued DELETE) AND edits of such records (queued PATCH):
+ * the replacement erased the row the request addresses. Local state stays
+ * correct and the latch behaves like any other failed write (sticky until a
+ * confirmed full exchange) — no special case is worth corrupting the local
+ * view for.
+ */
+function rebaseRecords<T>(
+  base: readonly T[],
+  current: readonly T[],
+  restored: readonly T[],
+  keyOf: (record: T) => string,
+): T[] {
+  const baseByKey = new Map(base.map((record) => [keyOf(record), record]));
+  const currentByKey = new Map(current.map((record) => [keyOf(record), record]));
+  const result = new Map<string, T>();
+  for (const record of restored) {
+    const key = keyOf(record);
+    if (baseByKey.has(key) && !currentByKey.has(key)) continue;
+    result.set(key, record);
+  }
+  for (const [key, record] of currentByKey) {
+    const before = baseByKey.get(key);
+    if (before === undefined || !sameContent(before, record)) result.set(key, record);
+  }
+  return [...result.values()];
+}
+
+/**
+ * Three-way rebase of the replacement's settings: a field the user changed
+ * after invocation keeps its local value; every other field follows the
+ * backup (with defaults for absent keys). See `rebaseRecords`.
+ */
+function rebaseRestoreState(
+  base: TrackerState,
+  current: TrackerState,
+  restored: TrackerState,
+): TrackerState {
+  const changed = (field: keyof TrackerState): boolean =>
+    !sameContent(base[field], current[field]);
+  return {
+    attacks: rebaseRecords(base.attacks, current.attacks, restored.attacks, (a) => a.id)
+      .sort(byAttackStart),
+    meds: rebaseRecords(base.meds, current.meds, restored.meds, (m) => m.id).sort(byMedTs),
+    refills: rebaseRecords(base.refills, current.refills, restored.refills, (r) => r.id)
+      .sort(byRefillDate),
+    workouts: rebaseRecords(base.workouts, current.workouts, restored.workouts, (w) => w.id)
+      .sort(byWorkoutPerformedAt),
+    dayStates: rebaseRecords(
+      base.dayStates, current.dayStates, restored.dayStates, (d) => d.day,
+    ).sort(byDayStateDay),
+    stockBaselines: rebaseRecords(
+      base.stockBaselines, current.stockBaselines, restored.stockBaselines, (b) => b.id,
+    ).sort(byBaselineEffectiveAt),
+    rules: changed('rules') ? current.rules : restored.rules,
+    doses: changed('doses') ? current.doses : restored.doses,
+    planned: changed('planned') ? current.planned : restored.planned,
+    timezone: changed('timezone') ? current.timezone : restored.timezone,
+    lowStockThreshold: changed('lowStockThreshold')
+      ? current.lowStockThreshold : restored.lowStockThreshold,
+    reminders: changed('reminders') ? current.reminders : restored.reminders,
+    lowStockAlertedAt: changed('lowStockAlertedAt')
+      ? current.lowStockAlertedAt : restored.lowStockAlertedAt,
+    seeded: changed('seeded') ? current.seeded : restored.seeded,
+  };
+}
+
 export interface StoreApi {
   state: TrackerState;
   activeAttack: Attack | null;
@@ -279,6 +586,23 @@ export interface StoreApi {
    * backup first — Settings offers that before this action.
    */
   resolveUseServer: () => Promise<void>;
+  /**
+   * Additive JSON-backup merge: only records whose key (id; dayStates by day)
+   * is missing locally. Settings are never touched. `added` reports per-type
+   * counts; `synced` resolves once the additive server import (if any) is
+   * confirmed and rejects under the normal offline/diverged queue rules.
+   */
+  mergeBackup: (backup: ParsedBackup) => {
+    added: Record<BackupRecordKey, number>;
+    synced: Promise<void>;
+  };
+  /**
+   * Destructive JSON-backup replacement. Connected: awaits the atomic
+   * server restore and adopts the returned canonical snapshot (never an
+   * optimistic local erase). Browser-only: applies locally and stays
+   * dirty/failed until a full exchange confirms it.
+   */
+  replaceBackup: (backup: ParsedBackup) => Promise<void>;
 }
 
 const StoreCtx = createContext<StoreApi | null>(null);
@@ -1046,9 +1370,177 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setDiverged(false);
         enqueue('reset', () => backend.resetAll(), { force: true, resolvesServerReset: true });
       },
+      mergeBackup: (backup) => {
+        // Compute the additive diff synchronously from the freshest state so
+        // local duplicates can never be appended twice, like the server's
+        // additive import (record ids; dayStates by day). Records are
+        // normalized (ids + mapper defaults) BEFORE the diff so the local
+        // copy, the import payload and the server row agree field for field.
+        const current = stateRef.current;
+        const incoming = normalizedBackupRecords(backup);
+        const newAttacks = keepNewRecords(
+          new Set(current.attacks.map((a) => a.id)), incoming.attacks,
+          (a) => backupIdKey(a.id),
+        );
+        const newMeds = keepNewRecords(
+          new Set(current.meds.map((m) => m.id)), incoming.meds,
+          (m) => backupIdKey(m.id),
+        );
+        const newRefills = keepNewRecords(
+          new Set(current.refills.map((r) => r.id)), incoming.refills,
+          (r) => backupIdKey(r.id),
+        );
+        const newWorkouts = keepNewRecords(
+          new Set(current.workouts.map((w) => w.id)), incoming.workouts,
+          (w) => backupIdKey(w.id),
+        );
+        const newDayStates = keepNewRecords(
+          new Set(current.dayStates.map((d) => d.day)), incoming.dayStates, (d) => d.day,
+        );
+        const newBaselines = keepNewRecords(
+          new Set(current.stockBaselines.map((b) => b.id)),
+          incoming.stockBaselines, (b) => backupIdKey(b.id),
+        );
+
+        const added: Record<BackupRecordKey, number> = {
+          attacks: newAttacks.length,
+          meds: newMeds.length,
+          refills: newRefills.length,
+          workouts: newWorkouts.length,
+          dayStates: newDayStates.length,
+          stockBaselines: newBaselines.length,
+        };
+        const totalAdded = BACKUP_RECORD_KEYS.reduce((sum, key) => sum + added[key], 0);
+
+        if (totalAdded === 0) {
+          // A no-op merge must not latch dirty/failed or touch the server.
+          return { added, synced: Promise.resolve() };
+        }
+
+        // Settings are deliberately untouched: the state spread keeps the
+        // current rules/doses/planned/timezone/threshold/reminders verbatim.
+        applyState(() => ({
+          ...current,
+          attacks: [...current.attacks, ...newAttacks]
+            .sort((a, b) => a.start.localeCompare(b.start)),
+          meds: [...current.meds, ...newMeds].sort((a, b) => a.ts.localeCompare(b.ts)),
+          refills: [...current.refills, ...newRefills]
+            .sort((a, b) => a.date.localeCompare(b.date)),
+          workouts: [...current.workouts, ...newWorkouts]
+            .sort((a, b) => a.performedAt.localeCompare(b.performedAt)),
+          dayStates: [...current.dayStates, ...newDayStates]
+            .sort((a, b) => a.day.localeCompare(b.day)),
+          stockBaselines: [...current.stockBaselines, ...newBaselines].sort((x, y) =>
+            x.effectiveAt.localeCompare(y.effectiveAt)
+            || x.createdAt.localeCompare(y.createdAt)),
+        }));
+
+        // Only the new records go to the existing additive endpoint; its
+        // queue/latch/offline/divergence semantics are unchanged.
+        const synced = enqueue('import(merge)', () => backend.importAll({
+          attacks: newAttacks,
+          meds: newMeds,
+          refills: newRefills,
+          workouts: newWorkouts,
+          dayStates: newDayStates,
+          stockBaselines: newBaselines,
+        })).then(() => undefined);
+        return { added, synced };
+      },
+      replaceBackup: (backup) => {
+        const duplicateTotal = BACKUP_RECORD_KEYS
+          .reduce((sum, key) => sum + backup.duplicateCounts[key], 0);
+        if (duplicateTotal > 0) {
+          // A replacement has to be exact; silent keep-first would restore
+          // different data than the file contains.
+          return Promise.reject(
+            new Error('duplicate ids in backup; replacement must be exact'),
+          );
+        }
+
+        // Normalize ONCE: the same fully-defaulted arrays feed the wire
+        // payload, a browser-only local apply, and (via the envelope echo)
+        // connected adoption, so all three converge on identical ids AND
+        // defaults (no comparator or page ever sees a missing field).
+        const records = normalizedBackupRecords(backup);
+        // The effective settings the replacement adopts locally, sent in full
+        // so the server persists exactly the same values (it stores only the
+        // keys present in the payload).
+        const settings = restoredSettingsFrom(backup);
+
+        const payload = {
+          schemaVersion: backup.schemaVersion,
+          attacks: records.attacks,
+          meds: records.meds,
+          refills: records.refills,
+          workouts: records.workouts,
+          dayStates: records.dayStates,
+          stockBaselines: records.stockBaselines,
+          settings: restorePayloadSettings(settings),
+        };
+
+        if (serverRef.current) {
+          // Capture the pre-restore state SYNCHRONOUSLY (before enqueue): the
+          // rebase below compares it with the state at completion time to
+          // find writes made after this invocation.
+          const base = stateRef.current;
+          // Connected (including while diverged): force is correct because
+          // this is an explicit conflict-resolution/destructive choice.
+          // Never erase/replace local state optimistically — await the atomic
+          // server restore, then adopt ITS canonical records.
+          const task = enqueue('restore', async () => {
+            const envelope = await backend.restoreAll(payload);
+            // Records come from the returned canonical envelope (they carry
+            // server-generated fields like dayState updatedAt/baseline
+            // createdAt and echo the ids we sent), while settings use the
+            // SAME effective projection already sent in the payload — a
+            // replacement must not inherit `serverSnapshotToState`'s
+            // partial-hydration policy, and browser/server must agree without
+            // follow-up setting writes.
+            const restored = restoredBackupState(backup, {
+              attacks: envelope.attacks as Attack[],
+              meds: envelope.meds as MedEvent[],
+              refills: (envelope.refills ?? []) as Refill[],
+              workouts: (envelope.workouts ?? []) as Workout[],
+              dayStates: (envelope.dayStates ?? []) as DayState[],
+              stockBaselines: (envelope.stockBaselines ?? []) as StockBaseline[],
+            }, settings);
+            // Three-way rebase: writes made while the restore was in flight
+            // are already applied locally AND their server tasks are queued
+            // behind the restore, so keeping them is exactly what the server
+            // will hold once the queue drains (see rebaseRecords/rebaseRestoreState).
+            applyState((current) => rebaseRestoreState(base, current, restored));
+            // The replaced data's low-stock episode bookkeeping is stale.
+            lowStockEpisodeRef.current = 'unknown';
+            setPendingLatch(null);
+          }, { force: true, resolvesServerReset: true });
+
+          return task.then(() => {
+            // Only a CONFIRMED replacement resolves the conflict; the queue's
+            // drain rules own the dirty/failed latches, so do not set them here.
+            divergedRef.current = false;
+            setDiverged(false);
+          });
+        }
+
+        // Browser-only: apply the validated replacement locally. Absent
+        // settings take defaults by construction, and even an EMPTY backup is a
+        // deliberate replacement that must stay dirty+failed so later
+        // hydration can never silently restore the server's old records.
+        applyState(() => restoredBackupState(backup, records, settings));
+        // The old pending low-stock bookkeeping belonged to the replaced data.
+        lowStockEpisodeRef.current = 'unknown';
+        setPendingLatch(null);
+        setSyncMeta({ dirty: true, failed: true });
+        // The local apply succeeded; it is merely unconfirmed.
+        return Promise.resolve();
+      },
       resolveUseServer,
     };
-  }, [state, serverMode, sync, applyState, enqueue, resolveUseServer, setPendingLatch]);
+  }, [
+    state, serverMode, sync, applyState, enqueue, resolveUseServer,
+    setPendingLatch, setSyncMeta,
+  ]);
 
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -1176,6 +1668,8 @@ export function ReadOnlyStoreProvider({ children }: { children: React.ReactNode 
     setPlannedDose: denyReadOnly,
     loadDemoData: denyReadOnly,
     resetAll: denyReadOnly,
+    mergeBackup: denyReadOnly,
+    replaceBackup: () => Promise.reject(new Error(READ_ONLY_ERROR)),
     resolveUseServer: () => Promise.reject(new Error(READ_ONLY_ERROR)),
   }), [state, activeAttack, serverMode, sync]);
 

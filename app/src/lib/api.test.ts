@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from './api';
+import { ApiError, api } from './api';
 
 type FetchArgs = Parameters<typeof fetch>;
 
@@ -105,11 +105,89 @@ describe('api request timeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('posts a restore payload to the atomic restore endpoint', async () => {
+    fetchMock.mockResolvedValue(okJson({ attacks: [], meds: [], settings: {} }));
+    const payload = {
+      schemaVersion: 4,
+      attacks: [],
+      meds: [],
+      refills: [],
+      workouts: [],
+      dayStates: [],
+      stockBaselines: [],
+      settings: { timezone: 'UTC' },
+    };
+
+    await expect(api.restoreAll(payload)).resolves.toEqual({
+      attacks: [], meds: [], settings: {},
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0] as FetchArgs;
+    expect(path).toBe('/api/restore');
+    expect(init?.method).toBe('POST');
+    expect(init?.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(init?.body).toBe(JSON.stringify(payload));
+  });
+
   it('keeps the exact non-ok error message and clears the timeout timer', async () => {
     fetchMock.mockResolvedValue(notOk(503));
 
     await expect(api.exportAll()).rejects.toThrow('GET /api/export → 503');
 
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('throws an ApiError carrying the status for a non-ok response', async () => {
+    fetchMock.mockResolvedValue(notOk(503));
+
+    const error: unknown = await api.exportAll().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    const apiError = error as ApiError;
+    expect(apiError.status).toBe(503);
+    expect(apiError.method).toBe('GET');
+    expect(apiError.path).toBe('/api/export');
+    expect(apiError.message).toBe('GET /api/export → 503');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds a bulk restore by 120s instead of the ordinary 15s', async () => {
+    fetchMock.mockImplementation(hangingFetch);
+
+    let settled = false;
+    const request = api.restoreAll({ attacks: [], meds: [] }).finally(() => {
+      settled = true;
+    });
+    const rejection = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Well past the ordinary bound the bulk request is still in flight.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toBe(true);
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds an additive bulk import by 120s as well', async () => {
+    fetchMock.mockImplementation(hangingFetch);
+
+    let settled = false;
+    const request = api.importAll({ attacks: [], meds: [] }).finally(() => {
+      settled = true;
+    });
+    const rejection = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    await rejection;
     expect(vi.getTimerCount()).toBe(0);
   });
 });

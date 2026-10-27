@@ -318,16 +318,43 @@ scope; both layers are then covered on Backrest's normal schedule.
 
 ### Restore expectations
 
-- The CSV button in Settings imports a **Migraine Buddy CSV export**. It is
-  not a JSON restore, and it does not restore settings.
-- `/api/import` accepts both legacy unversioned payloads and the current
-  versioned JSON envelope, but it is **additive** (`INSERT OR IGNORE`): it does
-  not overwrite existing records, does not restore settings, and does not
-  restore internal reminder scheduler state. There is no JSON-restore UI in
-  this version.
-- To restore the primary database, use the stopped-container SQLite file
-  restore in section 4. Re-enter reminder/timezone/threshold settings after a
-  JSON-only recovery.
+- **In-app JSON restore** is in Settings → Data. The picker accepts both the
+  browser's **Export backup (JSON)** file and the versioned envelopes written
+  by `GET /api/export` and the nightly dumps, including older supported schema
+  versions. A file written by a newer schema (or a malformed/unsupported
+  payload) is rejected rather than partially restored.
+- The preview shows per-type record counts and how many records already exist
+  on this device. There are two explicit modes:
+  - **Merge missing records** adds only records whose ID (day states: day) is
+    not already present. It never overwrites or deletes existing records and
+    never changes settings. This uses the existing additive `/api/import`.
+  - **Replace everything** is a second confirmed destructive action. It
+    removes all current records (and, on a connected server, every stored
+    setting) and restores the backup's records plus the whitelisted
+    non-secret settings: rules, dose defaults, planned doses, timezone,
+    low-stock threshold and alert latch, and reminder preferences.
+- `POST /api/restore` is the atomic server operation behind replace. It
+  validates the entire payload before writing, then clears and re-inserts
+  records/settings in a single SQLite transaction. The same transaction also
+  CLEARS the internal reminder occurrence/delivery state — that state is never
+  backup content and is never restored, only reset. Any error rolls the whole
+  replacement back and nothing changes; success returns the canonical export
+  envelope, which the browser adopts (it never optimistically erases local
+  data first). Bulk import and restore request bodies are limited to 25 MiB, so
+  a larger backup must be restored via the stopped-container SQLite file path
+  in section 4.
+- Duplicate IDs inside a replacement payload make replace fail atomically
+  (merge keeps the first of each duplicate and skips the rest).
+- Secret/environment configuration (for example `NTFY_URL`, `NTFY_TOKEN`, and
+  `PUBLIC_APP_URL`) is never backup content and is never restored. Reminder
+  delivery state is internal and is reset by a restore.
+- `/api/import` remains an **additive** endpoint (`INSERT OR IGNORE`): it
+  skips existing records, restores no settings, and does not touch internal
+  reminder state. CSV import in Settings is unchanged and is not a JSON
+  restore.
+- To restore the primary database itself, use the stopped-container SQLite
+  file restore in section 4. That remains the disaster-recovery path; in-app
+  JSON restore is the option available while the app is running.
 
 ## 8. First run
 

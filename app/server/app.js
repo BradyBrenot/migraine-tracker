@@ -17,6 +17,7 @@ import {
   baselineErrors, isValidDay, isValidSettingsKey, validateImportBody,
 } from './validate.js';
 import { exportEnvelope, collectSettings } from './snapshot.js';
+import { parseBackup } from '../shared/backup.ts';
 import { currentStock, classifyStock } from '../shared/inventory.ts';
 import { isValidTimeZone } from '../shared/datetime.ts';
 import { normalizeReminderSettings, reminderSettingsErrors } from '../shared/reminders.ts';
@@ -340,10 +341,15 @@ export async function buildApp({
   });
 
   // ── bulk import / export ───────────────────────────────────────────
+  // Fastify's default 1 MiB body limit is far too small for a pretty-printed
+  // nightly dump (indent + a full history easily exceeds it), so both bulk
+  // routes opt into an explicit 25 MiB limit. Nothing else about the handlers
+  // changes: /api/import stays additive and /api/restore stays destructive.
+  const BACKUP_BODY_LIMIT = 25 * 1024 * 1024;
   // Import stays additive (INSERT OR IGNORE): duplicates and existing rows
   // are never overwritten, settings are not restored, and the whole payload
   // commits or rolls back atomically.
-  app.post('/api/import', (req, reply) => {
+  app.post('/api/import', { bodyLimit: BACKUP_BODY_LIMIT }, (req, reply) => {
     const check = validateImportBody(req.body);
     if (!check.ok) return reply.code(400).send({ error: check.error });
     const { attacks, meds, refills, workouts, dayStates, stockBaselines } = check.value;
@@ -386,6 +392,106 @@ export async function buildApp({
       dayStates: dayStates.length,
       stockBaselines: stockBaselines.length,
     };
+  });
+
+  // ── destructive restore ────────────────────────────────────────────
+  // POST /api/restore REPLACES every user record and the restorable
+  // non-secret settings (unlike additive /api/import). The whole payload is
+  // parsed and re-validated before anything is written, duplicate keys are
+  // rejected because a replacement must be byte-exact, and one transaction
+  // clears the same rows /api/reset clears and inserts the backup. Internal
+  // reminder bookkeeping is cleared too so old occurrences are not reused.
+  // Direct attack alerts never fire here, matching import/reset.
+  app.post('/api/restore', { bodyLimit: BACKUP_BODY_LIMIT }, (req, reply) => {
+    // A missing body parses as undefined and fails, so a destructive request
+    // can never wipe data by accident.
+    const parsed = parseBackup(req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const backup = parsed.backup;
+
+    const duplicates = Object.entries(backup.duplicateCounts)
+      .filter(([, count]) => count > 0)
+      .map(([key, count]) => `${key}: ${count}`);
+    if (duplicates.length) {
+      return reply.code(400).send({ error: `duplicate ids in ${duplicates.join(', ')}` });
+    }
+
+    // Defense in depth: the shared parser is also bundled for the browser, so
+    // the server's own item validators stay authoritative for what is written.
+    const check = validateImportBody({
+      schemaVersion: backup.schemaVersion ?? null,
+      attacks: backup.attacks,
+      meds: backup.meds,
+      refills: backup.refills,
+      workouts: backup.workouts,
+      dayStates: backup.dayStates,
+      stockBaselines: backup.stockBaselines,
+    });
+    if (!check.ok) return reply.code(400).send({ error: check.error });
+    const { attacks, meds, refills, workouts, dayStates, stockBaselines } = check.value;
+
+    // Plain INSERT (not OR IGNORE): duplicates were rejected above, and any
+    // constraint failure must roll the whole replacement back.
+    const insertA = db.prepare(`INSERT INTO attacks (id,start,"end",pain_log,peak_pain,symptoms,triggers,aura,notes,source)
+      VALUES (@id,@start,@end,@pain_log,@peak_pain,@symptoms,@triggers,@aura,@notes,@source)`);
+    const insertM = db.prepare(`INSERT INTO meds (id,med_id,ts,dose,quantity,attack_id,notes,source)
+      VALUES (@id,@med_id,@ts,@dose,@quantity,@attack_id,@notes,@source)`);
+    const insertR = db.prepare(`INSERT INTO refills (id,med_id,date,quantity,notes,source)
+      VALUES (@id,@med_id,@date,@quantity,@notes,@source)`);
+    const insertW = db.prepare(`INSERT INTO workouts (id,performed_at,kind,effort,duration_minutes,notes,source)
+      VALUES (@id,@performed_at,@kind,@effort,@duration_minutes,@notes,@source)`);
+    const insertD = db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
+      VALUES (@day,@status,@notes,@updated_at)`);
+    const insertB = db.prepare(`INSERT INTO stock_baselines (id,med_id,effective_at,quantity,notes,source,created_at)
+      VALUES (@id,@med_id,@effective_at,@quantity,@notes,@source,@created_at)`);
+    // Same storage shape as PUT /api/settings/:key (one JSON value per row).
+    const insertS = db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    );
+
+    db.exec('BEGIN');
+    let envelope;
+    try {
+      db.exec(`DELETE FROM meds; DELETE FROM attacks; DELETE FROM refills; DELETE FROM workouts;
+        DELETE FROM day_states; DELETE FROM stock_baselines; DELETE FROM settings;
+        DELETE FROM reminder_occurrences; DELETE FROM reminder_state;`);
+      // Record inserts use the same mappers/defaults as /api/import so a
+      // restored envelope round-trips exactly (including payload updatedAt /
+      // createdAt tie-breakers and the 'import' source default).
+      for (const a of attacks) insertA.run(attackToRow({ ...a, id: a.id || uid() }));
+      for (const m of meds) insertM.run(medToRow({ ...m, id: m.id || uid(), source: m.source ?? 'import' }));
+      for (const r of refills) insertR.run(refillToRow({ ...r, id: r.id || uid() }, 'import'));
+      for (const w of workouts) insertW.run(workoutToRow({ ...w, id: w.id || uid(), source: w.source ?? 'import' }));
+      for (const d of dayStates) insertD.run(dayStateToRow(d));
+      for (const b of stockBaselines) {
+        insertB.run(baselineToRow({ ...b, id: b.id || uid(), source: b.source ?? 'import' }));
+      }
+      // Only whitelisted, validated keys reach backup.settings; skipped and
+      // reserved keys are never written.
+      for (const [key, value] of Object.entries(backup.settings)) {
+        insertS.run(key, JSON.stringify(value));
+      }
+      // The canonical export is built INSIDE the transaction, before COMMIT.
+      // Reading it after the commit would turn a read/parse failure (e.g. a
+      // corrupted JSON settings column inherited from legacy data) into a 500
+      // for an already-committed destructive replacement, leaving the client
+      // with an uncertain outcome. Reading here means the route either returns
+      // a fully valid envelope for a committed replacement or fails with the
+      // ROLLBACK leaving everything untouched.
+      envelope = exportEnvelope(db);
+      db.exec('COMMIT');
+    } catch (e) {
+      // A failed write must leave the device exactly as it was. ROLLBACK
+      // itself can fail when the connection already unwound; the original
+      // error is the one worth surfacing.
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // nothing to roll back
+      }
+      throw e;
+    }
+    return envelope;
   });
 
   app.get('/api/export', () => exportEnvelope(db));

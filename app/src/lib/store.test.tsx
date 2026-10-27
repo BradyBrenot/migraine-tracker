@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
-import type { Attack, DayState, StockBaseline, TrackerState, Workout } from '@/types';
+import type { Attack, DayState, MedEvent, StockBaseline, TrackerState, Workout } from '@/types';
 import { currentStock } from '../../shared/inventory.ts';
+import { systemTimeZone } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
+import { parseBackup } from '../../shared/backup.ts';
+import type { ParsedBackup } from '../../shared/backup.ts';
 
 // The store calls every backend method (some unconditionally chain `.catch`),
 // so each one must be a mock that returns a promise. The factory is hoisted and
@@ -15,6 +18,7 @@ vi.mock('@/lib/api', () => ({
   api: {
     exportAll: vi.fn(),
     importAll: vi.fn(),
+    restoreAll: vi.fn(),
     resetAll: vi.fn(),
     addAttack: vi.fn(),
     patchAttack: vi.fn(),
@@ -47,6 +51,7 @@ type StoreModule = typeof import('@/lib/store');
 interface MockedBackend {
   exportAll: Mock;
   importAll: Mock;
+  restoreAll: Mock;
   resetAll: Mock;
   addAttack: Mock;
   patchAttack: Mock;
@@ -280,9 +285,36 @@ function readSyncMeta(): { dirty: boolean; failed: boolean } {
   return JSON.parse(raw) as { dirty: boolean; failed: boolean };
 }
 
+const ZERO_BACKUP_COUNTS = {
+  attacks: 0, meds: 0, refills: 0, workouts: 0, dayStates: 0, stockBaselines: 0,
+};
+
+/** A current-format server envelope for the JSON restore tests. */
+function backupEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 4,
+    exportedAt: '2026-10-25T12:00:00.000Z',
+    attacks: [],
+    meds: [],
+    refills: [],
+    workouts: [],
+    dayStates: [],
+    stockBaselines: [],
+    settings: {},
+    ...overrides,
+  };
+}
+
+function parsedBackup(json: unknown): ParsedBackup {
+  const result = parseBackup(json);
+  if (!result.ok) throw new Error(`expected a valid backup: ${result.error}`);
+  return result.backup;
+}
+
 function applyApiDefaults(backend: MockedBackend): void {
   backend.exportAll.mockResolvedValue(emptyExport());
   backend.importAll.mockResolvedValue(undefined);
+  backend.restoreAll.mockResolvedValue(emptyExport());
   backend.resetAll.mockResolvedValue(undefined);
   backend.addAttack.mockResolvedValue(undefined);
   backend.patchAttack.mockResolvedValue(undefined);
@@ -1559,6 +1591,940 @@ describe('Nurtec inventory and low-stock latch', () => {
     expect(lowStockWrites()).toEqual([['lowStockAlert', { latchedAt: null }]]);
     expect(lowStockWrites()[0]).not.toEqual(['lowStockAlert', { latchedAt: preResetLatch }]);
     expect(toast2.warning).not.toHaveBeenCalled();
+  });
+});
+
+describe('JSON backup merge and replace', () => {
+  it('merges only missing records, keeps existing local records, and leaves settings alone', async () => {
+    const localAttack = { ...makeAttack('a1'), notes: 'local original' };
+    const localDay = makeDayState('2026-10-21', { status: 'well', notes: 'local day' });
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [localAttack],
+      dayStates: [localDay],
+      settings: {
+        timezone: 'Asia/Tokyo',
+        lowStockThreshold: 5,
+        rules: { nurtec: { limit: 9, windowDays: 30 } },
+      },
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['a1']);
+    api.importAll.mockClear();
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [
+        { ...makeAttack('a1'), notes: 'backup version' },
+        { ...makeAttack('a2'), start: '2026-10-22T08:00:00.000Z' },
+      ],
+      dayStates: [
+        makeDayState('2026-10-21', { status: 'attack' }),
+        makeDayState('2026-10-22', { status: 'off' }),
+      ],
+      settings: {
+        timezone: 'America/New_York',
+        lowStockThreshold: 1,
+        rules: { nurtec: { limit: 1, windowDays: 7 } },
+      },
+    }));
+
+    let added: ReturnType<StoreApi['mergeBackup']>['added'] | undefined;
+    await act(async () => {
+      added = currentStore().mergeBackup(backup).added;
+    });
+    expect(added).toEqual({
+      attacks: 1, meds: 0, refills: 0, workouts: 0, dayStates: 1, stockBaselines: 0,
+    });
+
+    const state = currentStore().state;
+    expect(state.attacks.map((a) => a.id)).toEqual(['a1', 'a2']);
+    // Existing records win: the backup's different content never overwrites.
+    expect(state.attacks[0].notes).toBe('local original');
+    expect(state.dayStates).toHaveLength(2);
+    expect(state.dayStates[0]).toEqual(localDay);
+    expect(state.dayStates[1]).toMatchObject({ day: '2026-10-22', status: 'off' });
+    // Settings are untouched by an additive merge.
+    expect(state.timezone).toBe('Asia/Tokyo');
+    expect(state.lowStockThreshold).toBe(5);
+    expect(state.rules.nurtec).toEqual({ limit: 9, windowDays: 30 });
+
+    await waitFor(() => expect(api.importAll).toHaveBeenCalledTimes(1));
+    expect(api.importAll).toHaveBeenCalledWith({
+      attacks: [expect.objectContaining({ id: 'a2' })],
+      meds: [],
+      refills: [],
+      workouts: [],
+      dayStates: [expect.objectContaining({ day: '2026-10-22' })],
+      stockBaselines: [],
+    });
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+  });
+
+  it('treats an entirely duplicate merge as a no-op that never hits the server', async () => {
+    const localAttack = makeAttack('a1');
+    api.exportAll.mockResolvedValue({ ...emptyExport(), attacks: [localAttack] });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.importAll.mockClear();
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [{ ...localAttack, notes: 'different content' }],
+    }));
+
+    let result: ReturnType<StoreApi['mergeBackup']> | undefined;
+    await act(async () => {
+      result = currentStore().mergeBackup(backup);
+    });
+    expect(result!.added).toEqual(ZERO_BACKUP_COUNTS);
+    await expect(result!.synced).resolves.toBeUndefined();
+
+    expect(api.importAll).not.toHaveBeenCalled();
+    expect(currentStore().state.attacks).toEqual([localAttack]);
+    const sync = currentStore().sync;
+    expect(sync.dirty).toBe(false);
+    expect(sync.failed).toBe(false);
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('applies an offline merge locally and latches dirty + failed', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [makeAttack('offline-a')],
+    }));
+
+    let synced!: Promise<void>;
+    await act(async () => {
+      const merged = currentStore().mergeBackup(backup);
+      synced = merged.synced;
+      synced.catch(() => undefined); // observed below; avoid unhandled-rejection noise
+    });
+    await expect(synced).rejects.toThrow(/offline/);
+
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['offline-a']);
+    const sync = currentStore().sync;
+    expect(sync.status).toBe('local');
+    expect(sync.dirty).toBe(true);
+    expect(sync.failed).toBe(true);
+    expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
+    expect(readPersistedState().attacks.map((a) => a.id)).toEqual(['offline-a']);
+  });
+
+  it('adopts the canonical server snapshot after a confirmed connected replace', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('before')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.importAll.mockClear();
+    api.resetAll.mockClear();
+
+    const restoredAttack = { ...makeAttack('restored'), notes: 'from backup' };
+    const canonical = {
+      ...emptyExport(),
+      schemaVersion: 4,
+      exportedAt: '2026-10-25T12:00:00.000Z',
+      attacks: [restoredAttack],
+      settings: {
+        timezone: 'Asia/Tokyo',
+        rules: { nurtec: { limit: 11, windowDays: 30 } },
+        doses: { nurtec: '75 mg' },
+        planned: { botox: '2026-11-01' },
+        lowStockThreshold: 4,
+        lowStockAlert: { latchedAt: null },
+        reminders: { ...DEFAULT_REMINDER_SETTINGS },
+      },
+    };
+    api.restoreAll.mockResolvedValue(canonical);
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [restoredAttack],
+      settings: { timezone: 'UTC', rules: { nurtec: { limit: 11, windowDays: 30 } } },
+    }));
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    // The wire payload carries every array plus the FULL effective settings:
+    // the server only stores keys present in the payload, so a backup with
+    // absent keys must still persist the defaults the browser adopts.
+    expect(api.restoreAll).toHaveBeenCalledTimes(1);
+    expect(api.restoreAll).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 4,
+      attacks: [expect.objectContaining({ id: 'restored' })],
+      meds: [],
+      refills: [],
+      workouts: [],
+      dayStates: [],
+      stockBaselines: [],
+      settings: expect.objectContaining({
+        timezone: 'UTC',
+        rules: expect.objectContaining({ nurtec: { limit: 11, windowDays: 30 } }),
+        lowStockThreshold: storeModule.DEFAULT_LOW_STOCK_THRESHOLD,
+        lowStockAlert: { latchedAt: null },
+        reminders: DEFAULT_REMINDER_SETTINGS,
+      }),
+    }));
+
+    const state = currentStore().state;
+    expect(state.attacks.map((a) => a.id)).toEqual(['restored']);
+    // Settings come from the BACKUP (defaults for keys it does not carry),
+    // never from the returned envelope: replacement is not hydration, so the
+    // stale pre-restore threshold/reminders must not survive either.
+    expect(state.timezone).toBe('UTC');
+    expect(state.lowStockThreshold).toBe(storeModule.DEFAULT_LOW_STOCK_THRESHOLD);
+    expect(state.rules.nurtec).toEqual({ limit: 11, windowDays: 30 });
+    expect(state.doses.nurtec).toBe('75 mg');
+    expect(state.planned).toEqual({});
+    expect(state.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(state.seeded).toBe(false);
+    // A single atomic operation: no additive import, no reset-then-import.
+    expect(api.importAll).not.toHaveBeenCalled();
+    expect(api.resetAll).not.toHaveBeenCalled();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('rebases writes made while a connected replace is in flight (three-way)', async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(persistedState([makeAttack('A1'), makeAttack('A2')])),
+    );
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('A1'), makeAttack('A2')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(currentStore().state.timezone).toBe('UTC');
+
+    const deferred = createDeferred<ReturnType<typeof emptyExport>>();
+    api.restoreAll.mockReturnValue(deferred.promise);
+    const restoredRefill = {
+      id: 'r-backup',
+      medId: 'nurtec',
+      date: '2026-10-18',
+      quantity: 8,
+      notes: '',
+      source: 'manual' as const,
+    };
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [makeAttack('from-backup')],
+      refills: [restoredRefill],
+      settings: {
+        timezone: 'Asia/Tokyo',
+        lowStockThreshold: 4,
+        rules: { nurtec: { limit: 11, windowDays: 30 } },
+      },
+    }));
+
+    let replace!: Promise<void>;
+    await act(async () => {
+      replace = currentStore().replaceBackup(backup);
+    });
+    expect(api.restoreAll).toHaveBeenCalledTimes(1);
+
+    // Writes that land while the restore is pending: their server tasks are
+    // queued BEHIND the restore.
+    let newMed!: MedEvent;
+    await act(async () => {
+      newMed = currentStore().logMed('nurtec', new Date('2026-10-21T09:00:00.000Z'));
+      currentStore().updateAttack('A1', { notes: 'edited while restoring' });
+      currentStore().deleteAttack('A2');
+      currentStore().setTimezone('Europe/Berlin');
+      currentStore().setLowStockThreshold(7);
+    });
+
+    await act(async () => {
+      // The canonical envelope echoes different records and different settings.
+      deferred.resolve({
+        ...emptyExport(),
+        attacks: [makeAttack('from-backup')],
+        refills: [restoredRefill],
+        settings: { timezone: 'America/New_York', lowStockThreshold: 1 },
+      });
+      await replace;
+    });
+    await waitFor(() => expect(currentStore().sync.pending).toBe(0));
+
+    const state = currentStore().state;
+    // Later ADDITION survives and the queued addMed reproduced the same row.
+    expect(state.meds).toEqual([newMed]);
+    expect(api.addMed).toHaveBeenCalledWith(newMed);
+    // Later EDIT survives and the queued PATCH carries it.
+    expect(state.attacks.find((a) => a.id === 'A1')?.notes).toBe('edited while restoring');
+    expect(api.patchAttack).toHaveBeenCalledWith(
+      'A1', expect.objectContaining({ notes: 'edited while restoring' }),
+    );
+    // Later DELETION survives and the queued DELETE ran.
+    expect(state.attacks.some((a) => a.id === 'A2')).toBe(false);
+    expect(api.deleteAttack).toHaveBeenCalledWith('A2');
+    // Later SETTINGS win over the backup's.
+    expect(state.timezone).toBe('Europe/Berlin');
+    expect(state.lowStockThreshold).toBe(7);
+    // Untouched replacement content still comes from the canonical envelope.
+    expect(state.attacks.some((a) => a.id === 'from-backup')).toBe(true);
+    expect(state.refills).toEqual([restoredRefill]);
+    expect(state.rules.nurtec).toEqual({ limit: 11, windowDays: 30 });
+  });
+
+  it('connected replace adopts defaults for settings absent from the backup', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([]),
+      timezone: 'America/New_York',
+      lowStockThreshold: 5,
+      reminders: { ...DEFAULT_REMINDER_SETTINGS, enabled: false },
+    }));
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('before')],
+      settings: {
+        timezone: 'America/New_York',
+        lowStockThreshold: 5,
+        reminders: { ...DEFAULT_REMINDER_SETTINGS, enabled: false },
+      },
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(currentStore().state.lowStockThreshold).toBe(5);
+    expect(currentStore().state.reminders.enabled).toBe(false);
+
+    api.restoreAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('restored')],
+    });
+    const backup = parsedBackup(backupEnvelope({ attacks: [makeAttack('restored')] }));
+    expect(backup.settings).toEqual({});
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    expect(state.lowStockThreshold).toBe(storeModule.DEFAULT_LOW_STOCK_THRESHOLD);
+    expect(state.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(state.timezone).toBe(systemTimeZone());
+    // Records still come from the canonical envelope.
+    expect(state.attacks.map((a) => a.id)).toEqual(['restored']);
+  });
+
+  it('browser-only replace with absent settings yields the same defaults', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...persistedState([makeAttack('local')]),
+      timezone: 'America/New_York',
+      lowStockThreshold: 5,
+      reminders: { ...DEFAULT_REMINDER_SETTINGS, enabled: false },
+    }));
+    api.exportAll.mockRejectedValue(new Error('offline'));
+
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const backup = parsedBackup({ attacks: [] });
+    expect(backup.format).toBe('browser');
+    expect(backup.settings).toEqual({});
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    expect(state.lowStockThreshold).toBe(storeModule.DEFAULT_LOW_STOCK_THRESHOLD);
+    expect(state.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(state.timezone).toBe(systemTimeZone());
+  });
+
+  it('assigns a local id to an id-less merged attack and imports that same id', async () => {
+    api.exportAll.mockResolvedValue(emptyExport());
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [{ ...makeAttack(''), notes: 'no id' }],
+    }));
+    await act(async () => {
+      currentStore().mergeBackup(backup);
+    });
+
+    const local = currentStore().state.attacks[0];
+    expect(local.id).toBeTruthy();
+    await waitFor(() => expect(api.importAll).toHaveBeenCalledTimes(1));
+    expect(api.importAll).toHaveBeenCalledWith(expect.objectContaining({
+      attacks: [expect.objectContaining({ id: local.id, notes: 'no id' })],
+    }));
+  });
+
+  it('assigns unique local ids to every id-keyed record on a browser-only replace', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const attackWithoutId = (start: string) => ({
+      start, end: null, painLog: [], peakPain: -1, symptoms: [], triggers: [],
+      aura: null, notes: '', source: 'manual',
+    });
+    const backup = parsedBackup({
+      attacks: [
+        attackWithoutId('2026-10-20T08:00:00.000Z'),
+        attackWithoutId('2026-10-21T08:00:00.000Z'),
+      ],
+      meds: [{
+        medId: 'nurtec', ts: '2026-10-21T09:00:00.000Z', dose: '75 mg',
+        quantity: 1, attackId: null, notes: '', source: 'manual',
+      }],
+      refills: [{
+        medId: 'nurtec', date: '2026-10-18', quantity: 8, notes: '', source: 'manual',
+      }],
+      workouts: [{
+        performedAt: '2026-10-19T17:00:00.000Z', kind: 'cardio', effort: 'low',
+        durationMinutes: 20, notes: '', source: 'manual',
+      }],
+      stockBaselines: [{
+        medId: 'nurtec', effectiveAt: '2026-10-01T00:00:00.000Z', quantity: 8,
+        notes: '', source: 'manual', createdAt: '2026-10-01T00:00:01.000Z',
+      }],
+    });
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    const ids = [
+      ...state.attacks, ...state.meds, ...state.refills,
+      ...state.workouts, ...state.stockBaselines,
+    ].map((record) => record.id);
+    expect(ids).toHaveLength(6);
+    for (const id of ids) expect(id).toBeTruthy();
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('sends generated ids to the restore endpoint for id-less records', async () => {
+    api.exportAll.mockResolvedValue(emptyExport());
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [{ ...makeAttack(''), notes: 'no id' }],
+    }));
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    expect(api.restoreAll).toHaveBeenCalledTimes(1);
+    const payload = api.restoreAll.mock.calls[0][0] as { attacks: { id: string }[] };
+    expect(payload.attacks).toHaveLength(1);
+    expect(payload.attacks[0].id).toBeTruthy();
+    expect(payload.attacks[0].id).not.toBe('');
+  });
+
+  it('keeps pre-restore data when a connected replace fails and allows a retry', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('before')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [makeAttack('restored')],
+    }));
+    api.restoreAll.mockRejectedValueOnce(new Error('restore failed'));
+
+    await act(async () => {
+      await expect(currentStore().replaceBackup(backup)).rejects.toThrow('restore failed');
+    });
+
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['before']);
+    await waitFor(() => {
+      expect(currentStore().sync.pending).toBe(0);
+      expect(currentStore().sync.failed).toBe(true);
+    });
+    expect(currentStore().sync.dirty).toBe(true);
+
+    // The mock recovers: a second attempt is possible and adopts the snapshot.
+    api.restoreAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('restored')],
+    });
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['restored']);
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+    consoleError.mockRestore();
+  });
+
+  it('forces a replace through divergence, clears it on success, and drops stale pending latch bookkeeping', async () => {
+    const localAttack = makeAttack('local-attack');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState([localAttack])));
+    localStorage.setItem(SYNC_META_KEY, JSON.stringify({ dirty: true, failed: true }));
+    localStorage.setItem(
+      LATCH_PENDING_KEY,
+      JSON.stringify({ latchedAt: '2026-10-01T00:00:00.000Z' }),
+    );
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('server-attack')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('conflict'));
+    expect(currentStore().sync.diverged).toBe(true);
+    expect(readPendingLatch()).not.toBeNull();
+
+    const deferred = createDeferred<ReturnType<typeof emptyExport>>();
+    api.restoreAll.mockReturnValue(deferred.promise);
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [makeAttack('restored')],
+    }));
+
+    let replace!: Promise<void>;
+    await act(async () => {
+      replace = currentStore().replaceBackup(backup);
+    });
+
+    // While the server restore is pending, the unsynced local data survives.
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['local-attack']);
+    expect(api.restoreAll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      deferred.resolve({ ...emptyExport(), attacks: [makeAttack('restored')] });
+      await replace;
+    });
+
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['restored']);
+    expect(currentStore().sync.diverged).toBe(false);
+    expect(readPendingLatch()).toBeNull();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    expect(readSyncMeta()).toEqual({ dirty: false, failed: false });
+  });
+
+  it('applies a browser-only replacement locally with its settings and stays dirty + failed', async () => {
+    const localAttack = makeAttack('local-attack');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState([localAttack])));
+    api.exportAll.mockRejectedValue(new Error('offline'));
+
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const backup = parsedBackup({
+      attacks: [{ ...makeAttack('browser-a'), notes: 'browser export' }],
+      meds: [],
+      refills: [],
+      workouts: [],
+      dayStates: [],
+      stockBaselines: [],
+      rules: { nurtec: { limit: 6, windowDays: 30 } },
+      doses: { nurtec: '75 mg' },
+      planned: { botox: '2026-11-01' },
+      timezone: 'Asia/Tokyo',
+      lowStockThreshold: 4,
+      lowStockAlertedAt: '2026-10-20T00:00:00.000Z',
+      reminders: { ...DEFAULT_REMINDER_SETTINGS, enabled: false },
+      seeded: true,
+    });
+    expect(backup.format).toBe('browser');
+    expect(backup.seeded).toBe(true);
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    expect(state.attacks.map((a) => a.id)).toEqual(['browser-a']);
+    expect(state.attacks[0].notes).toBe('browser export');
+    expect(state.rules.nurtec).toEqual({ limit: 6, windowDays: 30 });
+    expect(state.doses.nurtec).toBe('75 mg');
+    expect(state.planned.botox).toBe('2026-11-01');
+    expect(state.timezone).toBe('Asia/Tokyo');
+    expect(state.lowStockThreshold).toBe(4);
+    expect(state.lowStockAlertedAt).toBe('2026-10-20T00:00:00.000Z');
+    expect(state.reminders.enabled).toBe(false);
+    expect(state.seeded).toBe(true);
+
+    // Browser-only restore is local and unconfirmed: no server call, and the
+    // sticky latches stop a later hydration from silently overwriting it.
+    expect(api.restoreAll).not.toHaveBeenCalled();
+    expect(api.importAll).not.toHaveBeenCalled();
+    const sync = currentStore().sync;
+    expect(sync.status).toBe('local');
+    expect(sync.dirty).toBe(true);
+    expect(sync.failed).toBe(true);
+    expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
+    expect(readPersistedState().attacks.map((a) => a.id)).toEqual(['browser-a']);
+  });
+
+  it('applies an empty browser-only replacement and keeps it latched', async () => {
+    const localAttack = makeAttack('local-attack');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState([localAttack])));
+    api.exportAll.mockRejectedValue(new Error('offline'));
+
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const backup = parsedBackup({
+      attacks: [],
+      meds: [],
+      refills: [],
+      workouts: [],
+      dayStates: [],
+      stockBaselines: [],
+    });
+    expect(backup.format).toBe('browser');
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    expect(state.attacks).toEqual([]);
+    expect(state.meds).toEqual([]);
+    expect(state.lowStockThreshold).toBe(2);
+    expect(state.seeded).toBe(false);
+    expect(state.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(typeof state.timezone).toBe('string');
+
+    // Even an empty deliberate replacement stays dirty + failed.
+    const sync = currentStore().sync;
+    expect(sync.dirty).toBe(true);
+    expect(sync.failed).toBe(true);
+    expect(readSyncMeta()).toEqual({ dirty: true, failed: true });
+    expect(readPersistedState().attacks).toEqual([]);
+  });
+
+  it('rejects a replacement containing duplicate ids without changing state or calling the server', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack('before')],
+    });
+
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [makeAttack('dup'), { ...makeAttack('dup'), notes: 'second' }],
+    }));
+    expect(backup.duplicateCounts.attacks).toBe(1);
+
+    await act(async () => {
+      await expect(currentStore().replaceBackup(backup))
+        .rejects.toThrow('duplicate ids in backup; replacement must be exact');
+    });
+
+    expect(currentStore().state.attacks.map((a) => a.id)).toEqual(['before']);
+    expect(api.restoreAll).not.toHaveBeenCalled();
+    expect(api.importAll).not.toHaveBeenCalled();
+  });
+
+  it('normalizes sparse legacy records before merging them locally and sending the payload', async () => {
+    api.exportAll.mockResolvedValue(emptyExport());
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+    api.importAll.mockClear();
+
+    // Legal/legacy records may omit optional fields, but the app itself sorts
+    // and renders them (and their comparators assume the field exists), so a
+    // fully-defaulted copy is required before the diff, the local apply, and
+    // the payload — mirroring server/mappers.js.
+    const sparseAttack = { id: 'sparse-a', start: '2026-10-20T08:00:00.000Z' };
+    const sparseMed = { id: 'sparse-m', medId: 'nurtec' };
+    const sparseBaseline = {
+      id: 'sparse-b', medId: 'nurtec', effectiveAt: '2026-10-01T00:00:00.000Z', quantity: 8,
+    };
+    const backup = parsedBackup(backupEnvelope({
+      attacks: [sparseAttack],
+      meds: [sparseMed],
+      stockBaselines: [sparseBaseline],
+    }));
+
+    await act(async () => {
+      currentStore().mergeBackup(backup);
+    });
+    await waitFor(() => expect(api.importAll).toHaveBeenCalledTimes(1));
+
+    const state = currentStore().state;
+    expect(state.attacks).toEqual([{
+      id: 'sparse-a',
+      start: '2026-10-20T08:00:00.000Z',
+      end: null,
+      painLog: [],
+      peakPain: -1,
+      symptoms: [],
+      triggers: [],
+      aura: null,
+      notes: '',
+      source: 'manual',
+    }]);
+    expect(state.meds).toEqual([{
+      id: 'sparse-m',
+      medId: 'nurtec',
+      ts: expect.any(String),
+      dose: '',
+      quantity: null,
+      attackId: null,
+      notes: '',
+      source: 'import',
+    }]);
+    expect(state.stockBaselines).toEqual([{
+      id: 'sparse-b',
+      medId: 'nurtec',
+      effectiveAt: '2026-10-01T00:00:00.000Z',
+      quantity: 8,
+      notes: '',
+      source: 'import',
+      createdAt: expect.any(String),
+    }]);
+    const med = state.meds[0];
+    const baseline = state.stockBaselines[0];
+    expect(Number.isFinite(Date.parse(med.ts))).toBe(true);
+    expect(Number.isFinite(Date.parse(baseline.createdAt))).toBe(true);
+    // ONE timestamp per normalization pass: every defaulted instant agrees.
+    expect(baseline.createdAt).toBe(med.ts);
+
+    // The import payload is the same usable, defaulted record set.
+    expect(api.importAll).toHaveBeenCalledWith({
+      attacks: [state.attacks[0]],
+      meds: [med],
+      refills: [],
+      workouts: [],
+      dayStates: [],
+      stockBaselines: [baseline],
+    });
+
+    // Normalization copies: the parsed backup objects stay untouched.
+    expect(backup.attacks[0]).toEqual(sparseAttack);
+    expect(backup.meds[0]).toEqual(sparseMed);
+    expect(backup.stockBaselines[0]).toEqual(sparseBaseline);
+  });
+
+  it('normalizes sparse records on a browser-only replace', async () => {
+    api.exportAll.mockRejectedValue(new Error('offline'));
+    mountStore();
+    await waitFor(() => expect(api.exportAll).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(currentStore().serverMode).toBe(false);
+
+    const backup = parsedBackup({
+      attacks: [{ start: '2026-10-20T08:00:00.000Z' }],
+      meds: [{ medId: 'nurtec' }],
+      refills: [{ medId: 'nurtec', date: '2026-10-18' }],
+      workouts: [{ performedAt: '2026-10-19T17:00:00.000Z', kind: 'cardio', effort: 'low' }],
+      stockBaselines: [{ medId: 'nurtec', effectiveAt: '2026-10-01T00:00:00.000Z', quantity: 8 }],
+      dayStates: [{ day: '2026-10-20', status: 'well' }],
+    });
+    expect(backup.format).toBe('browser');
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    const state = currentStore().state;
+    expect(state.attacks).toEqual([{
+      id: expect.any(String),
+      start: '2026-10-20T08:00:00.000Z',
+      end: null,
+      painLog: [],
+      peakPain: -1,
+      symptoms: [],
+      triggers: [],
+      aura: null,
+      notes: '',
+      source: 'manual',
+    }]);
+    expect(state.meds).toEqual([{
+      id: expect.any(String),
+      medId: 'nurtec',
+      ts: expect.any(String),
+      dose: '',
+      quantity: null,
+      attackId: null,
+      notes: '',
+      source: 'import',
+    }]);
+    expect(state.refills).toEqual([{
+      id: expect.any(String),
+      medId: 'nurtec',
+      date: '2026-10-18',
+      quantity: null,
+      notes: '',
+      source: 'import',
+    }]);
+    expect(state.workouts).toEqual([{
+      id: expect.any(String),
+      performedAt: '2026-10-19T17:00:00.000Z',
+      kind: 'cardio',
+      effort: 'low',
+      durationMinutes: null,
+      notes: '',
+      source: 'import',
+    }]);
+    expect(state.stockBaselines).toEqual([{
+      id: expect.any(String),
+      medId: 'nurtec',
+      effectiveAt: '2026-10-01T00:00:00.000Z',
+      quantity: 8,
+      notes: '',
+      source: 'import',
+      createdAt: expect.any(String),
+    }]);
+    expect(state.dayStates).toEqual([{
+      day: '2026-10-20',
+      status: 'well',
+      notes: '',
+      updatedAt: expect.any(String),
+    }]);
+    // Id-less records got usable local ids; the shared timestamp covers every
+    // defaulted instant in this pass.
+    expect(state.attacks[0].id).toBeTruthy();
+    expect(state.stockBaselines[0].createdAt).toBe(state.meds[0].ts);
+    expect(state.dayStates[0].updatedAt).toBe(state.meds[0].ts);
+  });
+
+  it('sends full defaulted settings and records for a connected replace of a settings-less backup', async () => {
+    api.exportAll.mockResolvedValue(emptyExport());
+    mountStore();
+    await waitFor(() => expect(currentStore().sync.status).toBe('synced'));
+
+    // The defaults an empty-server hydration already shows: the replacement
+    // must adopt exactly these (and report them to the server).
+    const defaultRulesSnapshot = currentStore().state.rules;
+    const defaultDosesSnapshot = currentStore().state.doses;
+    expect(Object.keys(defaultRulesSnapshot).length).toBeGreaterThan(0);
+
+    const backup = parsedBackup({
+      schemaVersion: 4,
+      attacks: [{ id: 'sparse-a', start: '2026-10-20T08:00:00.000Z' }],
+      meds: [{ id: 'sparse-m', medId: 'nurtec' }],
+    });
+    expect(backup.settings).toEqual({});
+
+    // The server applies its own mapper defaults and echoes the records.
+    api.restoreAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [{
+        id: 'sparse-a',
+        start: '2026-10-20T08:00:00.000Z',
+        end: null,
+        painLog: [],
+        peakPain: -1,
+        symptoms: [],
+        triggers: [],
+        aura: null,
+        notes: '',
+        source: 'manual',
+      }],
+      meds: [{
+        id: 'sparse-m',
+        medId: 'nurtec',
+        ts: '2026-10-21T00:00:00.000Z',
+        dose: '',
+        quantity: null,
+        attackId: null,
+        notes: '',
+        source: 'import',
+      }],
+    });
+
+    await act(async () => {
+      await currentStore().replaceBackup(backup);
+    });
+
+    // The payload is usable AND carries the full effective settings: the
+    // server stores only the keys it receives, so a settings-less backup must
+    // not leave it without any.
+    const payload = api.restoreAll.mock.calls[0][0] as {
+      attacks: unknown[];
+      meds: unknown[];
+      settings: Record<string, unknown>;
+    };
+    expect(payload.attacks).toEqual([{
+      id: 'sparse-a',
+      start: '2026-10-20T08:00:00.000Z',
+      end: null,
+      painLog: [],
+      peakPain: -1,
+      symptoms: [],
+      triggers: [],
+      aura: null,
+      notes: '',
+      source: 'manual',
+    }]);
+    const payloadMed = payload.meds[0] as {
+      ts: string; dose: string; quantity: unknown; attackId: unknown;
+      notes: string; source: string;
+    };
+    expect(payloadMed).toMatchObject({
+      dose: '', quantity: null, attackId: null, notes: '', source: 'import',
+    });
+    expect(Number.isFinite(Date.parse(payloadMed.ts))).toBe(true);
+
+    expect(payload.settings.timezone).toBe(systemTimeZone());
+    expect(payload.settings.lowStockThreshold).toBe(storeModule.DEFAULT_LOW_STOCK_THRESHOLD);
+    expect(payload.settings.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(payload.settings.lowStockAlert).toEqual({ latchedAt: null });
+    expect(payload.settings.rules).toEqual(defaultRulesSnapshot);
+    expect(payload.settings.doses).toEqual(defaultDosesSnapshot);
+    expect(payload.settings.planned).toEqual({});
+
+    // The adopted local state agrees with what was sent to the server.
+    const state = currentStore().state;
+    expect(state.timezone).toBe(systemTimeZone());
+    expect(state.lowStockThreshold).toBe(storeModule.DEFAULT_LOW_STOCK_THRESHOLD);
+    expect(state.reminders).toEqual(DEFAULT_REMINDER_SETTINGS);
+    expect(state.lowStockAlertedAt).toBeNull();
+    expect(state.rules).toEqual(defaultRulesSnapshot);
+    expect(state.doses).toEqual(defaultDosesSnapshot);
+    expect(state.planned).toEqual({});
+    // Records still come from the canonical envelope.
+    expect(state.attacks.map((a) => a.id)).toEqual(['sparse-a']);
+    expect(state.meds).toEqual([{
+      id: 'sparse-m',
+      medId: 'nurtec',
+      ts: '2026-10-21T00:00:00.000Z',
+      dose: '',
+      quantity: null,
+      attackId: null,
+      notes: '',
+      source: 'import',
+    }]);
   });
 });
 

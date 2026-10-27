@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Upload, Trash2, Sparkles, FileDown, AlertTriangle, Pill, Plus } from 'lucide-react';
+import {
+  Upload, Trash2, Sparkles, FileDown, FileUp, AlertTriangle, Pill, Plus,
+} from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { nurtecInventory, parseTabletQuantity } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { fmtDateFull, fmtTime, toLocalInput } from '@/lib/format';
@@ -12,7 +14,9 @@ import { isValidTimeZone } from '../../shared/datetime.ts';
 import {
   normalizeReminderSettings, reminderSettingsErrors,
 } from '../../shared/reminders.ts';
-import type { ReminderSettings } from '@/types';
+import { parseBackup } from '../../shared/backup.ts';
+import type { BackupRecordKey, ParsedBackup } from '../../shared/backup.ts';
+import type { ReminderSettings, TrackerState } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -26,6 +30,96 @@ import {
 } from '@/components/ui/dialog';
 
 type AttackAlertStatus = 'checking' | 'configured' | 'not-configured' | 'unavailable';
+
+const BACKUP_RECORD_KEYS: readonly BackupRecordKey[] = [
+  'attacks', 'meds', 'refills', 'workouts', 'dayStates', 'stockBaselines',
+];
+
+const BACKUP_RECORD_LABELS: Record<
+  BackupRecordKey,
+  { singular: string; plural: string; preview: string }
+> = {
+  attacks: { singular: 'attack', plural: 'attacks', preview: 'attacks' },
+  meds: { singular: 'medication entry', plural: 'medication entries', preview: 'medication entries' },
+  refills: { singular: 'refill', plural: 'refills', preview: 'refills' },
+  workouts: { singular: 'workout', plural: 'workouts', preview: 'workouts' },
+  dayStates: { singular: 'day state', plural: 'day states', preview: 'day states' },
+  stockBaselines: {
+    singular: 'starting count',
+    plural: 'starting counts',
+    preview: 'starting counts',
+  },
+};
+
+/** Human label for the two accepted on-disk formats. */
+function backupFormatLabel(backup: ParsedBackup): string {
+  if (backup.format === 'envelope') {
+    return backup.schemaVersion === null
+      ? 'Server backup (legacy)'
+      : `Server backup · schema v${backup.schemaVersion}`;
+  }
+  return 'Browser export';
+}
+
+/** Local date/time for `exportedAt`, falling back to the raw value. */
+function formatExportedAt(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleString() : value;
+}
+
+/**
+ * How many backup records already exist locally, using the same key rules as
+ * the merge action: ids (blank ids are new — the server assigns one) and day
+ * states by day.
+ */
+function countAlreadyPresent(
+  backup: ParsedBackup,
+  state: TrackerState,
+): Record<BackupRecordKey, number> {
+  const attackIds = new Set(state.attacks.map((a) => a.id));
+  const medIds = new Set(state.meds.map((m) => m.id));
+  const refillIds = new Set(state.refills.map((r) => r.id));
+  const workoutIds = new Set(state.workouts.map((w) => w.id));
+  const dayKeys = new Set(state.dayStates.map((d) => d.day));
+  const baselineIds = new Set(state.stockBaselines.map((b) => b.id));
+  return {
+    attacks: backup.attacks.filter((a) => a.id !== '' && attackIds.has(a.id)).length,
+    meds: backup.meds.filter((m) => m.id !== '' && medIds.has(m.id)).length,
+    refills: backup.refills.filter((r) => r.id !== '' && refillIds.has(r.id)).length,
+    workouts: backup.workouts.filter((w) => w.id !== '' && workoutIds.has(w.id)).length,
+    dayStates: backup.dayStates.filter((d) => dayKeys.has(d.day)).length,
+    stockBaselines: backup.stockBaselines
+      .filter((b) => b.id !== '' && baselineIds.has(b.id)).length,
+  };
+}
+
+function describeAddedCounts(added: Record<BackupRecordKey, number>): string {
+  return BACKUP_RECORD_KEYS
+    .filter((key) => added[key] > 0)
+    .map((key) => {
+      const labels = BACKUP_RECORD_LABELS[key];
+      return `${added[key]} ${added[key] === 1 ? labels.singular : labels.plural}`;
+    })
+    .join(', ');
+}
+
+/**
+ * A 400/413 from the server is a DEFINITE rejection before any write: both
+ * bulk routes validate the payload (and enforce the 25 MiB body limit) before
+ * their transaction, so "nothing changed" is safe to say. Everything else —
+ * a 5xx, a network failure, or the bulk timeout — leaves the outcome unknown
+ * and must never claim nothing changed.
+ */
+function isDefiniteRestoreRejection(error: unknown): error is ApiError {
+  return error instanceof ApiError && (error.status === 400 || error.status === 413);
+}
+
+const TOO_LARGE_DESCRIPTION =
+  'Restore uploads are limited to 25 MB. Use a smaller backup, or restore the '
+  + 'SQLite files (see DEPLOY.md).';
+
+const UNCONFIRMED_DESCRIPTION =
+  'The server may already have applied the replacement — check the current data before retrying.';
 
 export default function Settings() {
   const store = useStore();
@@ -44,6 +138,28 @@ export default function Settings() {
   const [attackAlertStatus, setAttackAlertStatus] =
     useState<AttackAlertStatus>('checking');
   const now = useNow();
+
+  // ── JSON backup restore (merge / replace) ──────────────────────────
+  const jsonFileRef = useRef<HTMLInputElement>(null);
+  const [jsonPreview, setJsonPreview] = useState<
+    { filename: string; backup: ParsedBackup } | null
+  >(null);
+  /** Parser/read error shown inline until a new file or explicit dismissal. */
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  /**
+   * Synchronous guard so a double click cannot start the destructive action
+   * twice before React re-renders the disabled buttons.
+   */
+  const restoreBusyRef = useRef(false);
+  /**
+   * Monotonic token for the JSON file read. Reading is async, so without it a
+   * slow earlier pick could resolve AFTER a newer one and overwrite that
+   * pick's preview/error state. Incremented per accepted pick; a stale read
+   * bails at every await boundary.
+   */
+  const jsonReadTokenRef = useRef(0);
 
   // Read-only environment configuration. Fetched once; a late response after
   // unmount is ignored, and any failure/malformed body reads as unavailable.
@@ -98,6 +214,15 @@ export default function Settings() {
     .sort((a, b) =>
       b.effectiveAt.localeCompare(a.effectiveAt) || b.createdAt.localeCompare(a.createdAt));
 
+  const previewBackup = jsonPreview?.backup ?? null;
+  const alreadyPresent = previewBackup ? countAlreadyPresent(previewBackup, state) : null;
+  const alreadyPresentTotal = alreadyPresent
+    ? BACKUP_RECORD_KEYS.reduce((sum, key) => sum + alreadyPresent[key], 0)
+    : 0;
+  const duplicateTotal = previewBackup
+    ? BACKUP_RECORD_KEYS.reduce((sum, key) => sum + previewBackup.duplicateCounts[key], 0)
+    : 0;
+
   function addBaseline() {
     if (!canAddBaseline || baselineQuantityParsed.quantity === null) return;
     store.addStockBaseline({
@@ -144,6 +269,146 @@ export default function Settings() {
     a.download = `migraine-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function handleJsonFile(e: React.ChangeEvent<HTMLInputElement>) {
+    // Belt-and-suspenders: the picker button is disabled while an operation is
+    // in flight, but a programmatic change (or a race with the re-render) must
+    // never replace the preview under a restore that is already running. The
+    // value is still cleared so a later pick of the same file fires onChange;
+    // no preview/error state is touched.
+    if (restoreBusyRef.current) {
+      e.target.value = '';
+      return;
+    }
+    // Only the newest pick may publish a preview/error (see the ref's note).
+    const token = ++jsonReadTokenRef.current;
+    const file = e.target.files?.[0];
+    // Reset immediately so choosing the same file again still fires onChange.
+    e.target.value = '';
+    if (!file) return;
+    setJsonError(null);
+
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      if (token !== jsonReadTokenRef.current) return;
+      toast.error('Could not read the backup file', {
+        description: `“${file.name}” could not be read. Nothing was changed.`,
+      });
+      return;
+    }
+    // A newer pick superseded this read while it was in flight: the rest of
+    // this handler (parsing + setState below) must not run.
+    if (token !== jsonReadTokenRef.current) return;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      const message = `“${file.name}” is not valid JSON: ${(error as Error).message}`;
+      setJsonError(message);
+      toast.error('Not a valid JSON file', { description: message });
+      return;
+    }
+
+    const result = parseBackup(parsed);
+    if (!result.ok) {
+      const message = `“${file.name}” is not a supported backup: ${result.error}`;
+      setJsonError(message);
+      toast.error('Backup not recognized', { description: message });
+      return;
+    }
+
+    setJsonPreview({ filename: file.name, backup: result.backup });
+  }
+
+  async function mergeFromPreview() {
+    const preview = jsonPreview;
+    if (!preview || restoreBusyRef.current) return;
+    restoreBusyRef.current = true;
+    setRestoreBusy(true);
+    try {
+      const { added, synced } = store.mergeBackup(preview.backup);
+      const total = BACKUP_RECORD_KEYS.reduce((sum, key) => sum + added[key], 0);
+      if (total === 0) {
+        toast.success('Nothing new to add — all records already exist');
+      } else {
+        toast.success(`Added ${describeAddedCounts(added)}`);
+      }
+      // The queue already reports a generic sync failure; this names the
+      // consequence for the records that were just added locally. It must not
+      // promise an automatic merge: nothing will reach the server on its own.
+      // A definite 400/413 means the server rejected the payload before
+      // writing anything; everything else is an uncertain outcome.
+      synced.catch((error: unknown) => {
+        if (isDefiniteRestoreRejection(error)) {
+          if (error.status === 413) {
+            toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+            return;
+          }
+          toast.error('Records were added on this device only', {
+            description: 'The server rejected the import — nothing was added there.',
+          });
+          return;
+        }
+        toast.error('Records were added on this device only', {
+          description: 'The server copy may not include them; these additions are marked unsynced.',
+        });
+      });
+      setJsonPreview(null);
+    } catch (error) {
+      toast.error('Merge failed — nothing was changed', {
+        description: error instanceof Error ? error.message : 'The backup could not be merged.',
+      });
+    } finally {
+      restoreBusyRef.current = false;
+      setRestoreBusy(false);
+    }
+  }
+
+  async function replaceFromPreview() {
+    const preview = jsonPreview;
+    if (!preview || restoreBusyRef.current) return;
+    restoreBusyRef.current = true;
+    setRestoreBusy(true);
+    try {
+      await store.replaceBackup(preview.backup);
+      setReplaceOpen(false);
+      setJsonPreview(null);
+      if (store.serverMode) {
+        toast.success('Backup restored');
+      } else {
+        // Browser-only restore: nothing reached the server and nothing will
+        // sync on its own — say so instead of implying a future sync.
+        toast.success('Restore applied on this device only', {
+          description: 'The server data was not changed. This device is marked unsynced.',
+        });
+      }
+    } catch (error) {
+      // No optimistic connected replace, so local state is untouched. The
+      // server side is only certainly untouched for a 4xx rejection (the
+      // restore route validates before its transaction); a 5xx/network/timeout
+      // may have committed the replacement, so say the outcome is unknown.
+      setReplaceOpen(false);
+      if (isDefiniteRestoreRejection(error)) {
+        if (error.status === 413) {
+          toast.error('Backup file is too large', { description: TOO_LARGE_DESCRIPTION });
+        } else {
+          toast.error('Restore failed — nothing was changed', {
+            description: error.message,
+          });
+        }
+      } else {
+        toast.error('Restore could not be confirmed', {
+          description: UNCONFIRMED_DESCRIPTION,
+        });
+      }
+    } finally {
+      restoreBusyRef.current = false;
+      setRestoreBusy(false);
+    }
   }
 
   return (
@@ -634,6 +899,45 @@ export default function Settings() {
             <Trash2 className="h-4 w-4" /> Erase everything
           </Button>
         </div>
+
+        <div className="mt-4 border-t border-slate-800 pt-4">
+          <h3 className="text-sm font-semibold">Restore from a JSON backup</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Accepts this app&apos;s <span className="font-semibold text-slate-400">Export backup (JSON)</span>{' '}
+            file and nightly/server backup envelopes (including older schema versions).
+            The preview lets you merge only missing records or replace everything.
+          </p>
+          <input
+            ref={jsonFileRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={handleJsonFile}
+          />
+          <Button
+            variant="outline"
+            className="mt-3 gap-2"
+            onClick={() => jsonFileRef.current?.click()}
+            disabled={restoreBusy}
+          >
+            <FileUp className="h-4 w-4" /> Choose JSON backup…
+          </Button>
+          {jsonError && (
+            <div
+              role="alert"
+              className="mt-3 flex items-start gap-2 rounded-lg bg-rose-950/50 px-3 py-2 text-xs text-rose-200"
+            >
+              <span className="min-w-0 flex-1">{jsonError}</span>
+              <button
+                type="button"
+                className="shrink-0 underline underline-offset-2 hover:text-rose-100"
+                onClick={() => setJsonError(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
       </section>
 
       {/* import preview dialog */}
@@ -673,6 +977,146 @@ export default function Settings() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* JSON restore preview */}
+      <Dialog
+        open={!!jsonPreview}
+        onOpenChange={(open) => {
+          if (!open && !restoreBusy) setJsonPreview(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Restore preview</DialogTitle>
+          </DialogHeader>
+          {jsonPreview && previewBackup && alreadyPresent && (
+            <div className="space-y-3 py-2 text-sm">
+              <div className="min-w-0">
+                <p className="break-all font-semibold text-slate-200">{jsonPreview.filename}</p>
+                <p className="text-xs text-slate-400">
+                  {backupFormatLabel(previewBackup)}
+                  {previewBackup.exportedAt
+                    ? ` · exported ${formatExportedAt(previewBackup.exportedAt)}`
+                    : ''}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {BACKUP_RECORD_KEYS.map((key) => (
+                  <div
+                    key={key}
+                    className="rounded-lg bg-slate-800 p-3 text-center"
+                    aria-label={`${previewBackup[key].length} ${
+                      previewBackup[key].length === 1
+                        ? BACKUP_RECORD_LABELS[key].singular
+                        : BACKUP_RECORD_LABELS[key].plural
+                    }`}
+                  >
+                    <div className="text-xl font-black">{previewBackup[key].length}</div>
+                    <div className="text-xs text-slate-400">
+                      {BACKUP_RECORD_LABELS[key].preview}
+                    </div>
+                    {alreadyPresent[key] > 0 && (
+                      <div className="mt-0.5 text-[10px] text-amber-300">
+                        {alreadyPresent[key]} already present
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-xs text-slate-400">
+                {alreadyPresentTotal > 0
+                  ? `${alreadyPresentTotal} record${alreadyPresentTotal === 1 ? '' : 's'} already on this device (existing records are kept by merge).`
+                  : 'None of these records are on this device yet.'}
+              </p>
+
+              {duplicateTotal > 0 && (
+                <div
+                  role="alert"
+                  className="rounded-lg bg-amber-950/60 px-3 py-2 text-xs text-amber-200"
+                >
+                  This file contains {duplicateTotal} duplicate record
+                  {duplicateTotal === 1 ? '' : 's'}. Merge keeps the first of each;
+                  replacing is unavailable because a replacement must be exact.
+                </div>
+              )}
+
+              {previewBackup.skippedSettingKeys.length > 0 && (
+                <p className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-300">
+                  {previewBackup.skippedSettingKeys.length} unrecognized settings key
+                  {previewBackup.skippedSettingKeys.length === 1 ? '' : 's'} will be skipped.
+                </p>
+              )}
+
+              <p className="text-xs text-slate-500">
+                Merge adds only records that are missing here and never changes settings
+                or existing records. Replace removes ALL current records and restores the
+                backup&apos;s records and non-secret settings.
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setJsonPreview(null)}
+              disabled={restoreBusy}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void mergeFromPreview()}
+              disabled={restoreBusy}
+            >
+              Merge missing records
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => setReplaceOpen(true)}
+              disabled={restoreBusy || duplicateTotal > 0}
+            >
+              Replace everything…
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* JSON replace confirmation */}
+      <AlertDialog
+        open={replaceOpen}
+        onOpenChange={(open) => {
+          if (!restoreBusy) setReplaceOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace all data with this backup?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes every record and setting currently stored
+              {store.serverMode ? ' on the server and in this browser' : ' in this browser'}{' '}
+              and restores this backup&apos;s records and non-secret settings.
+              Download the current state first if you might need it — use{' '}
+              <span className="font-semibold">Export backup (JSON)</span> in the Data
+              section above.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoreBusy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-800 text-rose-50 hover:bg-rose-700"
+              disabled={restoreBusy}
+              onClick={(event) => {
+                // Keep the dialog open while the async restore runs; it is
+                // closed explicitly on success (and on failure, to retry).
+                event.preventDefault();
+                void replaceFromPreview();
+              }}
+            >
+              Replace everything
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* reset confirm */}
       <AlertDialog open={resetOpen} onOpenChange={setResetOpen}>

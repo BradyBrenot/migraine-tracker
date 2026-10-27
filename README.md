@@ -9,13 +9,14 @@ There's no authentication here, you should hide this behind a VPN or something (
 
 The slop bot has written DEPLOY.md. It's awful to read because AI writing is insufferable, but essentially
 
-1. Clone. In this example, hosting on TrueNAS Scale, cloning the repo into /mnt/fast_pool/app_data/migraine-tracker/
+1. No clone or source copy needed: CI publishes a tested image to GitHub Container Registry (`ghcr.io`), so you just run it with Docker Compose.
 2. Docker Compose with contents:
 
-```
+```yaml
 services:
   migraine-tracker:
-    build: /mnt/fast_pool/app_data/migraine-tracker/app
+    image: ghcr.io/bradybrenot/migraine-tracker:latest
+    pull_policy: always
     container_name: migraine-tracker
     restart: unless-stopped
     ports:
@@ -29,6 +30,8 @@ services:
       NTFY_ATTACK_TOKEN: ${NTFY_ATTACK_TOKEN:-}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
 ```
+
+See DEPLOY.md for first-publish setup (including making the GHCR package public), updates, rollback to `sha-<commit>` tags, and building the image locally from source as the alternative.
 
 Environment variables are used for setting up ntfy and nothing else.
 

@@ -1,9 +1,11 @@
 # TrueNAS Custom App (Docker Compose) — migraine-tracker
-# Deploy: place the app source (this directory) on the NAS, then paste this
-# compose into a Custom App with the correct build context path.
+# This pulls the image CI publishes to GHCR; no app source or build context is
+# needed on the NAS. See DEPLOY.md for private-registry authentication, updates,
+# and rollback to an immutable sha-<commit> tag.
 services:
   migraine-tracker:
-    build: .
+    image: ghcr.io/bradybrenot/migraine-tracker:latest
+    pull_policy: always
     container_name: migraine-tracker
     restart: unless-stopped
     ports:

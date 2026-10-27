@@ -1,0 +1,243 @@
+# CI: verify every push/PR to main, then publish a tested linux/amd64 image to GHCR.
+# Actions are pinned to full commit SHAs (with the release tag in a comment) so a
+# moved tag can never silently swap the code that runs here.
+name: CI
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default: no workflow needs write access just to verify.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/server/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install server dependencies
+        run: npm ci --prefix server
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Lint frontend sources
+        run: npm run lint
+
+      - name: Typecheck and build frontend
+        run: npm run build
+
+      - name: Validate PWA shell
+        run: npm run validate:pwa
+
+      - name: Check server syntax
+        run: node --check server/index.js
+
+      - name: Run server tests
+        run: npm test --prefix server
+
+      # Catch Dockerfile/build-context breakage in PRs before merge; publish still
+      # does the full smoke-tested buildx build.
+      - name: Build Docker image (no push)
+        run: docker build --tag migraine-tracker:ci-verify .
+
+      - name: Validate Compose configuration
+        run: docker compose -f compose.yaml config --quiet
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Audit production server dependencies
+        run: npm audit --omit=dev --prefix server
+
+  # Publishing is deliberately gated: it only runs on a push or manual dispatch
+  # whose ref is refs/heads/main in this repository. Pull requests, including
+  # those from forks, can never reach this job, and it additionally requires
+  # `verify` to pass first. Forks of this repository never publish — their
+  # push/dispatch runs skip this job, so they cannot fail trying to push the
+  # upstream GHCR namespace.
+  publish:
+    name: Publish image
+    needs: verify
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && github.repository == 'BradyBrenot/migraine-tracker'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    # Publications are serialized AND queued (queue: max) instead of cancelled: a
+    # started push is always allowed to finish, and a backlog of pending publishes
+    # is never dropped or replaced — each queued run still executes and publishes
+    # its own immutable sha tag.
+    concurrency:
+      group: publish-ghcr
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` follows main for routine updates; `sha-<full commit>` is the
+      # immutable tag used for manual rollback on the NAS.
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/bradybrenot/migraine-tracker
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # Build first and load it locally so the image can be smoke-tested before
+      # anything is pushed to the registry.
+      - name: Build image for smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./app
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Prove the just-built image actually serves traffic before it is published:
+      # /api/health must report ok and both HTML shells (writer `/` and partner
+      # `/view`) must come from the same container. `--pull never` guarantees the
+      # just-loaded local image is what gets tested, never a registry copy. No ntfy
+      # variables are set, so the container disables notifications and can never
+      # send anything. Container and volume are removed even on failure.
+      - name: Smoke test image (health + web shells)
+        env:
+          SMOKE_IMAGE: ghcr.io/bradybrenot/migraine-tracker:sha-${{ github.sha }}
+          SMOKE_CONTAINER: migraine-tracker-smoke-${{ github.run_id }}
+          SMOKE_VOLUME: migraine-tracker-smoke-data-${{ github.run_id }}
+          SMOKE_PORT: "18097"
+        run: |
+          set -euo pipefail
+
+          # Invoked indirectly through the EXIT trap below.
+          # shellcheck disable=SC2329
+          cleanup() {
+            docker rm -f "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
+            docker volume rm "$SMOKE_VOLUME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT INT TERM
+
+          docker run -d --pull never \
+            --name "$SMOKE_CONTAINER" \
+            -p "$SMOKE_PORT:3000" \
+            -v "$SMOKE_VOLUME:/data" \
+            -e DATA_DIR=/data \
+            "$SMOKE_IMAGE"
+
+          passed=0
+          # Assertions use here-strings rather than `printf ... | grep -q ...`:
+          # grep -q exits at the first match, so under `set -o pipefail` the
+          # printf side of the pipe can die with SIGPIPE and spuriously fail the
+          # step; a here-string avoids the pipe entirely.
+          for _ in $(seq 1 30); do
+            if health="$(curl -fsS "http://localhost:${SMOKE_PORT}/api/health" 2>/dev/null)" \
+              && grep -q '"ok":true' <<<"$health" \
+              && shell="$(curl -fsS "http://localhost:${SMOKE_PORT}/" 2>/dev/null)" \
+              && grep -q 'Migraine Tracker' <<<"$shell" \
+              && grep -q 'id="root"' <<<"$shell" \
+              && partner="$(curl -fsS "http://localhost:${SMOKE_PORT}/view" 2>/dev/null)" \
+              && grep -q 'Migraine Partner' <<<"$partner" \
+              && grep -q 'partner.webmanifest' <<<"$partner"; then
+              echo "health: $health"
+              echo "shell (/): $shell"
+              echo "shell (/view): $partner"
+              echo "Smoke test passed: /api/health, /, and /view all responded correctly."
+              passed=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$passed" -ne 1 ]; then
+            docker logs "$SMOKE_CONTAINER" || true
+            echo "::error::Smoke test failed: /api/health, /, or /view did not pass within 60s."
+            exit 1
+          fi
+
+      # Prevent a stale run from moving `latest` backward: verification of an
+      # older commit can finish after a newer merge. Ask GitHub (authenticated
+      # with the job token) what the current tip of main is. Only when this
+      # run's commit IS the tip do we also push `latest`; otherwise (or if the
+      # API call fails — fail closed) push only this run's immutable sha tag.
+      # A merge landing between this check and the push is the one unavoidable
+      # race; the next run's guard fixes `latest` again.
+      - name: Guard latest against superseded commits
+        id: latest-guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          image=ghcr.io/bradybrenot/migraine-tracker
+          run_sha="${GITHUB_SHA}"
+
+          if tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha 2>/dev/null)"; then
+            if [ "$tip" = "$run_sha" ]; then
+              tags="${image}:latest"$'\n'"${image}:sha-${run_sha}"
+              echo "Main tip ${tip} matches this run; publishing latest and the immutable sha tag."
+            else
+              tags="${image}:sha-${run_sha}"
+              echo "::notice::Main tip is ${tip} but this run published ${run_sha}; moving latest only for the tip. Publishing the immutable sha tag only."
+            fi
+          else
+            tags="${image}:sha-${run_sha}"
+            echo "::notice::Could not determine the current main tip (gh api failed); failing closed and publishing the immutable sha tag only."
+          fi
+
+          {
+            echo "tags<<LATEST_GUARD_EOF"
+            printf '%s\n' "$tags"
+            echo "LATEST_GUARD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push image to GHCR
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./app
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.latest-guard.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

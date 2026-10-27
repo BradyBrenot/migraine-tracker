@@ -9,7 +9,7 @@ npm ci
 npm ci --prefix server
 ```
 
-Verification (tests exist and run locally; there is still no CI configured):
+Verification (the commands below run locally and in CI; `.github/workflows/ci.yml` runs this full suite on pushes and pull requests to `main` and publishes the tested GHCR image from `main`):
 
 ```sh
 npm test                     # Vitest: shared/ unit tests and src/ tests
@@ -53,7 +53,7 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 
 - By default, starting the server creates SQLite/WAL files and rotating JSON backups under `app/server/data/`; this path **is gitignored** (as is `app/data/`). Set `DATA_DIR` outside the repository for development/tests and never commit databases, backups, or exported health data.
 - The API has no authentication; the intended deployment boundary is a private Tailscale network. Do not expose it as a public unauthenticated service.
-- `DEPLOY.md` is the deployment runbook. Docker uses Node 24, persists `/data`, and Compose maps host port 8097 to container port 3000; rebuild the local image after updates.
+- `DEPLOY.md` is the deployment runbook. Docker uses Node 24, persists `/data`, and Compose maps host port 8097 to container port 3000. Deployment pulls the CI-published image `ghcr.io/bradybrenot/migraine-tracker:latest` (see `DEPLOY.md`); rebuilding the local image from `app/` remains the alternative.
 
 # Workflow notes
 

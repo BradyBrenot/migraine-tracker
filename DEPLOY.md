@@ -3,7 +3,8 @@
 App conventions per homelab setup: a single Custom App (Docker Compose) on
 SCALE Goldeye, dataset on `fast_pool`, Tailscale-only exposure, and Backrest
 covering the dataset. The server, SQLite database, nightly JSON dumps, and the
-reminder scheduler all run in this one container.
+reminder scheduler all run in this one container. CI publishes the container
+image to GHCR; the NAS pulls it (sections 2 and 5).
 
 ## 1. Create the dataset
 
@@ -11,21 +12,106 @@ Dataset: `/mnt/fast_pool/app_data/migraine-tracker` with a `data/`
 subdirectory. The SQLite database and its WAL files live there, and the server
 writes rotating nightly JSON dumps under `data/backups/`.
 
-## 2. Get the app source onto the NAS
+## 2. Get the app image onto the NAS
 
-Copy the `app/` directory (this project) to:
+The standard deployment copies **no** app source to the NAS. CI builds,
+smoke-tests, and publishes a `linux/amd64` image (the NAS architecture) on every
+push to `main` (and on manual dispatch of `main`) to GitHub Container Registry:
 
 ```
-/mnt/fast_pool/app_data/migraine-tracker/app
+ghcr.io/bradybrenot/migraine-tracker:latest
 ```
 
-Required contents: `Dockerfile`, `compose.yaml`, `.dockerignore`,
-`package.json`, `package-lock.json`, `index.html`, `view.html`,
-`vite.config.ts`, `tsconfig*.json`, `tailwind.config.js`,
-`postcss.config.js`, `public/` (manifests + icons), `shared/`, `src/`, and
-`server/` (without `node_modules` or `server/data`).
+`latest` tracks the tip of `main`, and every completed publish also produces a
+`sha-<full-commit>` tag; section 5 shows the Compose service that pulls it. Make
+the package public after the first publish (next section), so the NAS pulls and
+updates the image anonymously with no stored registry credential.
 
-(e.g. via SMB share, or `scp -r app/ truenas:/mnt/fast_pool/app_data/migraine-tracker/app`)
+### GHCR package visibility and authentication (make it public after first publish)
+
+**Anonymous pulls from a public package are the standard path here.** After the
+first CI publish, make the package public once; the NAS then pulls and updates
+the image with no registry credentials at all. The authenticated setup below is
+only the alternative for keeping the package private.
+
+- **Make the package public after the first successful publish:** open the
+  package page from the owner's **Packages** tab, then
+  **Package settings -> Danger Zone -> Change visibility -> Public**. This
+  exposes nothing new. The repository that publishes the image is already
+  public, the image contains **no health data** (every record lives in the
+  mounted `/data` dataset, never in the image), and it contains **no secrets**
+  (the ntfy URL/token variables are environment-only at runtime and are never
+  baked into the image). It is also the dependable path on this NAS:
+  private-registry support in the TrueNAS SCALE **Goldeye / 25.10** Apps
+  frontend is unreliable for pulls and updates, because Apps registry
+  credentials are only fully honored in fixed newer releases, while anonymous
+  public pulls behave the same on every version.
+- **Visibility is a one-way change.** GitHub's own **Change visibility** dialog
+  warns: *"Once you make a package public, you cannot make it private again."*
+  Confirm you are changing the intended package before you flip it; the change
+  cannot be undone.
+- **One-time publish setup:** the first CI publish creates the package under the
+  repository owner, and a new package is **private** by default — even when the
+  repository is public; visibility is **not** inherited from the repository. The
+  workflow attaches the repository as the package source through the OCI
+  `org.opencontainers.image.source` label. If a later publish fails with an
+  authorization/permission error, open the package page from the owner's
+  **Packages** tab, go to **Package settings -> Manage Actions access**, and
+  grant this repository write access.
+- **Alternative: keep the package private.** Pulls then require authentication,
+  which needs a GitHub **classic** Personal Access Token with the
+  `read:packages` scope. Fine-grained PATs do not support package scopes, so
+  they cannot be used for GHCR pulls here.
+
+  The reliable fallback is a shell-managed Compose deployment with a shell
+  `docker login`. From a NAS shell, with the token exported in `GHCR_PAT` (do
+  not paste it into files or logs):
+
+  ```bash
+  echo "$GHCR_PAT" | docker login ghcr.io -u <github-username> --password-stdin
+  ```
+
+  Docker stores the credential in that user's `~/.docker/config.json` (or the
+  configured credential helper), so no secret goes into `compose.yaml`; re-run
+  the login if that file does not survive a TrueNAS upgrade.
+
+  Version caveat: the TrueNAS Apps UI sign-in — **Apps -> Configuration ->
+  Sign-in to a Docker registry**, then **Add Registry** and **Other Registry**,
+  with registry URI `ghcr.io`, a display name, your GitHub username, and the PAT
+  as the password (see
+  https://apps.truenas.com/getting-started/initial-setup/) — is only dependable
+  on the fixed newer releases where Apps fully honors those credentials. Do
+  **not** promise or assume it works on 25.10/Goldeye; on this NAS, keeping the
+  package private means managing that deployment with shell Compose and the
+  login above.
+
+  Do not assume one credential store covers both: a shell login does **not**
+  necessarily apply to pulls performed through the TrueNAS Apps UI, and an Apps
+  UI credential does not cover a shell `docker compose pull`.
+- **Official docs:**
+  https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+
+### Alternative: build the image locally from source
+
+Pulling from GHCR is the standard path, but building on the NAS still works.
+The build needs the full `app/` source: `Dockerfile`, `.dockerignore`, package
+files, `index.html`, `view.html`, the Vite/TS/Tailwind/PostCSS configs,
+`components.json`, `src/`, `shared/`, `public/`, and `server/` (without
+`node_modules` or `server/data`). Copy or clone the repository onto the NAS,
+then from the repository root:
+
+```bash
+docker build -t migraine-tracker:local ./app
+```
+
+(equivalently, from `app/`: `docker build -t migraine-tracker:local .`). The
+Dockerfile is Node 24 based and produces the same runtime layout. Then use
+`image: migraine-tracker:local` in the Compose service instead of the GHCR
+reference and remove `pull_policy: always`, because a local-only tag is not in
+any registry and cannot be pulled.
+
+Such an image exists only on that host: it is not published, scanned, or
+tracked by CI/GHCR, and has no `latest`/`sha-` tags and no smoke test.
 
 ## 3. Configure reminder delivery and attack alerts (optional)
 
@@ -171,8 +257,8 @@ ntfy app, DND/battery settings). Do not repeat the test automatically.
 
 Schema upgrades are additive (the current build migrates older databases to
 schema version 4 without deleting or rewriting user rows), but take a real
-backup anyway before replacing the image or starting a new build for the first
-time.
+backup anyway before replacing the image (a GHCR update, a locally built image,
+or a rollback), especially the first time.
 
 ```bash
 set -eu
@@ -236,13 +322,14 @@ SQLite files.
 
 ## 5. Create/update the Custom App
 
-In the TrueNAS UI -> Apps -> Custom App, use `compose.yaml` with the correct
-build context path:
+In the TrueNAS UI -> Apps -> Custom App, paste the Compose service from
+`app/compose.yaml` (reproduced here; no build context is needed):
 
 ```yaml
 services:
   migraine-tracker:
-    build: /mnt/fast_pool/app_data/migraine-tracker/app
+    image: ghcr.io/bradybrenot/migraine-tracker:latest
+    pull_policy: always
     container_name: migraine-tracker
     restart: unless-stopped
     ports:
@@ -250,22 +337,75 @@ services:
     volumes:
       - /mnt/fast_pool/app_data/migraine-tracker/data:/data
     environment:
+      # Server-only ntfy delivery configuration. Leave any value empty/unset to
+      # disable reminders; never put real credentials in this file or git.
+      # NTFY_URL is the FULL topic publish URL (e.g. https://ntfy.example/topic).
       NTFY_URL: ${NTFY_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # Separate attack start/end alert topic (independent of reminders).
       NTFY_ATTACK_URL: ${NTFY_ATTACK_URL:-}
       NTFY_ATTACK_TOKEN: ${NTFY_ATTACK_TOKEN:-}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
 ```
 
-If the UI's compose editor doesn't accept `build:` with a path, build once from
-the NAS shell instead and reference the image:
+`pull_policy: always` makes a container recreate re-check the `latest` tag, so
+an update is "pull and recreate", not "rebuild".
 
-```bash
-cd /mnt/fast_pool/app_data/migraine-tracker/app
-docker build -t migraine-tracker:latest .
-```
+### Updating on the NAS
 
-then use `image: migraine-tracker:latest` in place of `build:`.
+**CI never deploys to the NAS.** Every update is a manual pull-and-recreate:
+
+- **TrueNAS Apps UI:** use the app's update/recreate action (the exact label
+  varies by TrueNAS version) to pull the new `latest` image and recreate the
+  container with the same YAML and dataset.
+- **Shell-managed Compose:** from the directory holding the Compose file:
+
+  ```bash
+  docker compose pull
+  docker compose up -d
+  ```
+
+Either way the container restarts against the same `/data` dataset and runs the
+additive schema migrations at startup. Take the section-4 database backup before
+any update that may change the schema.
+
+### Rollback to a pinned image
+
+Every completed CI publication — queued or not — pushes a
+`sha-<full-40-character-commit>` tag for its own commit; the moving `latest` tag
+is updated in addition only when that commit is the tip of `main` at publish
+time. A rollback target therefore always exists for any run whose Publish job
+completed.
+
+The `sha-` tags are immutable in normal operation, but re-running the same
+commit's publish job (for example a manual re-run of the workflow) rebuilds the
+image from a floating Node base tag and can overwrite that tag's contents;
+base-image digests are deliberately not pinned here.
+
+1. Find the commit of a known-good run: `gh run list` and
+   `gh run view <run-id>` show the run's commit SHA (also visible in the GitHub
+   Actions web UI), and the same SHA is listed on the GHCR package's
+   **Versions** page.
+2. Pin the service to that tag — replace the image line, and optionally drop
+   `pull_policy: always` while pinned, since later publishes never move a
+   `sha-` tag:
+
+   ```yaml
+   services:
+     migraine-tracker:
+       image: ghcr.io/bradybrenot/migraine-tracker:sha-<commit>
+       # pull_policy: always removed while pinned
+   ```
+
+3. Recreate the container (same update/recreate steps as above). Take the
+   section-4 database backup before this image swap too.
+4. Switch back to `:latest` (and restore `pull_policy: always`) and recreate
+   once `main` is fixed.
+
+Schema caveat: an image built **before** a migration refuses to start against a
+database that a newer image already migrated (older builds reject a newer
+schema). If the rollback crosses a migration, restore the section-4 backup taken
+before that upgrade instead of just repointing the tag.
 
 ## 6. Access and security boundary
 
@@ -399,10 +539,63 @@ The app is **online-only**: no service worker, no offline cache, no Web Push,
 and no background sync. Installing does not change that - loading, refreshing,
 and sync all need connectivity to the Tailscale host.
 
+## 10. Inspect CI runs and publications
+
+CI is `.github/workflows/ci.yml` and runs on every push and pull request to
+`main`, plus manual dispatch. With an authenticated `gh` CLI, a human or an
+agent can inspect runs from any machine:
+
+```bash
+gh run list --workflow=ci.yml --limit 10
+gh run view <run-id>
+gh run view <run-id> --log
+gh run watch
+```
+
+The same runs are in the repository's **Actions** tab on GitHub; the run's
+commit SHA (shown by `gh run view` and in the UI) is the value used for the
+`sha-` tag.
+
+What the workflow does:
+
+- **Verify** (all pushes and PRs; 30-minute timeout): Node 24, `npm ci` for the
+  frontend and for `server/`, then `npm test`, `npm run lint`, `npm run build`,
+  `npm run validate:pwa`, a no-push `docker build` of `app/`,
+  `docker compose -f compose.yaml config --quiet`,
+  `node --check server/index.js`, `npm test --prefix server`, and
+  `npm audit --omit=dev` for both dependency trees.
+- **Publish image** (`main` pushes and manual dispatches of `main` only, after
+  Verify; 30-minute timeout): builds `app/` for `linux/amd64` and loads it
+  locally, then smoke-tests that loaded image (`--pull never`) in a disposable
+  container with a throwaway volume and no ntfy configuration: `/api/health`
+  must report `"ok":true`, `/` must serve the writer shell, and `/view` must
+  serve the partner shell. Only then does it push to GHCR. Publications are
+  serialized **and queued** (`concurrency: publish-ghcr`,
+  `cancel-in-progress: false`, `queue: max`: up to 100 pending, and runs beyond
+  that overflow are canceled), so a backlog is never dropped or replaced and
+  every queued publication runs and pushes its own `sha-<full-commit>` tag
+  (see section 5 for the one re-run caveat). `latest` is pushed **only** when
+  this run's commit is still the tip of `main` at publish time, checked with an
+  authenticated `gh api repos/.../commits/main` that fails closed: a superseded
+  run (or a failed check) publishes only its `sha-` tag and emits a notice, so
+  an older run can never move `latest` backward. The one remaining race is a
+  merge landing between the guard and the push; the next run's guard corrects
+  `latest`.
+
+A green Publish run only means the image exists in GHCR; it does not mean the
+NAS has it. Deployment stays manual (section 5).
+
 ## Notes
 
-- Image tags: this is our own image; rebuild with `docker build` on updates
-  (WUD will not track it, which is correct - it is not a registry image).
+- Image tags: `ghcr.io/bradybrenot/migraine-tracker:latest` tracks the tip of
+  `main` — it moves only while the publishing run's commit is still the tip at
+  publish time — so an image-update watcher such as WUD can track it if desired.
+  Every publish also creates a `sha-<full-commit>` tag regardless, and those
+  exist for pinning and rollback; they are immutable in normal operation, though
+  re-running the same commit's publish job rebuilds from the floating Node base
+  tag and can overwrite the tag's contents (base-image digests are not pinned).
+  CI never touches the NAS: pulling and recreating the container is always a
+  manual step.
 - Nurtec inventory (schema v3): tablet quantities on meds/refills and dated
   stock-baseline corrections are regular records - they flow through
   `/api/export`, the nightly backup, and the additive `/api/import` like the

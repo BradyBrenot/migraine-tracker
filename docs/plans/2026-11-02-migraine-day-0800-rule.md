@@ -50,6 +50,27 @@ predicate. `attackDayKeys` returns the attributed days:
 
 `attackDayKeysInMonth` remains a pass-through filter over those keys.
 
+### Performance fast path
+
+`attackCountsAsAttackDay` is called by Home/PartnerHome for every attack on
+every 15s clock tick. Resolving two 08:00 boundaries with `zonedDateTimeToMs`
+for attacks years away was expensive on clear days (no matching attack, so
+`some()` scans all history): measured on Node 24 desktop for 500/2,000/5,000/
+10,000 attacks, **24.5 / 96 / 243 / 474 ms per tick** before the fix
+(`parseAttackTimes` itself is only 0.25 / 0.94 / 2.34 / 4.61 ms).
+
+The predicate now first checks an Intl-free conservative UTC window
+`[UTC midnight - 24h, UTC midnight + 72h]`. Real IANA offsets are within
+-12h..+14h (historical LMT within ±16h), so the true local 08:00-to-08:00
+window is contained; a miss cannot be a false negative, and every coarse hit
+still runs the exact `zonedDateTimeToMs` check. The year-9999 fail-open is
+checked before the fast path, so that documented behavior is unchanged.
+Measured after: **0.2 / 0.6 / 1.4 / 2.9 ms per tick** (plus parsing).
+
+A deterministic unit test spies on `Intl.DateTimeFormat.prototype.formatToParts`
+and asserts zero calls for a far-away attack, so the fast path is pinned without
+a timing-sensitive CI assertion.
+
 ## Consumers
 
 - `app/src/lib/report.ts`: month day counts and the Markdown "attack days" use

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   attackCountsAsAttackDay,
   attackDayKeys,
@@ -239,6 +239,64 @@ describe('attackDayKeys', () => {
 });
 
 describe('attackCountsAsAttackDay', () => {
+  it('rejects far-away attacks without resolving Intl windows', () => {
+    const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'formatToParts');
+    try {
+      expect(attackCountsAsAttackDay(
+        Date.UTC(2020, 0, 1, 12), Date.UTC(2020, 0, 1, 13), '2026-06-01', UTC,
+      )).toBe(false);
+      // Degenerate/negative far-away attacks follow the same early exit.
+      expect(attackCountsAsAttackDay(
+        Date.UTC(2020, 0, 1, 12), Date.UTC(2020, 0, 1, 11), '2026-06-01', UTC,
+      )).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the year-9999 fail-open even for a far-away attack', () => {
+    expect(attackCountsAsAttackDay(
+      Date.UTC(2026, 5, 1, 1), Date.UTC(2026, 5, 1, 2), '9999-12-31', UTC,
+    )).toBe(true);
+  });
+
+  it('counts an attack in tomorrow 00:00-08:00 for today', () => {
+    // Today's window ends at 08:00 tomorrow, so tomorrow's early morning is
+    // today's migraine day. This is why a midnight-to-midnight prefilter is
+    // wrong.
+    expect(attackCountsAsAttackDay(
+      Date.UTC(2026, 5, 2, 1), Date.UTC(2026, 5, 2, 2), '2026-06-01', UTC,
+    )).toBe(true);
+  });
+
+  it('counts an ongoing attack with an ancient start today', () => {
+    expect(attackCountsAsAttackDay(
+      Date.UTC(2020, 0, 1, 1), Date.UTC(2026, 5, 1, 12), '2026-06-01', UTC,
+    )).toBe(true);
+  });
+
+  it('handles extreme real-world offsets on both sides of UTC', () => {
+    const east = 'Pacific/Kiritimati'; // UTC+14
+    expect(attackCountsAsAttackDay(
+      at('2026-06-02', '09:00', east), at('2026-06-02', '10:00', east), '2026-06-02', east,
+    )).toBe(true);
+    expect(attackCountsAsAttackDay(
+      at('2026-06-02', '07:00', east), at('2026-06-02', '07:59', east), '2026-06-02', east,
+    )).toBe(false);
+    expect(attackCountsAsAttackDay(
+      at('2026-06-02', '07:00', east), at('2026-06-02', '07:59', east), '2026-06-01', east,
+    )).toBe(true);
+
+    const west = 'Pacific/Pago_Pago'; // UTC-11
+    expect(attackCountsAsAttackDay(
+      at('2026-06-02', '09:00', west), at('2026-06-02', '10:00', west), '2026-06-02', west,
+    )).toBe(true);
+    expect(attackCountsAsAttackDay(
+      at('2026-06-02', '07:00', west), at('2026-06-02', '07:59', west), '2026-06-01', west,
+    )).toBe(true);
+  });
+
   it('is false for null/NaN starts and never throws on garbage day keys', () => {
     expect(attackCountsAsAttackDay(null, null, '2026-06-01', NY)).toBe(false);
     expect(attackCountsAsAttackDay(Number.NaN, Number.NaN, '2026-06-01', NY)).toBe(false);

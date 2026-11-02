@@ -81,6 +81,39 @@ function isFormattableInstant(ms: number): boolean {
 }
 
 /**
+ * The only valid 4-digit day key whose next day leaves the day-key domain.
+ * Keeping this as an explicit constant lets the hot predicate preserve the
+ * documented fail-open without paying `addDays` on every far-away attack.
+ * If the day-key domain ever widens, this must be revisited together with
+ * `attackCountsAsAttackDay`'s `nextKey` guard.
+ */
+const LAST_REPRESENTABLE_DAY_KEY: DayKey = '9999-12-31';
+
+/**
+ * Cheap, Intl-free UTC bounds that contain a local day's 08:00-to-08:00
+ * window for any real IANA offset.
+ *
+ * The true window is within ±16h of UTC midnight historically (modern offsets
+ * are -12h..+14h, historical LMT within ±16h). `[utcStart - 24h,
+ * utcStart + 72h]` therefore contains it with ample margin, and an attack
+ * outside these bounds cannot overlap the exact window. The exact
+ * `zonedDateTimeToMs` bounds still decide every coarse hit.
+ */
+function coarseDayWindowMs(dayKey: DayKey): { startMs: number; endMs: number } {
+  // `dayKey` is ISO-shaped here; Date.UTC arithmetic is deliberately used
+  // instead of dayKeyStartMs (which would resolve the zone via Intl).
+  const utcStart = Date.UTC(
+    Number(dayKey.slice(0, 4)),
+    Number(dayKey.slice(5, 7)) - 1,
+    Number(dayKey.slice(8, 10)),
+  );
+  return {
+    startMs: utcStart - 24 * 3600000,
+    endMs: utcStart + 72 * 3600000,
+  };
+}
+
+/**
  * Parse an attack's `start`/`end` strings into epoch ms.
  *
  * - `end === null` means ongoing: `endMs` becomes `nowMs`, `ongoing` is true,
@@ -119,6 +152,11 @@ export function parseAttackTimes(
  *   there, and degenerate/negative/unparseable-end attacks are reduced to their
  *   start instant. An ongoing attack uses the caller's `endMs` (which
  *   `parseAttackTimes` sets to `nowMs`).
+ * - PERFORMANCE: an Intl-free coarse window rejects attacks far from `dayKey`
+ *   before resolving the two 08:00 boundaries. This matters for callers that
+ *   scan all history on a timer (Home/PartnerHome); it only skips work, never
+ *   changes a hit. `timeZone` is therefore only resolved/validated when the
+ *   attack falls inside the coarse bounds.
  */
 export function attackCountsAsAttackDay(
   startMs: number | null,
@@ -127,12 +165,19 @@ export function attackCountsAsAttackDay(
   timeZone: string,
 ): boolean {
   if (startMs === null || !isFormattableInstant(startMs)) return false;
-  // Guard BEFORE the day-key helpers, which throw on malformed keys. A key can
-  // match the ISO shape yet be an impossible date (e.g. '2026-02-30'), so the
-  // real-date check keeps this predicate total.
-  if (!ISO_DAY_KEY.test(dayKey) || !isValidDayKey(dayKey)) return false;
+  if (!ISO_DAY_KEY.test(dayKey)) return false;
+  // Preserve the documented fail-open at the edge of the key domain BEFORE the
+  // coarse filter, so a far-away attack on that day still returns true.
+  if (dayKey === LAST_REPRESENTABLE_DAY_KEY) return true;
+  // Cheap early exit before isValidDayKey/addDays/Intl. An ISO-shaped but
+  // impossible date (e.g. '2026-02-30') may pass or fail this coarse test, but
+  // is rejected by isValidDayKey immediately afterwards.
+  const coarse = coarseDayWindowMs(dayKey);
+  if (!attackOverlapsRange(startMs, endMs, coarse.startMs, coarse.endMs)) return false;
+  // Guard before the day-key helpers, which throw on malformed keys.
+  if (!isValidDayKey(dayKey)) return false;
   const nextKey = addDays(dayKey, 1);
-  // No representable next window end at the edge of the key domain: keep the day.
+  // Defensive: a future key-domain change could add another edge day.
   if (!ISO_DAY_KEY.test(nextKey)) return true;
   const windowStartMs = zonedDateTimeToMs(dayKey, ATTACK_DAY_START_TIME, timeZone);
   const windowEndMs = zonedDateTimeToMs(nextKey, ATTACK_DAY_START_TIME, timeZone);

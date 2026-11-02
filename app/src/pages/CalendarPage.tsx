@@ -18,7 +18,7 @@ import {
   addDays, addMonths, dayKeyStartMs, localDayKey, monthStartKey, weekdayOf, type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackOverlapsRange, parseAttackTimes, validDurationMs,
+  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
 } from '../../shared/attackstats.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
 import { PREVENTIVE_DUE_TIME, preventiveDue } from '../../shared/reminders.ts';
@@ -77,9 +77,17 @@ const DAY_STATE_CLASS = {
 
 interface DayData {
   key: DayKey;            // configured-zone local calendar day
-  attacks: Attack[];      // attacks overlapping this day
+  attacks: Attack[];      // ALL attacks overlapping this day (raw)
   meds: MedEvent[];       // meds taken this day
-  maxPain: number;        // peak pain of attacks overlapping this day
+  /** Raw worst peak of overlapping attacks, for the accessible label. */
+  maxPain: number;
+  /** Worst peak among attacks that reach 08:00 local; drives the day tint. */
+  countedMaxPain: number;
+  /**
+   * True when this day counts as an attack/migraine day (08:00-to-08:00
+   * window), including a pre-08:00 attack from the next calendar day.
+   */
+  countsAsAttackDay: boolean;
   isToday: boolean;
   inMonth: boolean;
 }
@@ -106,8 +114,20 @@ function dayCellLabel(day: DayData, timeZone: string): string {
   const label = formatDayLabel(day.key, timeZone, true);
   const details: string[] = [];
   if (day.attacks.length > 0) {
-    const peak = day.maxPain >= 0 ? `, peak ${day.maxPain} of 10` : '';
+    // The tint uses countedMaxPain; announce the same peak so the accessible
+    // name cannot contradict the visible colour when the worst attack belongs
+    // to an attributed next-day early-morning attack.
+    const peakValue = day.countsAsAttackDay && day.countedMaxPain >= 0
+      ? day.countedMaxPain
+      : day.maxPain;
+    const peak = peakValue >= 0 ? `, peak ${peakValue} of 10` : '';
     details.push(`${day.attacks.length} attack${day.attacks.length === 1 ? '' : 's'}${peak}`);
+  } else if (day.countsAsAttackDay) {
+    // Early-morning attack attributed from the next calendar day: the cell is
+    // tinted and the sheet explains it, so the accessible name must not claim
+    // "no attacks".
+    const peak = day.countedMaxPain >= 0 ? `, peak ${day.countedMaxPain} of 10` : '';
+    details.push(`attack day${peak}`);
   }
   if (day.attacks.some((a) => a.end === null)) {
     // Ongoing has no motion cue, so the accessible name must say it.
@@ -375,6 +395,22 @@ export default function CalendarPage() {
     [state.attacks, gridNowMs],
   );
 
+  // Counted attack/migraine days (08:00 rule) and their worst pain, built in
+  // ONE pass over attacks instead of checking every day against every attack.
+  // `countedPain` starts at -1 per day so an unreported (-1) peak is preserved.
+  const { countedDays, countedPain } = useMemo(() => {
+    const days = new Set<DayKey>();
+    const pain = new Map<DayKey, number>();
+    for (const { attack, times } of parsedAttacks) {
+      for (const key of attackDayKeys(times.startMs, times.endMs, state.timezone)) {
+        days.add(key);
+        const current = pain.get(key) ?? -1;
+        if (attack.peakPain > current) pain.set(key, attack.peakPain);
+      }
+    }
+    return { countedDays: days, countedPain: pain };
+  }, [parsedAttacks, state.timezone]);
+
   const weeks = useMemo(() => {
     const startOffset = (weekdayOf(cursor) + 6) % 7; // Monday-first
     const gridStartKey = addDays(cursor, -startOffset);
@@ -407,9 +443,14 @@ export default function CalendarPage() {
           key,
           inMonth: key.slice(0, 7) === monthKey,
           isToday: key === todayKey,
+          // Raw overlap feeds the sheet list, bars, and accessible name. Only a
+          // day whose attacks reach 08:00 is tinted/counted, so a tail-only day
+          // intentionally shows an attack bar/list with no tint.
           attacks,
           meds: medsByDay.get(key) ?? [],
           maxPain: attacks.length ? Math.max(...attacks.map((a) => a.peakPain)) : -1,
+          countedMaxPain: countedPain.get(key) ?? -1,
+          countsAsAttackDay: countedDays.has(key),
         });
       }
 
@@ -443,7 +484,10 @@ export default function CalendarPage() {
       out.push({ days, bars: assignLanes(raw), weekStartMs, weekEndMs });
     }
     return out;
-  }, [cursor, monthKey, parsedAttacks, medsByDay, state.timezone, todayKey]);
+  }, [
+    cursor, monthKey, parsedAttacks, countedDays, countedPain,
+    medsByDay, state.timezone, todayKey,
+  ]);
 
   const selData = useMemo(() => {
     if (!selected) return null;
@@ -451,15 +495,12 @@ export default function CalendarPage() {
     return null;
   }, [selected, weeks]);
 
-  // Day state + workouts for the open sheet, bucketed in state.timezone.
+  // Day state + workouts for the open sheet, bucketed in state.timezone. The
+  // sheet still lists every raw attack, but inference uses only days that
+  // count as attack days (an attack reaching 08:00 local).
   const selectedWellness = useMemo(() => {
     if (!selected) return null;
     const record = state.dayStates.find((d) => d.day === selected) ?? null;
-    const dayStart = dayKeyStartMs(selected, state.timezone);
-    const dayEnd = dayKeyStartMs(addDays(selected, 1), state.timezone);
-    const hasAttack = parsedAttacks.some(({ times }) => (
-      attackOverlapsRange(times.startMs, times.endMs, dayStart, dayEnd)
-    ));
     const workouts = state.workouts
       .filter((w) => {
         const ms = Date.parse(w.performedAt);
@@ -468,16 +509,16 @@ export default function CalendarPage() {
       .sort((a, b) => b.performedAt.localeCompare(a.performedAt));
     // Today while an attack is active reads Attack, even over an earlier
     // explicit Well/Off record (same display override as Home/partner view).
-    // Every other day follows the shared helper, where a record-less attack day
-    // infers Off.
+    // Every other day follows the shared helper, where a record-less counted
+    // attack day infers Off.
     const status: DayStateStatus | null =
       selected === todayKey && store.activeAttack
         ? 'attack'
-        : effectiveDayState(record, hasAttack);
+        : effectiveDayState(record, countedDays.has(selected));
     return { record, status, workouts };
   }, [
-    selected, state.dayStates, state.timezone, parsedAttacks, state.workouts,
-    todayKey, store.activeAttack,
+    selected, state.dayStates, state.timezone, state.workouts,
+    countedDays, todayKey, store.activeAttack,
   ]);
 
   const monthNameFormatter = useMemo(
@@ -521,8 +562,10 @@ export default function CalendarPage() {
   }), [cursor, state.timezone]);
 
   // "X attack days out of Y" for the visible configured-zone month — the
-  // metric most migraine questionnaires (MIDAS, diaries) ask about. Days are
-  // bucketed with the same local-midnight bounds as the grid cells.
+  // metric most migraine questionnaires (MIDAS, diaries) ask about. Days use
+  // the counted 08:00-to-08:00 set (a pre-08:00 start can add the previous
+  // month's last day); attacks use raw month overlap (so a tail-only attack
+  // still counts once as an attack but adds no attack day).
   const monthStats = useMemo(() => {
     const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const attackCount = parsedAttacks
@@ -531,16 +574,11 @@ export default function CalendarPage() {
       ))
       .length;
     let attackDays = 0;
-    for (let d = 0; d < daysInMonth; d++) {
-      const key = addDays(cursor, d);
-      const dayStart = dayKeyStartMs(key, state.timezone);
-      const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
-      if (parsedAttacks.some(({ times }) => attackOverlapsRange(
-        times.startMs, times.endMs, dayStart, dayEnd,
-      ))) attackDays++;
+    for (const key of countedDays) {
+      if (key.slice(0, 7) === monthKey) attackDays++;
     }
     return { attackDays, daysInMonth, attackCount };
-  }, [parsedAttacks, cursor, year, month, monthBounds, state.timezone]);
+  }, [parsedAttacks, countedDays, monthKey, year, month, monthBounds]);
 
   return (
     <div className="space-y-4">
@@ -597,8 +635,8 @@ export default function CalendarPage() {
                         d.isToday ? 'z-10 ring-2 ring-inset ring-sky-400' : ''
                       }`}
                       style={
-                        d.inMonth && d.maxPain >= 0
-                          ? { background: painTint(d.maxPain) }
+                        d.inMonth && d.countedMaxPain >= 0
+                          ? { background: painTint(d.countedMaxPain) }
                           : undefined
                       }
                     >
@@ -719,7 +757,7 @@ export default function CalendarPage() {
               />
               <span className="text-slate-400">mild → severe</span>
             </span>
-            <span className="text-slate-400">day tint = worst attack</span>
+            <span className="text-slate-400">day tint = worst attack (08:00–08:00)</span>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
             {allMedIds(state.meds)
@@ -857,8 +895,14 @@ export default function CalendarPage() {
                     )}
                   </div>
                 )}
+                {selData.countsAsAttackDay && selData.attacks.length === 0 && (
+                  <p className="py-2 text-center text-sm text-slate-400">
+                    Attack day: an early-morning attack from the next day counts for this day.
+                  </p>
+                )}
                 {selData.attacks.length === 0 && selData.meds.length === 0
-                  && (selectedWellness?.workouts.length ?? 0) === 0 && (
+                  && (selectedWellness?.workouts.length ?? 0) === 0
+                  && !selData.countsAsAttackDay && (
                   <p className="py-6 text-center text-sm text-slate-400">
                     Nothing logged this day.
                   </p>

@@ -6,7 +6,7 @@ import {
   addMonths, dayKeyStartMs, diffDayKeys, localDayKey, monthStartKey, type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackDayKeysInMonth, attackOverlapsRange, parseAttackTimes, validDurationMs,
+  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
 } from '../../shared/attackstats.ts';
 
 /**
@@ -16,7 +16,10 @@ import {
  *
  * All month windows, day buckets, and labels use the configured IANA
  * `timeZone` and the shared half-open attack helpers — never browser-local
- * Dates, fixed 24h steps, or UTC `slice(0, 10)` day keys.
+ * Dates, fixed 24h steps, or UTC `slice(0, 10)` day keys. Day counts are
+ * attack/migraine days: a local day is the 08:00-to-08:00 window defined by the
+ * shared `attackCountsAsAttackDay` rule, so an early-morning attack counts the
+ * previous day.
  */
 export interface ReportInput {
   attacks: Attack[];
@@ -107,7 +110,9 @@ function monthsBetween(firstKey: DayKey, lastKey: DayKey): DayKey[] {
  * `attackDays` is `null` for a month with no records at all: a blank chart gap,
  * never a confirmed zero. A month with any medication is known data, so its
  * zero attack days is a real zero. Attack counts match the Calendar month
- * header: every attack overlapping the month counts in it.
+ * header: every attack overlapping the month counts in it, even when it
+ * contributes no attack day under the 08:00 rule (e.g. an attack that only
+ * tails in before 08:00).
  */
 export interface MonthlyTrendRow {
   month: string;
@@ -130,10 +135,16 @@ export function buildMonthlyTrend(input: {
     attacks, meds, timeZone, nowMs, months = 12,
   } = input;
   const currentMonth = monthStartKey(localDayKey(nowMs, timeZone));
-  const parsed = attacks.map((attack) => ({
-    attack,
-    times: parseAttackTimes(attack, nowMs),
-  }));
+  const parsed = attacks.map((attack) => {
+    const times = parseAttackTimes(attack, nowMs);
+    return {
+      attack,
+      times,
+      // Enumerate the 08:00-to-08:00 attributed days ONCE per attack. A
+      // pre-08:00 start can contribute the previous month's last day.
+      dayKeys: attackDayKeys(times.startMs, times.endMs, timeZone),
+    };
+  });
   const parsedMeds = meds
     .map((med) => ({ med, ts: Date.parse(med.ts) }))
     .filter(({ ts }) => Number.isFinite(ts));
@@ -146,17 +157,21 @@ export function buildMonthlyTrend(input: {
     const mStart = dayKeyStartMs(monthKey, timeZone);
     const mEnd = dayKeyStartMs(addMonths(monthKey, 1), timeZone);
 
+    // `days` holds counted attack/migraine days (the 08:00-to-08:00 window),
+    // while `attackCount` counts every attack overlapping the month by raw
+    // half-open range. A pre-08:00 attack can contribute the previous month's
+    // last day, so day keys are collected independently of raw overlap.
     const days = new Set<DayKey>();
     let attackCount = 0;
     let painSum = 0;
     let painN = 0;
-    for (const { attack, times } of parsed) {
+    for (const { attack, times, dayKeys } of parsed) {
+      for (const key of dayKeys) {
+        if (key.slice(0, 7) === monthPrefix) days.add(key);
+      }
       if (!attackOverlapsRange(times.startMs, times.endMs, mStart, mEnd)) continue;
       attackCount++;
       if (attack.peakPain >= 0) { painSum += attack.peakPain; painN++; }
-      for (const key of attackDayKeysInMonth(times.startMs, times.endMs, monthPrefix, timeZone)) {
-        days.add(key);
-      }
     }
 
     const monthMeds = parsedMeds.filter(({ ts }) => ts >= mStart && ts < mEnd);
@@ -173,8 +188,9 @@ export function buildMonthlyTrend(input: {
       medDays[id] = daySets.get(id)?.size ?? 0;
     }
 
-    // No attack overlap and no medication = unknown month, not a clear one.
-    const hasData = attackCount > 0 || monthMeds.length > 0;
+    // A counted day, a raw attack overlap (even a 0-day tail), or any
+    // medication makes the month known; otherwise it is unknown, not clear.
+    const hasData = days.size > 0 || attackCount > 0 || monthMeds.length > 0;
     rows.push({
       month: reportFormatter('monthShort', timeZone, { month: 'short', timeZone })
         .format(new Date(mStart)),
@@ -195,10 +211,16 @@ export function buildReportLines(input: ReportInput): string[] {
   const { attacks, meds, timeZone, span, nowMs } = input;
   const nowMonth = monthStartKey(localDayKey(nowMs, timeZone));
 
-  const parsedAttacks = attacks.map((attack) => ({
-    attack,
-    times: parseAttackTimes(attack, nowMs),
-  }));
+  const parsedAttacks = attacks.map((attack) => {
+    const times = parseAttackTimes(attack, nowMs);
+    return {
+      attack,
+      times,
+      // Enumerate the 08:00-to-08:00 attributed days ONCE per attack. A
+      // pre-08:00 start can contribute the previous month's last day.
+      dayKeys: attackDayKeys(times.startMs, times.endMs, timeZone),
+    };
+  });
 
   // Linked medications indexed by attack id ONCE (the per-attack list below
   // would otherwise rescan every medication for every attack). Each bucket
@@ -223,10 +245,14 @@ export function buildReportLines(input: ReportInput): string[] {
   // and instants outside the day-key domain are ignored (Math.min over NaN
   // would poison the whole list, as would a year-275760 timestamp).
   let firstMonthKey = nowMonth;
-  for (const { times } of parsedAttacks) {
+  for (const { times, dayKeys } of parsedAttacks) {
     if (times.startMs === null) continue;
-    const key = monthKeyOf(times.startMs, timeZone);
-    if (key !== null && key < firstMonthKey) firstMonthKey = key;
+    // Anchor to the FIRST attributed day, not the start instant: a pre-08:00
+    // start belongs to the previous day (and possibly the previous month).
+    const anchorKey = dayKeys[0];
+    if (anchorKey === undefined || !ISO_DAY_KEY.test(anchorKey)) continue;
+    const key = monthStartKey(anchorKey);
+    if (key < firstMonthKey) firstMonthKey = key;
   }
   for (const { ts } of parsedMeds) {
     const key = monthKeyOf(ts, timeZone);
@@ -256,19 +282,24 @@ export function buildReportLines(input: ReportInput): string[] {
     const monthLabel = formatMonth(monthKey, timeZone);
 
     // Attacks are listed/counted once, by START month (one row per attack).
-    // Days are attributed by overlap instead, so a multi-day attack still
-    // contributes its days to every month it touches without being listed
-    // twice.
+    // Days are attributed by the 08:00-to-08:00 window instead, so an attack
+    // starting before 08:00 can contribute the previous month's last day even
+    // though the attack itself is listed in the start month. `anyOverlap`
+    // records a month touched only by a pre-08:00 tail that yields no counted
+    // day: the month is still known.
     const monthEntries = parsedAttacks.filter(({ times }) => times.startMs !== null
       && times.startMs >= monthStartMs
       && times.startMs < monthEndMs);
     const monthAttacks = monthEntries.map(({ attack }) => attack);
 
     const days = new Set<DayKey>();
-    for (const { times } of parsedAttacks) {
-      if (!attackOverlapsRange(times.startMs, times.endMs, monthStartMs, monthEndMs)) continue;
-      for (const key of attackDayKeysInMonth(times.startMs, times.endMs, monthPrefix, timeZone)) {
-        days.add(key);
+    let anyOverlap = false;
+    for (const { times, dayKeys } of parsedAttacks) {
+      for (const key of dayKeys) {
+        if (key.slice(0, 7) === monthPrefix) days.add(key);
+      }
+      if (attackOverlapsRange(times.startMs, times.endMs, monthStartMs, monthEndMs)) {
+        anyOverlap = true;
       }
     }
 
@@ -276,10 +307,12 @@ export function buildReportLines(input: ReportInput): string[] {
       .filter(({ ts }) => ts >= monthStartMs && ts < monthEndMs)
       .map(({ med }) => med);
 
-    // A month is "known" when anything was recorded in it: an attack that
-    // starts or spans into it, or any medication. Only then is 0 attack days
-    // a real zero; otherwise the month is unknown, not clear.
-    const hasData = days.size > 0 || monthAttacks.length > 0 || monthMeds.length > 0;
+    // A month is "known" when anything was recorded in it: a counted day
+    // (including the previous month's last day from a pre-08:00 start), an
+    // attack that starts or spans into it (even a 0-counted-day tail), or any
+    // medication. Only then is 0 attack days a real zero; otherwise the month
+    // is unknown, not clear.
+    const hasData = days.size > 0 || anyOverlap || monthMeds.length > 0;
 
     lines.push(`## ${monthLabel}`);
     if (!hasData) {

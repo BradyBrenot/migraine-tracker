@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, Refill, StockBaseline, TrackerState, Workout } from '@/types';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
@@ -558,5 +558,85 @@ describe('Reports near-limit semantics', () => {
 
     const summary = await screen.findByText('3 / 2 days in the last 30 days');
     expect(summary.className).toContain('text-red-400');
+  });
+});
+
+describe('Reports 08:00 attack-day rule', () => {
+  it('counts the October start day and keeps the pre-08:00 November tail as a known zero', async () => {
+    seedState({
+      attacks: [makeAttack({
+        id: 'cross-month-tail',
+        start: '2026-10-31T22:00:00.000Z',
+        end: '2026-11-01T06:00:00.000Z',
+      })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    // October: the attack runs 22:00-midnight on Oct 31, so that day reaches
+    // 08:00 and counts (Days affected 1, not 0).
+    await waitFor(() => expect(screen.queryAllByText('no data this month')).toHaveLength(0));
+    expect(statCard('Attacks').textContent).toContain('Attacks1');
+    expect(statCard('Days affected').textContent).toContain('Days affected1');
+    expect(statCard('Days affected').textContent).toContain('08:00–08:00');
+
+    // November: the 06:00 tail overlaps the month, so it is still known data
+    // with one attack, but it contributes zero attack days.
+    fireEvent.click(screen.getByRole('button', { name: 'Next month' }));
+    await waitFor(() => expect(statCard('Attacks').textContent).toContain('Attacks1'));
+    expect(statCard('Days affected').textContent).toContain('Days affected0');
+    expect(screen.queryAllByText('no data this month')).toHaveLength(0);
+  });
+
+  it('attributes a Nov 1 early-morning attack to Oct 31 instead of losing it', async () => {
+    seedState({
+      attacks: [makeAttack({
+        id: 'early-cross-month',
+        start: '2026-11-01T01:00:00.000Z',
+        end: '2026-11-01T02:00:00.000Z',
+      })],
+    });
+
+    mountReports();
+    await waitForSync();
+
+    // October view: no raw attack starts in October, but Oct 31 is the
+    // attributed migraine day. It must not read as "no data".
+    expect(screen.queryAllByText('no data this month')).toHaveLength(0);
+    expect(statCard('Attacks').textContent).toContain('Attacks0');
+    expect(statCard('Days affected').textContent).toContain('Days affected1');
+
+    // November view: the attack starts there, so it is known with 0 days.
+    fireEvent.click(screen.getByRole('button', { name: 'Next month' }));
+    await waitFor(() => expect(statCard('Attacks').textContent).toContain('Attacks1'));
+    expect(statCard('Days affected').textContent).toContain('Days affected0');
+    expect(screen.queryAllByText('no data this month')).toHaveLength(0);
+  });
+
+  it('agrees with the Calendar month header through the shared 08:00 rule', async () => {
+    seedState({
+      attacks: [makeAttack({
+        id: 'agree',
+        start: '2026-10-31T22:00:00.000Z',
+        end: '2026-11-01T06:00:00.000Z',
+      })],
+    });
+    const Reports = reportsModule.default;
+    const CalendarPage = (await import('@/pages/CalendarPage')).default;
+    render(
+      <storeModule.StoreProvider>
+        <Reports />
+        <CalendarPage />
+        <Probe />
+      </storeModule.StoreProvider>,
+    );
+    await waitForSync();
+
+    const header = screen.getByText((_, element) => element?.tagName === 'P'
+      && (element.textContent ?? '').includes('attack day'));
+    expect((header.textContent ?? '').replace(/\s+/g, ' ').trim())
+      .toBe('1 attack day of 31 · 1 attack');
+    expect(statCard('Days affected').textContent).toContain('Days affected1');
   });
 });

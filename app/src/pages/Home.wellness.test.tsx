@@ -151,10 +151,10 @@ function makeAttack(now: number): Attack {
 }
 
 /**
- * An attack that ended a second ago. It still overlaps today (so it implies an
- * Attack day) but is not active, so the banner and its rest guidance stay off.
- * Ending "now minus one second" rather than an hour ago keeps the overlap true
- * even when the suite happens to run just after local midnight.
+ * An attack that ended a second ago. It only implies an attack day because the
+ * frozen fixture clock (noon) puts it after 08:00 — it is not a general "any
+ * overlap counts" claim. Tests that need Off freeze the clock first; a
+ * wall-clock morning run would otherwise end it before 08:00.
  */
 function makeEndedAttack(now: number): Attack {
   return {
@@ -229,6 +229,24 @@ function applyApiDefaults(backend: MockedBackend): void {
   backend.listDayStates.mockResolvedValue([]);
   backend.putDayState.mockResolvedValue(undefined);
   backend.putSetting.mockResolvedValue(undefined);
+}
+
+/**
+ * Freeze `Date` and re-import the clock/store/Home modules: the clock module
+ * captures `Date.now()` at import time, so tests must fake the Date first and
+ * then reset the module registry (same pattern as the timezone tests below).
+ * Call `vi.useRealTimers()` in a `finally`.
+ */
+async function frozenClockModules(instantIso: string): Promise<void> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(instantIso).getTime());
+  vi.resetModules();
+  captured = null;
+  localStorage.clear();
+  api = (await import('@/lib/api')).api as unknown as MockedBackend;
+  applyApiDefaults(api);
+  homeModule = await import('@/pages/Home');
+  storeModule = await import('@/lib/store');
 }
 
 beforeEach(async () => {
@@ -493,32 +511,64 @@ describe('Home wellness logging', () => {
     expect(screen.getByRole('button', { name: 'Strength' })).toBeTruthy();
   });
 
-  it('infers an Off day from an ended attack overlapping today when no record exists', async () => {
-    const now = Date.now();
-    seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
+  it('infers an Off day from an ended attack reaching 08:00 when no record exists', async () => {
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      seedState({ timezone: 'UTC', attacks: [makeEndedAttack(Date.now())] });
 
-    mountHome();
-    await waitForSync();
+      mountHome();
+      await waitForSync();
 
-    // Attack days are Off days. The record-less day shows Off with no choices,
-    // and movement stays available because it is never inferred as impossible.
-    expect(screen.getByText('Off')).toBeTruthy();
-    expect(screen.queryByText('Attack')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-    expect(screen.getByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
+      // Attack days are Off days (this fixture spans 10:00-12:00 local). The
+      // record-less day shows Off with no choices, and movement stays available
+      // because it is never inferred as impossible.
+      expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.queryByText('Attack')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+      expect(screen.getByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
 
-    // Change still offers Well/Off, and an explicit recovery choice wins.
-    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-    expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
+      // Change still offers Well/Off, and an explicit recovery choice wins.
+      fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+      expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Well' }));
-    await waitFor(() => expect(screen.getByText('Normal routine today.')).toBeTruthy());
+      fireEvent.click(screen.getByRole('button', { name: 'Well' }));
+      await waitFor(() => expect(screen.getByText('Normal routine today.')).toBeTruthy());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts an attack in tomorrow 00:00-08:00 for today (the 08:00-to-08:00 window)', async () => {
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      seedState({
+        timezone: 'UTC',
+        attacks: [{
+          ...makeAttack(Date.now()),
+          id: 'tomorrow-early',
+          start: '2026-06-16T01:00:00.000Z',
+          end: '2026-06-16T02:00:00.000Z',
+        }],
+      });
+
+      mountHome();
+      await waitForSync();
+
+      // Today's window ends at 08:00 tomorrow, so tomorrow's early morning
+      // belongs to today. This must not depend on a midnight-to-midnight
+      // prefilter.
+      expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps an active attack over an earlier Well record and retains wellness + movement', async () => {
@@ -578,107 +628,137 @@ describe('Home wellness logging', () => {
   });
 
   it('latches an Off day state when a note is saved on an inferred attack day', async () => {
-    const now = Date.now();
-    const todayKey = localDayKey(now, 'UTC');
-    seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      const todayKey = localDayKey(Date.now(), 'UTC');
+      seedState({ timezone: 'UTC', attacks: [makeEndedAttack(Date.now())] });
 
-    mountHome();
-    await waitForSync();
+      mountHome();
+      await waitForSync();
 
-    expect(screen.getByText('Off')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+      expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Note' }));
-    fireEvent.change(screen.getByLabelText('Day note'), {
-      target: { value: '  postdrome, low energy  ' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Note' }));
+      fireEvent.change(screen.getByLabelText('Day note'), {
+        target: { value: '  postdrome, low energy  ' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(readPersisted().dayStates).toHaveLength(1));
-    const persisted = readPersisted();
-    expect(persisted.dayStates[0]).toMatchObject({
-      day: todayKey,
-      status: 'off',
-      notes: 'postdrome, low energy',
-    });
-    expect(api.putDayState).toHaveBeenCalledWith(
-      todayKey,
-      { status: 'off', notes: 'postdrome, low energy' },
-    );
-
-    // Change to Well keeps the latched note (store notes-preservation path).
-    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Well' }));
-    await waitFor(() => {
-      expect(readPersisted().dayStates[0]).toMatchObject({
-        status: 'well',
+      await waitFor(() => expect(readPersisted().dayStates).toHaveLength(1));
+      const persisted = readPersisted();
+      expect(persisted.dayStates[0]).toMatchObject({
+        day: todayKey,
+        status: 'off',
         notes: 'postdrome, low energy',
       });
-    });
-    expect(screen.getByText('Normal routine today.')).toBeTruthy();
+      expect(api.putDayState).toHaveBeenCalledWith(
+        todayKey,
+        { status: 'off', notes: 'postdrome, low energy' },
+      );
+
+      // Change to Well keeps the latched note (store notes-preservation path).
+      fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Well' }));
+      await waitFor(() => {
+        expect(readPersisted().dayStates[0]).toMatchObject({
+          status: 'well',
+          notes: 'postdrome, low energy',
+        });
+      });
+      expect(screen.getByText('Normal routine today.')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('closes the note editor without latching a record when an inferred attack day note is blank', async () => {
-    const now = Date.now();
-    seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      seedState({ timezone: 'UTC', attacks: [makeEndedAttack(Date.now())] });
 
-    mountHome();
-    await waitForSync();
+      mountHome();
+      await waitForSync();
 
-    expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.getByText('Off')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Note' }));
-    fireEvent.change(screen.getByLabelText('Day note'), { target: { value: '   ' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Note' }));
+      fireEvent.change(screen.getByLabelText('Day note'), { target: { value: '   ' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    // A blank draft has nothing to persist: the editor closes and no
-    // valueless record is latched.
-    expect(screen.queryByLabelText('Day note')).toBeNull();
-    expect(screen.getByText('Off')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
-    expect(readPersisted().dayStates).toHaveLength(0);
-    expect(api.putDayState).not.toHaveBeenCalled();
+      // A blank draft has nothing to persist: the editor closes and no
+      // valueless record is latched.
+      expect(screen.queryByLabelText('Day note')).toBeNull();
+      expect(screen.getByText('Off')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
+      expect(readPersisted().dayStates).toHaveLength(0);
+      expect(api.putDayState).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('infers an attack day when an ended attack crossed midnight into today', async () => {
+  it('does not infer an attack day when the attack ended before 08:00 today', async () => {
     // Same fake-Date + re-import pattern as the timezone test above: the clock
     // module captures Date.now() at import time.
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
-      vi.setSystemTime(new Date('2026-06-15T12:00:00.000Z').getTime());
-      vi.resetModules();
-      captured = null;
-      localStorage.clear();
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
       seedState({
-        timezone: 'UTC', // today = 2026-06-15, day start 2026-06-15T00:00:00Z
+        timezone: 'UTC', // today = 2026-06-15, 08:00 window starts 08:00Z
         attacks: [
           {
             ...makeAttack(Date.now()),
-            id: 'crossed-midnight',
+            id: 'crossed-midnight-early',
             start: '2026-06-14T22:00:00.000Z',
             end: '2026-06-15T06:00:00.000Z',
           },
         ],
       });
-      api = (await import('@/lib/api')).api as unknown as MockedBackend;
-      applyApiDefaults(api);
-      homeModule = await import('@/pages/Home');
-      storeModule = await import('@/lib/store');
 
       mountHome();
       await waitForSync();
 
-      // Started yesterday but ended today: record-less attack day infers Off.
+      // Started yesterday but ended at 06:00 while the user slept: today never
+      // reaches 08:00, so it must NOT infer Off. Fresh choices remain.
+      expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
+      expect(screen.getByText('How was today?')).toBeTruthy();
+      expect(screen.queryByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeNull();
+      expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('infers Off when a cross-midnight attack reaches 08:00 today', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      seedState({
+        timezone: 'UTC',
+        attacks: [
+          {
+            ...makeAttack(Date.now()),
+            id: 'crossed-midnight-late',
+            start: '2026-06-14T22:00:00.000Z',
+            end: '2026-06-15T09:00:00.000Z',
+          },
+        ],
+      });
+
+      mountHome();
+      await waitForSync();
+
+      // Today's window starts at 08:00 and the attack is still going then.
       expect(screen.getByText('Off')).toBeTruthy();
-      expect(screen.queryByText('Attack')).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Attack' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Well' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Off' })).toBeNull();
       expect(screen.getByText('Easy day — a 10-min walk counts (Cardio · Low).')).toBeTruthy();
-      expect(screen.getByRole('button', { name: /^Strength/ })).toBeTruthy();
-      expect(screen.getByRole('button', { name: /^Cardio/ })).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
@@ -720,18 +800,34 @@ describe('Home wellness logging', () => {
     }
   });
 
-  it('labels the primary CTA "Log another attack" and starts a second real attack', async () => {
-    const now = Date.now();
-    seedState({ timezone: 'UTC', attacks: [makeEndedAttack(now)] });
+  it('labels the primary CTA "Log another attack" from a raw overlap even before 08:00', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await frozenClockModules('2026-06-15T06:00:00.000Z');
+      seedState({
+        timezone: 'UTC',
+        attacks: [{
+          ...makeAttack(Date.now()),
+          id: 'early-tail',
+          start: '2026-06-15T02:00:00.000Z',
+          end: '2026-06-15T05:00:00.000Z',
+        }],
+      });
 
-    mountHome();
-    await waitForSync();
+      mountHome();
+      await waitForSync();
 
-    expect(screen.queryByRole('button', { name: 'Start attack now' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Log another attack' }));
+      // Not an attack day (ended before 08:00), but it still overlapped today,
+      // so the CTA offers logging another attack.
+      expect(screen.getByRole('button', { name: 'Well' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Start attack now' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Log another attack' }));
 
-    await waitFor(() => expect(captured!.state.attacks).toHaveLength(2));
-    expect(screen.getByText('How bad is the pain right now?')).toBeTruthy();
+      await waitFor(() => expect(captured!.state.attacks).toHaveLength(2));
+      expect(screen.getByText('How bad is the pain right now?')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the "Start attack now" CTA on a day with no attacks', async () => {

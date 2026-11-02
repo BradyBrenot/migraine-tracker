@@ -204,9 +204,30 @@ describe('PartnerHome (read-only Now)', () => {
     expect(screen.getByText('No active attack')).toBeTruthy();
     expect(screen.queryByText('Attack in progress')).toBeNull();
     expect(screen.getByText(/Last attack ended/)).toBeTruthy();
-    // The ended attack still makes today an Off day (inferred, no record).
+    // The ended attack still makes today an Off day (inferred, no record): it
+    // ran 09:00-11:00 UTC, past the 08:00 attack-day window.
     expect(screen.getByText('Off')).toBeTruthy();
     expect(screen.queryByText('Well')).toBeNull();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('does not infer Off for an ended attack that ended before 08:00 today', async () => {
+    api.exportAll.mockResolvedValue({
+      ...emptyExport(),
+      attacks: [makeAttack({
+        start: '2026-10-26T02:00:00.000Z',
+        end: '2026-10-26T06:00:00.000Z',
+      })],
+    });
+
+    mountHome();
+    await waitForSync();
+
+    expect(screen.getByText('No active attack')).toBeTruthy();
+    // 06:00 is before the 08:00 window, so today is not an attack day: no Off.
+    expect(screen.queryByText('Off')).toBeNull();
+    expect(screen.getByText('Not logged')).toBeTruthy();
+    expect(screen.getByText('No check-in yet today.')).toBeTruthy();
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 

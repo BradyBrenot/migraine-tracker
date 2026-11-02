@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  attackCountsAsAttackDay,
   attackDayKeys,
   attackDayKeysInMonth,
   attackOverlapsRange,
@@ -50,19 +51,22 @@ describe('parseAttackTimes', () => {
 });
 
 describe('attackDayKeys', () => {
-  it('enumerates every calendar day of a multi-day attack across DST fall-back', () => {
+  it('drops a final tail day that ended before 08:00 across DST fall-back', () => {
     // America/New_York falls back on 2026-11-01: the middle day is 25 hours.
+    // The attack ends 03:00 on 11-03, before that day's 08:00 window.
     const start = at('2026-10-31', '22:00', NY);
     const end = at('2026-11-03', '03:00', NY);
     expect(attackDayKeys(start, end, NY)).toEqual([
-      '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03',
+      '2026-10-31', '2026-11-01', '2026-11-02',
     ]);
   });
 
-  it('counts both days for a short attack crossing local midnight', () => {
+  it('counts only the start day for a short attack crossing local midnight', () => {
+    // 23:30 -> 00:30 is inside 06-01's 08:00-to-08:00 window; 06-02's window
+    // starts at 08:00, after the attack ended.
     const start = at('2026-06-01', '23:30', NY);
     const end = at('2026-06-02', '00:30', NY);
-    expect(attackDayKeys(start, end, NY)).toEqual(['2026-06-01', '2026-06-02']);
+    expect(attackDayKeys(start, end, NY)).toEqual(['2026-06-01']);
   });
 
   it('does not count the new day when the attack ends exactly at local midnight', () => {
@@ -76,15 +80,20 @@ describe('attackDayKeys', () => {
     expect(attackDayKeys(t, t, NY)).toEqual(['2026-06-01']);
   });
 
-  it('counts exactly the start day for a zero-duration attack at local midnight', () => {
+  it('attributes a zero-duration attack at local midnight to the previous day', () => {
     const t = dayKeyStartMs('2026-06-01', NY);
-    expect(attackDayKeys(t, t, NY)).toEqual(['2026-06-01']);
+    expect(attackDayKeys(t, t, NY)).toEqual(['2026-05-31']);
   });
 
-  it('counts exactly the start day for a negative-duration attack', () => {
+  it('counts exactly the start day for a negative-duration attack at/after 08:00', () => {
     const start = at('2026-06-03', '09:00', NY);
     const end = at('2026-06-01', '09:00', NY);
     expect(attackDayKeys(start, end, NY)).toEqual(['2026-06-03']);
+  });
+
+  it('attributes a degenerate attack before 08:00 to the previous day', () => {
+    const start = at('2026-06-03', '07:59', NY);
+    expect(attackDayKeys(start, start, NY)).toEqual(['2026-06-02']);
   });
 
   it('returns [] for an unparseable start and never throws', () => {
@@ -93,19 +102,26 @@ describe('attackDayKeys', () => {
     expect(attackDayKeys(null, 1234567890, NY)).toEqual([]);
   });
 
-  it('counts exactly the start day when the end is unparseable', () => {
+  it('counts exactly the start day when the end is unparseable and at/after 08:00', () => {
     const start = at('2026-06-05', '08:00', NY);
     expect(attackDayKeys(start, null, NY)).toEqual(['2026-06-05']);
   });
 
+  it('attributes an unparseable-end attack whose start is before 08:00 to the previous day', () => {
+    const start = at('2026-06-05', '06:00', NY);
+    expect(attackDayKeys(start, null, NY)).toEqual(['2026-06-04']);
+  });
+
   it('clips a cross-month attack to each month without double-counting', () => {
     const start = at('2026-01-30', '22:00', UTC);
+    // 02-02 03:00 UTC never reaches 02-02's 08:00 window, so that tail day is
+    // not counted.
     const end = at('2026-02-02', '03:00', UTC);
     expect(attackDayKeys(start, end, UTC)).toEqual([
-      '2026-01-30', '2026-01-31', '2026-02-01', '2026-02-02',
+      '2026-01-30', '2026-01-31', '2026-02-01',
     ]);
     expect(attackDayKeysInMonth(start, end, '2026-01', UTC)).toEqual(['2026-01-30', '2026-01-31']);
-    expect(attackDayKeysInMonth(start, end, '2026-02', UTC)).toEqual(['2026-02-01', '2026-02-02']);
+    expect(attackDayKeysInMonth(start, end, '2026-02', UTC)).toEqual(['2026-02-01']);
     // The union of the clipped months equals the full enumeration.
     const clipped = [
       ...attackDayKeysInMonth(start, end, '2026-01', UTC),
@@ -126,11 +142,75 @@ describe('attackDayKeys', () => {
     expect(days.size).toBe(1);
   });
 
-  it('maps the same instant to different days in different zones', () => {
-    // 2026-06-02 02:00Z is Jun 1 22:00 in New York and Jun 2 02:00 in UTC.
-    const t = Date.UTC(2026, 5, 2, 2);
-    expect(attackDayKeys(t, t + 60 * 60 * 1000, NY)).toEqual(['2026-06-01']);
-    expect(attackDayKeys(t, t + 60 * 60 * 1000, UTC)).toEqual(['2026-06-02']);
+  it('applies the 08:00 window in the configured zone, not UTC', () => {
+    // 2026-06-02 10:00Z -> 11:00Z is 06:00-07:00 in New York (before 08:00,
+    // so it belongs to 06-01) but 10:00-11:00 in UTC (06-02).
+    const start = Date.UTC(2026, 5, 2, 10);
+    const end = Date.UTC(2026, 5, 2, 11);
+    expect(attackDayKeys(start, end, NY)).toEqual(['2026-06-01']);
+    expect(attackDayKeys(start, end, UTC)).toEqual(['2026-06-02']);
+  });
+
+  it('counts both days when a morning attack crosses 08:00', () => {
+    expect(attackDayKeys(
+      at('2026-06-01', '07:59', NY), at('2026-06-01', '08:01', NY), NY,
+    )).toEqual(['2026-05-31', '2026-06-01']);
+    expect(attackDayKeys(
+      at('2026-06-01', '07:00', NY), at('2026-06-01', '09:00', NY), NY,
+    )).toEqual(['2026-05-31', '2026-06-01']);
+  });
+
+  it('attributes same-day early-morning attacks to the previous day', () => {
+    expect(attackDayKeys(
+      at('2026-06-01', '01:00', NY), at('2026-06-01', '02:00', NY), NY,
+    )).toEqual(['2026-05-31']);
+    expect(attackDayKeys(
+      at('2026-06-01', '01:00', NY), at('2026-06-01', '06:00', NY), NY,
+    )).toEqual(['2026-05-31']);
+    expect(attackDayKeys(
+      at('2026-06-01', '06:00', NY), at('2026-06-01', '07:59', NY), NY,
+    )).toEqual(['2026-05-31']);
+  });
+
+  it('counts only the start day for a 22:00 -> next-day 06:00 attack', () => {
+    const start = at('2026-06-01', '22:00', NY);
+    const end = at('2026-06-02', '06:00', NY);
+    expect(attackDayKeys(start, end, NY)).toEqual(['2026-06-01']);
+  });
+
+  it('is half-open at 08:00: an exact 08:00 end counts the previous day, an exact 08:00 instant starts the new day', () => {
+    expect(attackDayKeys(
+      at('2026-06-01', '06:00', NY), at('2026-06-01', '08:00', NY), NY,
+    )).toEqual(['2026-05-31']);
+    const eight = at('2026-06-01', '08:00', NY);
+    expect(attackDayKeys(eight, eight, NY)).toEqual(['2026-06-01']);
+  });
+
+  it('uses the caller endMs for an ongoing-style attack (end = now)', () => {
+    const start = at('2026-06-01', '07:00', NY);
+    expect(attackDayKeys(start, at('2026-06-01', '07:59', NY), NY)).toEqual(['2026-05-31']);
+    // Once the ongoing attack crosses 08:00 it contributes BOTH days; the
+    // previous day never loses its attribution.
+    expect(attackDayKeys(start, at('2026-06-01', '08:01', NY), NY))
+      .toEqual(['2026-05-31', '2026-06-01']);
+  });
+
+  it('resolves the next 08:00 window end safely when DST starts at 00:00', () => {
+    // America/Santiago springs forward at 00:00 on 2026-09-06 (00:00 -> 01:00).
+    // The 08:00-to-08:00 window still contains a late 2026-09-05 attack.
+    const TZ = 'America/Santiago';
+    expect(attackDayKeys(
+      at('2026-09-05', '23:10', TZ), at('2026-09-05', '23:50', TZ), TZ,
+    )).toEqual(['2026-09-05']);
+  });
+
+  it('attributes an early-morning attack across a month boundary to the previous month', () => {
+    // Feb 1 01:00-02:00 counts Jan 31.
+    const start = at('2026-02-01', '01:00', UTC);
+    const end = at('2026-02-01', '02:00', UTC);
+    expect(attackDayKeys(start, end, UTC)).toEqual(['2026-01-31']);
+    expect(attackDayKeysInMonth(start, end, '2026-01', UTC)).toEqual(['2026-01-31']);
+    expect(attackDayKeysInMonth(start, end, '2026-02', UTC)).toEqual([]);
   });
 
   it('degrades to the start day for parseable instants outside the 4-digit-year domain', () => {
@@ -139,6 +219,45 @@ describe('attackDayKeys', () => {
     const start = Date.parse('+275760-09-13T00:00:00.000Z');
     expect(() => attackDayKeys(start, start + 6 * 86400000, UTC)).not.toThrow();
     expect(attackDayKeys(start, start + 6 * 86400000, UTC)).toEqual(['275760-09-13']);
+    // A degenerate pathological instant keeps the same start-day fallback.
+    expect(attackDayKeys(start, start, UTC)).toEqual(['275760-09-13']);
+  });
+
+  it('handles the last representable day key without throwing', () => {
+    // '9999-12-31' + 1 day is '10000-01-01', outside the key domain: the day is
+    // kept rather than throwing inside zonedDateTimeToMs.
+    const start = Date.UTC(9999, 11, 31, 10);
+    const end = Date.UTC(9999, 11, 31, 11);
+    expect(() => attackDayKeys(start, end, UTC)).not.toThrow();
+    expect(attackDayKeys(start, end, UTC)).toEqual(['9999-12-31']);
+    // Accepted fail-open at the very edge of the key domain: there is no
+    // representable next window end, so the day is kept without interval checks.
+    expect(attackCountsAsAttackDay(
+      Date.UTC(9999, 11, 31, 1), Date.UTC(9999, 11, 31, 6), '9999-12-31', UTC,
+    )).toBe(true);
+  });
+});
+
+describe('attackCountsAsAttackDay', () => {
+  it('is false for null/NaN starts and never throws on garbage day keys', () => {
+    expect(attackCountsAsAttackDay(null, null, '2026-06-01', NY)).toBe(false);
+    expect(attackCountsAsAttackDay(Number.NaN, Number.NaN, '2026-06-01', NY)).toBe(false);
+    expect(() => attackCountsAsAttackDay(
+      at('2026-06-01', '09:00', NY), null, 'not-a-day', NY,
+    )).not.toThrow();
+    expect(attackCountsAsAttackDay(
+      at('2026-06-01', '09:00', NY), null, 'not-a-day', NY,
+    )).toBe(false);
+    expect(attackCountsAsAttackDay(
+      at('2026-06-01', '09:00', NY), null, '275760-09-13', NY,
+    )).toBe(false);
+    // ISO-shaped but impossible dates must not reach the throwing helpers.
+    expect(() => attackCountsAsAttackDay(
+      at('2026-06-01', '09:00', NY), null, '2026-02-30', NY,
+    )).not.toThrow();
+    expect(attackCountsAsAttackDay(
+      at('2026-06-01', '09:00', NY), null, '2026-02-30', NY,
+    )).toBe(false);
   });
 });
 

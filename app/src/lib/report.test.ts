@@ -154,25 +154,107 @@ describe('buildReportLines: month day bucketing', () => {
 
     expect(section(lines, 'January 2026')[0]).toContain('**2 attack days of 31** · 1 attacks');
     const february = section(lines, 'February 2026');
-    expect(february[0]).toBe('**2 attack days of 28** · 0 attacks');
+    // Feb 2's 03:00 tail never reaches 08:00, so only Feb 1 counts.
+    expect(february[0]).toBe('**1 attack days of 28** · 0 attacks');
     expect(february.join('\n')).not.toContain('No data recorded this month.');
 
-    expect(lines).toContain('- 1 attacks across 4 attack days');
+    expect(lines).toContain('- 1 attacks across 3 attack days');
   });
 
   it('buckets days in the configured zone, not UTC', () => {
-    // 2026-06-01 23:30Z -> 2026-06-02 00:30Z is two UTC days but one New York
-    // evening (Jun 1 19:30 -> 20:30).
+    // 2026-06-01 08:30Z -> 09:30Z is 08:30-09:30 UTC (June 1) but 04:30-05:30
+    // in New York, i.e. the previous day (May 31).
     const attack = makeAttack({
-      start: iso('2026-06-01', '23:30:00.000'),
-      end: iso('2026-06-02', '00:30:00.000'),
+      start: iso('2026-06-01', '08:30:00.000'),
+      end: iso('2026-06-01', '09:30:00.000'),
     });
-    const nowMs = Date.UTC(2026, 5, 15);
+    const nowMs = Date.UTC(2026, 6, 15);
 
-    expect(section(build({ attacks: [attack], nowMs, timeZone: UTC }), 'June 2026')[0])
-      .toContain('**2 attack days of 30** · 1 attacks');
-    expect(section(build({ attacks: [attack], nowMs, timeZone: NY }), 'June 2026')[0])
-      .toContain('**1 attack days of 30** · 1 attacks');
+    expect(section(
+      build({ attacks: [attack], nowMs, timeZone: UTC, span: 'all' }),
+      'June 2026',
+    )[0]).toContain('**1 attack days of 30** · 1 attacks');
+
+    const ny = build({ attacks: [attack], nowMs, timeZone: NY, span: 'all' });
+    expect(section(ny, 'May 2026')[0]).toContain('**1 attack days of 31** · 0 attacks');
+    expect(section(ny, 'June 2026')[0]).toContain('**0 attack days of 30** · 1 attacks');
+  });
+
+  it('attributes a pre-08:00 same-day attack to the previous day and keeps the month known', () => {
+    // May 10 01:00-06:00 counts May 9, still inside May.
+    const lines = build({
+      attacks: [makeAttack({
+        start: iso('2026-05-10', '01:00:00.000'),
+        end: iso('2026-05-10', '06:00:00.000'),
+      })],
+      nowMs: Date.UTC(2026, 5, 15),
+    });
+
+    const may = section(lines, 'May 2026');
+    expect(may[0]).toContain('**1 attack days of 31** · 1 attacks');
+    expect(may.join('\n')).not.toContain('No data recorded this month.');
+  });
+
+  it('counts an early-morning attack in the previous month and keeps both months known', () => {
+    // Feb 1 01:00-02:00 counts Jan 31. The attack is listed in February (its
+    // start month) but its day belongs to January, so neither month is lost.
+    const lines = build({
+      attacks: [makeAttack({
+        start: iso('2026-02-01', '01:00:00.000'),
+        end: iso('2026-02-01', '02:00:00.000'),
+      })],
+      nowMs: Date.UTC(2026, 2, 15),
+      span: 'all',
+    });
+
+    expect(section(lines, 'January 2026')[0]).toContain('**1 attack days of 31** · 0 attacks');
+    const february = section(lines, 'February 2026');
+    expect(february[0]).toContain('**0 attack days of 28** · 1 attacks');
+    expect(february.join('\n')).not.toContain('No data recorded this month.');
+    expect(lines).toContain('- 1 attacks across 1 attack days');
+
+    const rows = buildMonthlyTrend({
+      attacks: [makeAttack({
+        start: iso('2026-02-01', '01:00:00.000'),
+        end: iso('2026-02-01', '02:00:00.000'),
+      })],
+      meds: [],
+      timeZone: UTC,
+      nowMs: Date.UTC(2026, 2, 15),
+    });
+    const january = rows[rows.length - 3];
+    const februaryRow = rows[rows.length - 2];
+    expect(january).toMatchObject({ attackDays: 1, attacks: 0 });
+    expect(februaryRow).toMatchObject({ attackDays: 0, attacks: 1 });
+  });
+
+  it('keeps a month known when an attack only tails in before 08:00', () => {
+    // Jan 31 22:00 -> Feb 1 06:00: February is overlapped but contributes no
+    // attack day, so it is a known zero, never "No data recorded this month".
+    // January owns Jan 31 and is also known.
+    const lines = build({
+      attacks: [makeAttack({
+        start: iso('2026-01-31', '22:00:00.000'),
+        end: iso('2026-02-01', '06:00:00.000'),
+      })],
+      nowMs: Date.UTC(2026, 1, 10),
+    });
+
+    expect(section(lines, 'January 2026')[0]).toContain('**1 attack days of 31** · 1 attacks');
+    const february = section(lines, 'February 2026');
+    expect(february[0]).toBe('**0 attack days of 28** · 0 attacks');
+    expect(february.join('\n')).not.toContain('No data recorded this month.');
+
+    const rows = buildMonthlyTrend({
+      attacks: [makeAttack({
+        start: iso('2026-01-31', '22:00:00.000'),
+        end: iso('2026-02-01', '06:00:00.000'),
+      })],
+      meds: [],
+      timeZone: UTC,
+      nowMs: Date.UTC(2026, 1, 10),
+    });
+    expect(rows[rows.length - 1]).toMatchObject({ attackDays: 0, attacks: 1 });
   });
 
   it('buckets medication days in the configured zone', () => {
@@ -284,8 +366,9 @@ describe('buildMonthlyTrend', () => {
     const may = rows[rows.length - 2];
     const june = rows[rows.length - 1];
     expect(may).toMatchObject({ attackDays: 1, attacks: 1 });
-    // June has an attack overlapping into it, so it is known (1 day, 1 overlap).
-    expect(june).toMatchObject({ attackDays: 1, attacks: 1 });
+    // June is overlapped by the 02:00 tail, which never reaches 08:00: known
+    // month (0 attack days, 1 overlapping attack), not an unknown gap.
+    expect(june).toMatchObject({ attackDays: 0, attacks: 1 });
     // July 2025 has nothing at all: unknown, not a confirmed zero.
     expect(rows[0].attackDays).toBeNull();
 
@@ -411,8 +494,9 @@ describe('buildMonthlyTrend: single-pass medication aggregation', () => {
     const may = rows[rows.length - 2];
     const june = rows[rows.length - 1];
     expect(may).toMatchObject({ attackDays: 2, attacks: 1, nurtec: 0, tylenol: 0 });
+    // June 2's 03:00 tail does not reach 08:00, so only June 1 counts.
     expect(june).toMatchObject({
-      attackDays: 2, attacks: 1, nurtec: 1, tylenol: 1,
+      attackDays: 1, attacks: 1, nurtec: 1, tylenol: 1,
     });
   });
 });

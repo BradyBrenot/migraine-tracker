@@ -6,7 +6,8 @@ import { NURTEC_DEFAULT_RULE, resolveRule, usageDaysInWindow } from '@/lib/usage
 import { nurtecInventory } from '@/lib/inventory';
 import { medColor, medName, painColor } from '@/lib/meds';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
-import { addDays, dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
+import { localDayKey } from '../../shared/datetime.ts';
+import { attackCountsAsAttackDay, parseAttackTimes } from '../../shared/attackstats.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
 import type { DayStateStatus, MedEvent, WorkoutKind } from '@/types';
 
@@ -59,26 +60,27 @@ export default function PartnerHome() {
   const todayKey = localDayKey(now, state.timezone);
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
 
-  const attackOverlapsToday = useMemo(() => {
-    if (activeAttack) return true;
-    const dayStart = dayKeyStartMs(todayKey, state.timezone);
-    const dayEnd = dayKeyStartMs(addDays(todayKey, 1), state.timezone);
-    return state.attacks.some((a) => {
-      const start = Date.parse(a.start);
-      if (!Number.isFinite(start)) return false;
-      const end = a.end ? Date.parse(a.end) : now;
-      return Number.isFinite(end) && start < dayEnd && end > dayStart;
-    });
-  }, [activeAttack, todayKey, state.timezone, state.attacks, now]);
+  // Today counts as an attack/migraine day only when an attack overlaps
+  // today's [08:00, 08:00 next day) window. An attack that ended while the user
+  // slept (e.g. 02:00-06:00) is attributed to the previous day, so it must not
+  // infer Off here. Do not prefilter by today's midnight-to-midnight bounds: an
+  // attack in [tomorrow 00:00, tomorrow 08:00) belongs to today's window.
+  const countsAsAttackDayToday = useMemo(
+    () => state.attacks.some((attack) => {
+      const times = parseAttackTimes(attack, now);
+      return attackCountsAsAttackDay(times.startMs, times.endMs, todayKey, state.timezone);
+    }),
+    [state.attacks, now, todayKey, state.timezone],
+  );
 
   // Display precedence only: while an attack is actually active, the partner
   // "Now" page must never read "Well" or "Normal routine today." even if an
   // explicit day record for today says so. `effectiveDayState` keeps its own
   // explicit-wins semantics for every other consumer, and infers Off for a
-  // record-less attack day.
+  // record-less day that counts as an attack day (08:00 rule).
   const todayState: DayStateStatus | null = activeAttack
     ? 'attack'
-    : effectiveDayState(todayRecord, attackOverlapsToday);
+    : effectiveDayState(todayRecord, countsAsAttackDayToday);
 
   const todaysMeds = useMemo(() => {
     return state.meds

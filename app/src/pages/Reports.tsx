@@ -17,7 +17,7 @@ import {
   addMonths, dayKeyStartMs, localDayKey, monthStartKey, type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackDayKeysInMonth, attackOverlapsRange, parseAttackTimes, validDurationMs,
+  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
 } from '../../shared/attackstats.ts';
 import { Button } from '@/components/ui/button';
 
@@ -85,10 +85,16 @@ export default function Reports() {
     const mStart = dayKeyStartMs(cursor, timeZone);
     const mEnd = dayKeyStartMs(addMonths(cursor, 1), timeZone);
 
-    const parsed = state.attacks.map((a) => ({
-      attack: a,
-      times: parseAttackTimes(a, dataNow),
-    }));
+    const parsed = state.attacks.map((a) => {
+      const times = parseAttackTimes(a, dataNow);
+      return {
+        attack: a,
+        times,
+        // 08:00-to-08:00 attributed days, computed once per attack. A
+        // pre-08:00 start can contribute the previous month's last day.
+        dayKeys: attackDayKeys(times.startMs, times.endMs, timeZone),
+      };
+    });
     // attacks counted by overlap (multi-day attacks count into this month),
     // but listed/counted once by their start month
     const overlap = parsed.filter(({ times }) => attackOverlapsRange(
@@ -114,11 +120,14 @@ export default function Reports() {
       ? withPain.reduce((s, a) => s + a.peakPain, 0) / withPain.length
       : null;
 
-    // distinct days with any attack (clipped to this month, half-open)
+    // Distinct attack/migraine days (08:00-to-08:00 windows, clipped to this
+    // month). Uses ALL attacks, not only raw month overlap: an attack starting
+    // just after midnight in the next month is attributed to this month's last
+    // day.
     const daysLost = new Set<string>();
-    for (const { times } of overlap) {
-      for (const key of attackDayKeysInMonth(times.startMs, times.endMs, monthPrefix, timeZone)) {
-        daysLost.add(key);
+    for (const { dayKeys } of parsed) {
+      for (const key of dayKeys) {
+        if (key.slice(0, 7) === monthPrefix) daysLost.add(key);
       }
     }
 
@@ -164,9 +173,10 @@ export default function Reports() {
     const triggers = count(attacks.map((a) => a.triggers));
     const symptoms = count(attacks.map((a) => a.symptoms));
 
-    // An attack (even a zero/negative-duration one) or any med makes the month
-    // known; otherwise 0 days would look like a confirmed clear month.
-    const hasData = attacks.length > 0 || meds.length > 0;
+    // A counted day (including one attributed from a pre-08:00 start next
+    // month), any raw attack overlap, or any med makes the month known;
+    // otherwise 0 days would look like a confirmed clear month.
+    const hasData = daysLost.size > 0 || attacks.length > 0 || meds.length > 0;
 
     return {
       attacks, meds, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist,
@@ -317,7 +327,7 @@ export default function Reports() {
             icon={CalendarX}
             label="Days affected"
             value={data.hasData ? String(data.daysLost) : '—'}
-            sub={data.hasData ? undefined : 'no data this month'}
+            sub={data.hasData ? '08:00–08:00' : 'no data this month'}
           />
           <StatCard
             icon={Clock}
@@ -501,7 +511,8 @@ export default function Reports() {
           </h2>
           <p className="mt-1 text-xs text-slate-400">
             Always the last 12 months — independent of the month above and of the
-            download range.
+            download range. A migraine day runs 08:00 to 08:00 local, so an
+            early-morning attack counts the previous day.
           </p>
         </div>
 

@@ -13,8 +13,8 @@ const STATUS_META: Record<DayStateStatus, { label: string; pill: string }> = {
 /**
  * Choices offered to the user: Well and Off only. Attack is display-only — it
  * comes from a real active attack (via `displayOverride`), the shared
- * attack-day inference (which is Off), or a legacy explicit Attack day record,
- * never from this check-in.
+ * attack-day inference (a day whose attack overlaps its 08:00-to-08:00 window
+ * is Off), or a legacy explicit Attack day record, never from this check-in.
  */
 const CHOICES: DayStateStatus[] = ['well', 'off'];
 
@@ -28,7 +28,10 @@ const CHOICES: DayStateStatus[] = ['well', 'off'];
  *   Well/Off and Change entirely for its duration;
  * - otherwise an explicit `record` wins and Change offers Well/Off;
  * - with no record, `effectiveStatus` — computed by the parent from real
- *   attacks — renders the day (attack days are Off), collapsed with Note/Change;
+ *   attacks — renders the day (a day whose attack overlaps its 08:00-to-08:00
+ *   window is Off; an early-morning attack counts the previous day, and a night
+ *   tail that ended while asleep does not count this one), collapsed with
+ *   Note/Change;
  * - saving a NON-EMPTY note on a record-less day latches that effective status
  *   so the note has somewhere to live (never Attack); a blank draft just closes
  *   the editor without latching.
@@ -92,8 +95,8 @@ export default function DayCheckIn({
   }
 
   function saveNote() {
-    // A record-less day (including an attack day, which infers Off) has no
-    // record yet: saving a note latches the effective status so the note is
+    // A record-less day (including a counted attack day, which infers Off) has
+    // no record yet: saving a note latches the effective status so the note is
     // persisted like any other day. It is never latched as Attack.
     const status = record?.status ?? effectiveStatus;
     if (!status) return;

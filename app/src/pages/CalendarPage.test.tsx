@@ -4,7 +4,7 @@ import type { Mock } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, TrackerState, Workout } from '@/types';
-import { dayKeyStartMs, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
+import { addDays, dayKeyStartMs, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
 import { DEFAULT_REMINDER_SETTINGS } from '../../shared/reminders.ts';
 import { painkillerMismatchNote } from '@/lib/usage';
 
@@ -212,7 +212,8 @@ function makeWorkout(performedAt: number): Workout {
 }
 
 function makeAttack(dayKey: string, timeZone: string): Attack {
-  const start = dayKeyStartMs(dayKey, timeZone) + 60 * 60 * 1000;
+  // 09:00-11:00 local: the day reaches 08:00, so it counts as an attack day.
+  const start = dayKeyStartMs(dayKey, timeZone) + 9 * 60 * 60 * 1000;
   return {
     id: 'seed-attack',
     start: new Date(start).toISOString(),
@@ -364,25 +365,40 @@ describe('CalendarPage attack-day rule', () => {
     expect(within(sheet).queryByText('Well')).toBeNull();
   });
 
-  it('shows Off for a record-less day overlapped by an ended attack', async () => {
+  it('shows Off for a record-less day whose ended attack reaches 08:00', async () => {
     const TZ = 'UTC';
-    const today = localDayKey(Date.now(), TZ);
-    seedState({
-      timezone: TZ,
-      attacks: [makeTimedAttack(
-        'ended',
-        Date.now() - 2 * 60 * 60 * 1000,
-        Date.now() - 60 * 1000,
-      )],
-    });
+    // Freeze the clock: the clock module captures Date.now() at import time, so
+    // re-import after faking. A fixed 09:00-10:00 attack always reaches 08:00,
+    // so this can never depend on the wall-clock time the suite runs at.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-06-15T12:00:00.000Z').getTime());
+      vi.resetModules();
+      captured = null;
+      localStorage.clear();
+      seedState({
+        timezone: TZ,
+        attacks: [makeTimedAttack(
+          'ended',
+          Date.parse('2026-06-15T09:00:00.000Z'),
+          Date.parse('2026-06-15T10:00:00.000Z'),
+        )],
+      });
+      api = (await import('@/lib/api')).api as unknown as MockedBackend;
+      applyApiDefaults(api);
+      calendarPageModule = await import('@/pages/CalendarPage');
+      storeModule = await import('@/lib/store');
 
-    mountCalendar();
-    await waitForSync();
-    clickDay(today);
+      mountCalendar();
+      await waitForSync();
+      clickDay('2026-06-15');
 
-    const sheet = await screen.findByRole('dialog');
-    await waitFor(() => expect(within(sheet).getByText('Off (from attacks)')).toBeTruthy());
-    expect(within(sheet).queryByText('Attack')).toBeNull();
+      const sheet = await screen.findByRole('dialog');
+      await waitFor(() => expect(within(sheet).getByText('Off (from attacks)')).toBeTruthy());
+      expect(within(sheet).queryByText('Attack')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -503,7 +519,7 @@ describe('CalendarPage ongoing attacks', () => {
 describe('CalendarPage multi-day attacks across DST', () => {
   const TZ = 'America/New_York';
 
-  it('keeps every configured-zone day of a DST-crossing attack and matches monthStats', async () => {
+  it('counts only days reaching 08:00 across DST but still lists the raw tail day', async () => {
     const startMs = zonedDateTimeToMs('2026-03-07', '23:30', TZ);
     const endMs = zonedDateTimeToMs('2026-03-09', '01:00', TZ);
     seedState({
@@ -519,21 +535,30 @@ describe('CalendarPage multi-day attacks across DST', () => {
       expect(document.querySelector('[data-day="2026-03-07"]')).not.toBeNull();
     });
 
-    // Spring-forward loses an hour, but the attack still covers Mar 7, 8, and
-    // 9. The header's monthStats and the per-day grid must agree.
+    // Spring-forward loses an hour, but the attack reaches 08:00 on Mar 7 and
+    // Mar 8 only: the 01:00 Mar 9 tail is before the 08:00 window, so Mar 9 is
+    // not counted. The header's monthStats and the shared rule must agree.
     await waitFor(() => {
-      expect(monthHeaderText()).toBe('3 attack days of 31 · 1 attack');
+      expect(monthHeaderText()).toBe('2 attack days of 31 · 1 attack');
     });
 
-    for (const day of ['2026-03-07', '2026-03-08', '2026-03-09']) {
+    for (const day of ['2026-03-07', '2026-03-08']) {
       clickDay(day);
       const sheet = await screen.findByRole('dialog');
       await waitFor(() => expect(within(sheet).getByText('nausea')).toBeTruthy());
+      expect(within(sheet).getByText('Off (from attacks)')).toBeTruthy();
     }
+
+    // Mar 9 still lists the raw attack (bar/list unchanged) but is not counted,
+    // so it never infers "Off (from attacks)".
+    clickDay('2026-03-09');
+    const tailSheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(tailSheet).getByText('nausea')).toBeTruthy());
+    expect(within(tailSheet).queryByText('Off (from attacks)')).toBeNull();
 
     // 23:30 Mar 7 EST to 01:00 Mar 9 EDT is 24h30m elapsed (25h30m on the
     // wall clock): the DST transition must not inflate the duration.
-    expect(within(await screen.findByRole('dialog')).getByText('24h 30m')).toBeTruthy();
+    expect(within(tailSheet).getByText('24h 30m')).toBeTruthy();
 
     // The day before the interval and the day after it have no attack.
     clickDay('2026-03-06');
@@ -573,8 +598,9 @@ describe('CalendarPage degenerate attacks', () => {
     expect(screen.getByRole('heading', { name: formatDayTitle(day, TZ) })).toBeTruthy();
   });
 
-  it('counts a zero-duration attack at exactly local midnight as one attack day', async () => {
+  it('attributes a zero-duration attack at local midnight to the previous day', async () => {
     const day = midMonthDay(TZ);
+    const previousDay = addDays(day, -1);
     const midnight = dayKeyStartMs(day, TZ);
     seedState({
       timezone: TZ,
@@ -584,14 +610,65 @@ describe('CalendarPage degenerate attacks', () => {
     mountCalendar();
     await waitForSync();
 
+    // Midnight belongs to the previous day's 08:00-to-08:00 window.
     await waitFor(() => {
       expect(monthHeaderText()).toBe(`1 attack day of ${daysInMonthOf(day)} · 1 attack`);
     });
 
+    // The attack's own day still lists the raw 0m record but is not an attack day.
     clickDay(day);
     const sheet = await screen.findByRole('dialog');
     await waitFor(() => expect(within(sheet).getByText('0m')).toBeTruthy());
     expect(within(sheet).queryByText('End is before start')).toBeNull();
+    expect(within(sheet).queryByText('Off (from attacks)')).toBeNull();
+
+    // The previous day is the attributed attack day even without a raw attack.
+    clickDay(previousDay);
+    const previousSheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(
+      within(previousSheet).getByText('Off (from attacks)'),
+    ).toBeTruthy());
+    expect(within(previousSheet).getByText(
+      'Attack day: an early-morning attack from the next day counts for this day.',
+    )).toBeTruthy();
+  });
+
+  it('attributes a 01:00-06:00 attack to the previous day', async () => {
+    const day = midMonthDay(TZ);
+    const previousDay = addDays(day, -1);
+    const startMs = dayKeyStartMs(day, TZ) + 60 * 60 * 1000;
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('early-tail', startMs, startMs + 5 * 60 * 60 * 1000)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    // 01:00-06:00 is entirely before 08:00, so it counts the previous day.
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe(`1 attack day of ${daysInMonthOf(day)} · 1 attack`);
+    });
+
+    // The attack's own day lists the raw 5h record but is not an attack day.
+    clickDay(day);
+    const sheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(sheet).getByText('5h')).toBeTruthy());
+    expect(within(sheet).queryByText('Off (from attacks)')).toBeNull();
+    expect(screen.getByRole('heading', { name: formatDayTitle(day, TZ) })).toBeTruthy();
+
+    clickDay(previousDay);
+    const previousSheet = await screen.findByRole('dialog');
+    await waitFor(() => expect(
+      within(previousSheet).getByText('Off (from attacks)'),
+    ).toBeTruthy());
+    expect(within(previousSheet).getByText(
+      'Attack day: an early-morning attack from the next day counts for this day.',
+    )).toBeTruthy();
+    // The tinted cell's accessible name must not claim it has no attack info.
+    expect(
+      document.querySelector(`[data-day="${previousDay}"]`)?.getAttribute('aria-label'),
+    ).toContain('attack day, peak 6 of 10');
   });
 });
 

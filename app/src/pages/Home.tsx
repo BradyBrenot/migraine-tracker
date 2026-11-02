@@ -16,7 +16,10 @@ import MedFormDialog from '@/components/MedFormDialog';
 import DayCheckIn from '@/components/DayCheckIn';
 import WorkoutQuickLog from '@/components/WorkoutQuickLog';
 import WeatherCard from '@/components/WeatherCard';
-import { addDays, dayKeyStartMs, localDayKey } from '../../shared/datetime.ts';
+import { addDays, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
+import {
+  attackCountsAsAttackDay, attackOverlapsRange, parseAttackTimes,
+} from '../../shared/attackstats.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -223,26 +226,53 @@ export default function Home() {
 
   // ── Today's wellness state ─────────────────────────────────
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
-  // Does any real attack (active or ended) overlap today's local day? An active
-  // attack always counts — it is still ongoing.
+  // Parse every attack ONCE so raw overlap and the 08:00 attack-day rule share
+  // the same instant handling (an ongoing attack uses `now` as its end).
+  const parsedAttacks = useMemo(
+    () => state.attacks.map((attack) => ({
+      attack,
+      times: parseAttackTimes(attack, now),
+    })),
+    [state.attacks, now],
+  );
+
+  // Real local-day bounds. zonedDateTimeToMs (not dayKeyStartMs) is correct in
+  // zones whose DST starts at 00:00, where the next midnight is +1h later.
+  const todayBounds = useMemo(() => ({
+    startMs: zonedDateTimeToMs(todayKey, '00:00', state.timezone),
+    endMs: zonedDateTimeToMs(addDays(todayKey, 1), '00:00', state.timezone),
+  }), [todayKey, state.timezone]);
+
+  // Raw overlap with today's local day. This drives ONLY the CTA label ("Log
+  // another attack"), so an early-morning tail still offers logging another.
+  // An active attack always counts: it is still ongoing.
   const attackOverlapsToday = useMemo(() => {
     if (activeAttack) return true;
-    const dayStart = dayKeyStartMs(todayKey, state.timezone);
-    const dayEnd = dayKeyStartMs(addDays(todayKey, 1), state.timezone);
-    return state.attacks.some((a) => {
-      const start = Date.parse(a.start);
-      if (!Number.isFinite(start)) return false;
-      const end = a.end ? Date.parse(a.end) : now;
-      return Number.isFinite(end) && start < dayEnd && end > dayStart;
-    });
-  }, [todayKey, state.timezone, state.attacks, activeAttack, now]);
+    return parsedAttacks.some(({ times }) => attackOverlapsRange(
+      times.startMs, times.endMs, todayBounds.startMs, todayBounds.endMs,
+    ));
+  }, [activeAttack, parsedAttacks, todayBounds]);
+
+  // Does today count as an attack/migraine day? Only when an attack overlaps
+  // today's [08:00, 08:00 next day) window. Do NOT prefilter by today's
+  // midnight-to-midnight bounds: an attack in [tomorrow 00:00, tomorrow 08:00)
+  // belongs to today's window. Deliberately NO active-attack shortcut here: the
+  // display override shows Attack while an attack is active, and an attack that
+  // ended before 08:00 (while the user slept) is attributed to the PREVIOUS
+  // day, so it must not infer Off today.
+  const countsAsAttackDayToday = useMemo(
+    () => parsedAttacks.some(({ times }) => (
+      attackCountsAsAttackDay(times.startMs, times.endMs, todayKey, state.timezone)
+    )),
+    [parsedAttacks, todayKey, state.timezone],
+  );
 
   // An explicit Well/Off record still wins over the attack-day inference; with
-  // no record an attack overlapping today infers Off (attack days are days off).
+  // no record a counted attack day infers Off (attack days are days off).
   // While an attack is active the card's display override shows Attack instead.
   const todayState = useMemo(
-    () => effectiveDayState(todayRecord, attackOverlapsToday),
-    [todayRecord, attackOverlapsToday],
+    () => effectiveDayState(todayRecord, countsAsAttackDayToday),
+    [todayRecord, countsAsAttackDayToday],
   );
 
   // Short guidance for the wellness card. The status pill already names the

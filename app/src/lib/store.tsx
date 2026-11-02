@@ -236,6 +236,13 @@ function hasChanges(patch: object): boolean {
  * attack now, or ending a currently-open attack now), never on mount/
  * hydration and never for backfilled/reopened history, so a restored active
  * attack cannot rewrite the day or diverge from the server snapshot.
+ *
+ * This is an EXPLICIT day-state rewrite, not the report/calendar attack-day
+ * count (see `ATTACK_DAY_START_TIME` in shared/attackstats.ts): it deliberately
+ * runs on a real current start/end even when the interval does not overlap the
+ * 08:00-to-08:00 attack-day window, so an existing record can become Off while
+ * a pre-08:00 attack counts the previous day instead. Reminders' raw-overlap
+ * suppression is likewise a separate policy.
  */
 function replacedOffDayState(states: readonly DayState[], dayKey: string): DayState | null {
   const current = states.find((d) => d.day === dayKey);

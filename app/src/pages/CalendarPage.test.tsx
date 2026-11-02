@@ -650,6 +650,13 @@ describe('CalendarPage degenerate attacks', () => {
       expect(monthHeaderText()).toBe(`1 attack day of ${daysInMonthOf(day)} · 1 attack`);
     });
 
+    // The actual "lights up" assertion: the attributed previous day is tinted;
+    // the raw attack's own day is not.
+    const previousCell = document.querySelector<HTMLElement>(`[data-day="${previousDay}"]`);
+    const ownCell = document.querySelector<HTMLElement>(`[data-day="${day}"]`);
+    expect(previousCell?.style.background).not.toBe('');
+    expect(ownCell?.style.background).toBe('');
+
     // The attack's own day lists the raw 5h record but is not an attack day.
     clickDay(day);
     const sheet = await screen.findByRole('dialog');

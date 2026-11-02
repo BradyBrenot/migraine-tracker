@@ -4,6 +4,7 @@ import {
   attackDayKeys,
   attackDayKeysInMonth,
   attackOverlapsRange,
+  parseAttackInterval,
   parseAttackTimes,
   validDurationMs,
 } from './attackstats.ts';
@@ -16,6 +17,40 @@ const UTC = 'UTC';
 function at(day: string, time: string, timeZone: string): number {
   return zonedDateTimeToMs(day, time, timeZone);
 }
+
+describe('parseAttackInterval', () => {
+  it('keeps the raw interval separate from the now-substituted parser', () => {
+    const now = 12345;
+    const cases = [
+      { start: '2026-06-01T12:00:00.000Z', end: '2026-06-01T15:00:00.000Z' },
+      { start: '2026-06-01T12:00:00.000Z', end: null },
+      { start: 'not-a-date', end: null },
+      { start: 'not-a-date', end: '2026-06-01T15:00:00.000Z' },
+      { start: '2026-06-01T12:00:00.000Z', end: 'garbage' },
+    ] as const;
+
+    for (const attack of cases) {
+      const interval = parseAttackInterval(attack);
+      const times = parseAttackTimes(attack, now);
+      expect(times.startMs).toBe(interval.startMs);
+      expect(times.ongoing).toBe(interval.ongoing);
+      if (interval.ongoing) {
+        expect(interval.endMs).toBeNull();
+        // An ongoing attack with an unusable start never invents `nowMs`.
+        expect(times.endMs).toBe(interval.startMs === null ? null : now);
+      } else {
+        expect(times.endMs).toBe(interval.endMs);
+      }
+    }
+  });
+
+  it('preserves the unparseable-start contract for both end shapes', () => {
+    expect(parseAttackInterval({ start: 'not-a-date', end: null }))
+      .toEqual({ startMs: null, endMs: null, ongoing: true });
+    expect(parseAttackInterval({ start: 'not-a-date', end: '2026-06-01T15:00:00.000Z' }))
+      .toEqual({ startMs: null, endMs: null, ongoing: false });
+  });
+});
 
 describe('parseAttackTimes', () => {
   it('treats a null end as ongoing by substituting nowMs', () => {

@@ -673,6 +673,48 @@ describe('Home wellness logging', () => {
     }
   });
 
+  it('counts an ongoing attack from yesterday for today and latches its note Off', async () => {
+    try {
+      await frozenClockModules('2026-06-15T12:00:00.000Z');
+      const todayKey = localDayKey(Date.now(), 'UTC');
+      seedState({
+        timezone: 'UTC',
+        attacks: [{
+          ...makeAttack(Date.now()),
+          id: 'ongoing-since-yesterday',
+          start: '2026-06-14T09:00:00.000Z',
+          end: null,
+        }],
+      });
+
+      mountHome();
+      await waitForSync();
+
+      expect(screen.getByText('Attack in progress')).toBeTruthy();
+      // The display pill is Attack while active, but the day still infers Off
+      // (the attack overlapped today's 08:00-to-08:00 window). Saving a note
+      // must latch that Off, not silently discard the text.
+      fireEvent.click(screen.getByRole('button', { name: 'Note' }));
+      fireEvent.change(screen.getByLabelText('Day note'), {
+        target: { value: '  rough morning  ' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(readPersisted().dayStates).toHaveLength(1));
+      expect(readPersisted().dayStates[0]).toMatchObject({
+        day: todayKey,
+        status: 'off',
+        notes: 'rough morning',
+      });
+      expect(api.putDayState).toHaveBeenCalledWith(
+        todayKey,
+        { status: 'off', notes: 'rough morning' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('closes the note editor without latching a record when an inferred attack day note is blank', async () => {
     try {
       await frozenClockModules('2026-06-15T12:00:00.000Z');

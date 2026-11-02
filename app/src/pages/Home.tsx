@@ -16,11 +16,9 @@ import MedFormDialog from '@/components/MedFormDialog';
 import DayCheckIn from '@/components/DayCheckIn';
 import WorkoutQuickLog from '@/components/WorkoutQuickLog';
 import WeatherCard from '@/components/WeatherCard';
-import { addDays, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
-import {
-  attackCountsAsAttackDay, attackOverlapsRange, parseAttackTimes,
-} from '../../shared/attackstats.ts';
+import { localDayKey } from '../../shared/datetime.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
+import { useTodayAttackFacts } from '@/lib/use-today-attack-facts';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -226,53 +224,27 @@ export default function Home() {
 
   // ── Today's wellness state ─────────────────────────────────
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
-  // Parse every attack ONCE so raw overlap and the 08:00 attack-day rule share
-  // the same instant handling (an ongoing attack uses `now` as its end).
-  const parsedAttacks = useMemo(
-    () => state.attacks.map((attack) => ({
-      attack,
-      times: parseAttackTimes(attack, now),
-    })),
-    [state.attacks, now],
+
+  // Finished attacks are parsed/evaluated once per local day; only ongoing
+  // attacks are re-evaluated per 15s tick. The hook deliberately has no
+  // active-attack shortcut for the counted boolean, and does NOT prefilter by
+  // midnight-to-midnight bounds: [tomorrow 00:00, tomorrow 08:00) belongs to
+  // today's 08:00-to-08:00 window.
+  const attackFacts = useTodayAttackFacts(
+    state.attacks, state.timezone, todayKey, now,
   );
 
-  // Real local-day bounds. zonedDateTimeToMs (not dayKeyStartMs) is correct in
-  // zones whose DST starts at 00:00, where the next midnight is +1h later.
-  const todayBounds = useMemo(() => ({
-    startMs: zonedDateTimeToMs(todayKey, '00:00', state.timezone),
-    endMs: zonedDateTimeToMs(addDays(todayKey, 1), '00:00', state.timezone),
-  }), [todayKey, state.timezone]);
-
-  // Raw overlap with today's local day. This drives ONLY the CTA label ("Log
-  // another attack"), so an early-morning tail still offers logging another.
-  // An active attack always counts: it is still ongoing.
-  const attackOverlapsToday = useMemo(() => {
-    if (activeAttack) return true;
-    return parsedAttacks.some(({ times }) => attackOverlapsRange(
-      times.startMs, times.endMs, todayBounds.startMs, todayBounds.endMs,
-    ));
-  }, [activeAttack, parsedAttacks, todayBounds]);
-
-  // Does today count as an attack/migraine day? Only when an attack overlaps
-  // today's [08:00, 08:00 next day) window. Do NOT prefilter by today's
-  // midnight-to-midnight bounds: an attack in [tomorrow 00:00, tomorrow 08:00)
-  // belongs to today's window. Deliberately NO active-attack shortcut here: the
-  // display override shows Attack while an attack is active, and an attack that
-  // ended before 08:00 (while the user slept) is attributed to the PREVIOUS
-  // day, so it must not infer Off today.
-  const countsAsAttackDayToday = useMemo(
-    () => parsedAttacks.some(({ times }) => (
-      attackCountsAsAttackDay(times.startMs, times.endMs, todayKey, state.timezone)
-    )),
-    [parsedAttacks, todayKey, state.timezone],
-  );
+  // The CTA keeps today's raw overlap plus the active-attack shortcut, so a
+  // future-dated open attack still offers "Log another attack" (existing
+  // behavior).
+  const attackOverlapsToday = activeAttack !== null || attackFacts.attackOverlapsToday;
 
   // An explicit Well/Off record still wins over the attack-day inference; with
   // no record a counted attack day infers Off (attack days are days off).
   // While an attack is active the card's display override shows Attack instead.
   const todayState = useMemo(
-    () => effectiveDayState(todayRecord, countsAsAttackDayToday),
-    [todayRecord, countsAsAttackDayToday],
+    () => effectiveDayState(todayRecord, attackFacts.countsAsAttackDayToday),
+    [todayRecord, attackFacts.countsAsAttackDayToday],
   );
 
   // Short guidance for the wellness card. The status pill already names the

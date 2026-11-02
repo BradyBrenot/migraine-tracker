@@ -31,7 +31,11 @@ import {
   zonedDateTimeToMs, type DayKey,
 } from './datetime.ts';
 
-/** Parsed instants of one attack. `null` means missing/unparseable. */
+/**
+ * Parsed instants of one attack, with `nowMs` already substituted for an
+ * ongoing end. Produced ONLY by `parseAttackTimes`; do not build this shape
+ * from `parseAttackInterval` (whose ongoing `endMs` is deliberately null).
+ */
 export interface AttackTimes {
   /** Parsed start instant, or null when the start string is unusable. */
   startMs: number | null;
@@ -42,6 +46,22 @@ export interface AttackTimes {
    * the reference `nowMs`, which is right for day/overlap purposes but is NOT
    * a finished duration — `validDurationMs` excludes ongoing attacks.
    */
+  ongoing: boolean;
+}
+
+/**
+ * Parsed interval BEFORE any clock substitution. This is intentionally a
+ * different type from `AttackTimes`: an ongoing attack has `endMs: null` and
+ * `ongoing: true`, never `endMs: nowMs`. Consumers must combine it with a
+ * reference instant before duration/day/overlap queries.
+ *
+ * `ongoing` is the raw `attack.end === null` flag. An unparseable end on a
+ * finished attack keeps `ongoing: false` with `endMs: null`, so it degrades
+ * to the start instant exactly like `parseAttackTimes`.
+ */
+export interface AttackInterval {
+  startMs: number | null;
+  endMs: number | null;
   ongoing: boolean;
 }
 
@@ -123,17 +143,41 @@ function coarseDayWindowMs(dayKey: DayKey): { startMs: number; endMs: number } {
  * - An unparseable end string keeps the start and reports `endMs: null`; the
  *   attack then behaves as degenerate (start day only).
  */
+export function parseAttackInterval(
+  attack: { start: string; end: string | null },
+): AttackInterval {
+  const startMs = Date.parse(attack.start);
+  if (!Number.isFinite(startMs)) {
+    // Nothing about the interval is usable. Preserve the raw ongoing flag,
+    // but never substitute a clock instant (this type has no `nowMs`).
+    return { startMs: null, endMs: null, ongoing: attack.end === null };
+  }
+  if (attack.end === null) return { startMs, endMs: null, ongoing: true };
+  const endMs = Date.parse(attack.end);
+  return { startMs, endMs: Number.isFinite(endMs) ? endMs : null, ongoing: false };
+}
+
+/**
+ * Parse an attack's `start`/`end` strings into epoch ms with `nowMs`
+ * substituted for an ongoing end.
+ *
+ * - `end === null` means ongoing: `endMs` becomes `nowMs`, `ongoing` is true,
+ *   and the attack is excluded from duration averages.
+ * - An unparseable start yields `{ startMs: null, endMs: null, ongoing }`
+ *   (nothing about the attack is usable, so no day can be attributed). An
+ *   ongoing attack with an unparseable start still reports `endMs: null`, not
+ *   `nowMs`, matching the historical contract.
+ * - An unparseable end string keeps the start and reports `endMs: null`; the
+ *   attack then behaves as degenerate (start day only).
+ */
 export function parseAttackTimes(
   attack: { start: string; end: string | null },
   nowMs: number,
 ): AttackTimes {
-  const startMs = Date.parse(attack.start);
-  if (!Number.isFinite(startMs)) {
-    return { startMs: null, endMs: null, ongoing: attack.end === null };
-  }
-  if (attack.end === null) return { startMs, endMs: nowMs, ongoing: true };
-  const endMs = Date.parse(attack.end);
-  return { startMs, endMs: Number.isFinite(endMs) ? endMs : null, ongoing: false };
+  const { startMs, endMs, ongoing } = parseAttackInterval(attack);
+  if (startMs === null) return { startMs: null, endMs: null, ongoing };
+  if (ongoing) return { startMs, endMs: nowMs, ongoing: true };
+  return { startMs, endMs, ongoing: false };
 }
 
 /**

@@ -7,8 +7,8 @@ import { nurtecInventory } from '@/lib/inventory';
 import { medColor, medName, painColor } from '@/lib/meds';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
 import { localDayKey } from '../../shared/datetime.ts';
-import { attackCountsAsAttackDay, parseAttackTimes } from '../../shared/attackstats.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
+import { useTodayAttackFacts } from '@/lib/use-today-attack-facts';
 import type { DayStateStatus, MedEvent, WorkoutKind } from '@/types';
 
 const DAY_STATE_LABEL: Record<DayStateStatus, string> = {
@@ -61,16 +61,12 @@ export default function PartnerHome() {
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;
 
   // Today counts as an attack/migraine day only when an attack overlaps
-  // today's [08:00, 08:00 next day) window. An attack that ended while the user
-  // slept (e.g. 02:00-06:00) is attributed to the previous day, so it must not
-  // infer Off here. Do not prefilter by today's midnight-to-midnight bounds: an
-  // attack in [tomorrow 00:00, tomorrow 08:00) belongs to today's window.
-  const countsAsAttackDayToday = useMemo(
-    () => state.attacks.some((attack) => {
-      const times = parseAttackTimes(attack, now);
-      return attackCountsAsAttackDay(times.startMs, times.endMs, todayKey, state.timezone);
-    }),
-    [state.attacks, now, todayKey, state.timezone],
+  // today's [08:00, 08:00 next day) window. Finished attacks are parsed once
+  // per local day; only ongoing attacks are re-evaluated per tick. An attack
+  // that ended while the user slept (e.g. 02:00-06:00) is attributed to the
+  // previous day, so it must not infer Off here.
+  const attackFacts = useTodayAttackFacts(
+    state.attacks, state.timezone, todayKey, now,
   );
 
   // Display precedence only: while an attack is actually active, the partner
@@ -80,7 +76,7 @@ export default function PartnerHome() {
   // record-less day that counts as an attack day (08:00 rule).
   const todayState: DayStateStatus | null = activeAttack
     ? 'attack'
-    : effectiveDayState(todayRecord, countsAsAttackDayToday);
+    : effectiveDayState(todayRecord, attackFacts.countsAsAttackDayToday);
 
   const todaysMeds = useMemo(() => {
     return state.meds

@@ -81,6 +81,17 @@ called on a Home/PartnerHome tick for finished attacks, the med-index variants
 are differentially tested against the originals, and inventory caches are
 tested for in-place mutation and timezone revalidation.
 
+**3. Calendar and Reports.** Calendar now filters the attack index to the
+visible six-week grid using the exact `08:00` bound after the last visible day,
+so only the attacks that can affect the grid are parsed/day-keyed. Reports uses
+the page-level attack/med indexes, computes day keys lazily only for attacks
+that can touch the displayed month/trend window, and caches finished-attack
+day keys. On Node 24 desktop with 10,000 attacks, Calendar's counted-day scan
+drops from ~650 ms to the visible subset, and the 12-month trend drops from
+~673 ms to ~9 ms per ongoing tick with prebuilt indexes (the remainder is
+medication day bucketing plus the 12-month loop). The cache structurally
+refuses ongoing attacks, so an attack crossing 08:00 still gains the new day.
+
 ## Consumers
 
 - `app/src/lib/report.ts`: month day counts and the Markdown "attack days" use

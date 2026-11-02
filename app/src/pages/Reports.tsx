@@ -6,18 +6,24 @@ import {
 import { Download, Clock, Activity, TrendingUp, CalendarX, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import {
-  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, limitState, medUnionDaysInWindow,
-  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule, usageDaysInWindow,
+  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, limitState,
+  medUnionDaysInWindowFromIndex, painkillerRulesDiffer, resolveRule,
+  resolveSharedPainkillerRule, usageDaysInWindowFromIndex,
 } from '@/lib/usage';
+import { buildMedIndex, lowerBound } from '@/lib/medIndex';
+import {
+  attackDayKeysForFinished, buildAttackIndex, type FinishedAttack,
+} from '@/lib/attackToday';
 import { useNow } from '@/lib/clock';
 import { MED_MAP, allMedIds, medColor, medName, painColor } from '@/lib/meds';
 import { fmtDuration } from '@/lib/format';
 import { buildMonthlyTrend, buildReportLines } from '@/lib/report';
 import {
-  addMonths, dayKeyStartMs, localDayKey, monthStartKey, type DayKey,
+  addMonths, dayKeyStartMs, localDayKey, monthStartKey, zonedDateTimeToMs,
+  type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
+  ATTACK_DAY_START_TIME, attackDayKeys, attackOverlapsRange, validDurationMs,
 } from '../../shared/attackstats.ts';
 import { Button } from '@/components/ui/button';
 
@@ -80,32 +86,35 @@ export default function Reports() {
   );
   const dataNow = hasOngoingAttack ? now : cursorStartMs;
 
+  const medIndex = useMemo(() => buildMedIndex(state.meds), [state.meds]);
+  const medIds = useMemo(() => allMedIds(state.meds), [state.meds]);
+  const attackIndex = useMemo(() => buildAttackIndex(state.attacks), [state.attacks]);
+
   const data = useMemo(() => {
     const monthPrefix = cursor.slice(0, 7);
     const mStart = dayKeyStartMs(cursor, timeZone);
     const mEnd = dayKeyStartMs(addMonths(cursor, 1), timeZone);
+    const mWindowEnd = zonedDateTimeToMs(
+      addMonths(cursor, 1), ATTACK_DAY_START_TIME, timeZone,
+    );
 
-    const parsed = state.attacks.map((a) => {
-      const times = parseAttackTimes(a, dataNow);
-      return {
-        attack: a,
-        times,
-        // 08:00-to-08:00 attributed days, computed once per attack. A
-        // pre-08:00 start can contribute the previous month's last day.
-        dayKeys: attackDayKeys(times.startMs, times.endMs, timeZone),
-      };
-    });
+    const entries = [
+      ...attackIndex.finished.map((entry) => ({
+        attack: entry.attack,
+        times: { startMs: entry.startMs, endMs: entry.endMs, ongoing: false },
+      })),
+      ...attackIndex.ongoing.map((entry) => ({
+        attack: entry.attack,
+        times: { startMs: entry.startMs, endMs: dataNow, ongoing: true },
+      })),
+    ];
+
     // attacks counted by overlap (multi-day attacks count into this month),
     // but listed/counted once by their start month
-    const overlap = parsed.filter(({ times }) => attackOverlapsRange(
+    const overlap = entries.filter(({ times }) => attackOverlapsRange(
       times.startMs, times.endMs, mStart, mEnd,
     ));
     const attacks = overlap.map(({ attack }) => attack);
-    // Med days are bucketed in the configured zone, never by UTC slice.
-    const meds = state.meds.filter((m) => {
-      const t = Date.parse(m.ts);
-      return Number.isFinite(t) && t >= mStart && t < mEnd;
-    });
 
     // Only the shared duration definition feeds the average: ongoing,
     // unparseable, and negative-duration attacks are excluded, zero counts as 0.
@@ -120,13 +129,17 @@ export default function Reports() {
       ? withPain.reduce((s, a) => s + a.peakPain, 0) / withPain.length
       : null;
 
-    // Distinct attack/migraine days (08:00-to-08:00 windows, clipped to this
-    // month). Uses ALL attacks, not only raw month overlap: an attack starting
-    // just after midnight in the next month is attributed to this month's last
-    // day.
+    // Distinct attack/migraine days clipped to this month. Only attacks that
+    // can touch this month's day windows are considered; finished day keys are
+    // cached, ongoing attacks use the live end. The expanded end includes a
+    // next-month 00:00-08:00 attack attributed to this month's last day.
     const daysLost = new Set<string>();
-    for (const { dayKeys } of parsed) {
-      for (const key of dayKeys) {
+    for (const { attack, times } of entries) {
+      if (!attackOverlapsRange(times.startMs, times.endMs, mStart, mWindowEnd)) continue;
+      const keys = times.ongoing
+        ? attackDayKeys(times.startMs, times.endMs, timeZone)
+        : attackDayKeysForFinished(attack as FinishedAttack, timeZone);
+      for (const key of keys) {
         if (key.slice(0, 7) === monthPrefix) daysLost.add(key);
       }
     }
@@ -139,25 +152,24 @@ export default function Reports() {
       if (a.peakPain >= 1) painDist[a.peakPain - 1].count++;
     }
 
-    // med usage days (catalog + custom imported meds): one pass over this
-    // month's medications instead of one full scan per med id.
-    const perMed = new Map<string, { days: Set<string>; doses: number }>();
-    for (const med of meds) {
-      const entry = perMed.get(med.medId) ?? { days: new Set<string>(), doses: 0 };
-      entry.days.add(localDayKey(Date.parse(med.ts), timeZone));
-      entry.doses++;
-      perMed.set(med.medId, entry);
-    }
-    const medUsage = allMedIds(meds)
+    // Med usage days from the per-med instant index: only this month's slice.
+    const medUsage = medIds
       .map((id) => {
-        const entry = perMed.get(id);
-        return {
-          id,
-          name: medName(id),
-          days: entry ? entry.days.size : 0,
-          doses: entry ? entry.doses : 0,
-          color: medColor(id),
-        };
+        const entry = medIndex.byId.get(id);
+        if (!entry) {
+          return { id, name: medName(id), days: 0, doses: 0, color: medColor(id) };
+        }
+        const days = new Set<string>();
+        let doses = 0;
+        for (
+          let i = lowerBound(entry.instantsAsc, mStart);
+          i < entry.instantsAsc.length && entry.instantsAsc[i] < mEnd;
+          i++
+        ) {
+          days.add(localDayKey(entry.instantsAsc[i], timeZone));
+          doses++;
+        }
+        return { id, name: medName(id), days: days.size, doses, color: medColor(id) };
       })
       .filter((m) => m.doses > 0);
     // Longest bar in the med-usage panel, so the render loop does not rebuild
@@ -176,13 +188,13 @@ export default function Reports() {
     // A counted day (including one attributed from a pre-08:00 start next
     // month), any raw attack overlap, or any med makes the month known;
     // otherwise 0 days would look like a confirmed clear month.
-    const hasData = daysLost.size > 0 || attacks.length > 0 || meds.length > 0;
+    const hasData = daysLost.size > 0 || attacks.length > 0 || medUsage.length > 0;
 
     return {
-      attacks, meds, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist,
+      attacks, avgMs, avgPain, daysLost: daysLost.size, hasData, painDist,
       medUsage, medUsageMax, triggers, symptoms,
     };
-  }, [state.attacks, state.meds, cursor, timeZone, dataNow]);
+  }, [attackIndex, medIndex, medIds, cursor, timeZone, dataNow]);
 
   // Monthly trend buckets — last 12 configured-zone calendar months, independent
   // of the month picker. This is the view that matches "how many migraine days
@@ -202,15 +214,17 @@ export default function Reports() {
     meds: state.meds,
     timeZone,
     nowMs: trendNow,
-  }), [state.attacks, state.meds, timeZone, trendNow]);
+    attackIndex,
+    medIndex,
+  }), [state.attacks, state.meds, timeZone, trendNow, attackIndex, medIndex]);
 
   // Shared painkiller (MOH) budget: ONE rolling count for Tylenol + Ibuprofen +
   // Naproxen, resolved exactly like Calendar/Home so mismatched or partial
   // imported rules cannot render NaN/undefined.
   const painkillerRule = resolveSharedPainkillerRule(state.rules);
   const painkillerRulesMismatch = painkillerRulesDiffer(state.rules);
-  const painkillerUsed = medUnionDaysInWindow(
-    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, timeZone,
+  const painkillerUsed = medUnionDaysInWindowFromIndex(
+    medIndex, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, timeZone,
   );
   const painkillerUsage = limitState(painkillerUsed, painkillerRule.limit);
   const painkillerOver = painkillerUsage === 'over';
@@ -417,7 +431,7 @@ export default function Reports() {
                   const windowDays = resolved?.windowDays ?? null;
                   const limit = resolved?.limit ?? null;
                   const windowUsed = windowDays !== null
-                    ? usageDaysInWindow(state.meds, m.id, windowDays, now, state.timezone)
+                    ? usageDaysInWindowFromIndex(medIndex, m.id, windowDays, now, state.timezone)
                     : null;
                   const daysLabel = `${m.days} ${m.days === 1 ? 'day' : 'days'}`;
                   const dosesLabel = `${m.doses} ${m.doses === 1 ? 'dose' : 'doses'}`;
@@ -555,7 +569,7 @@ export default function Reports() {
               <YAxis allowDecimals={false} width={28} tick={AXIS_TICK} />
               <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e2e8f0' }} />
               <Legend wrapperStyle={LEGEND_STYLE} />
-              {allMedIds(state.meds).map((id) => (
+              {medIds.map((id) => (
                 <Bar key={id} dataKey={id} name={medName(id)} stackId="meds" fill={medColor(id)} />
               ))}
             </BarChart>

@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act, cleanup, fireEvent, render, screen, waitFor, within,
+} from '@testing-library/react';
 import type { StoreApi } from '@/lib/store';
 import type { Attack, DayState, MedEvent, TrackerState, Workout } from '@/types';
 import { addDays, dayKeyStartMs, localDayKey, zonedDateTimeToMs } from '../../shared/datetime.ts';
@@ -977,5 +979,87 @@ describe('CalendarPage zero-limit decision card', () => {
     const used = screen.getByTitle(/^Nurtec:/);
     expect(cardBar(used).style.width).toBe('100%');
     expect(used.textContent).toContain('over limit');
+  });
+});
+describe('CalendarPage month-boundary attribution', () => {
+  const TZ = 'UTC';
+
+  it('attributes a next-month 01:00 attack to the previous month\'s last day', async () => {
+    const start = zonedDateTimeToMs('2026-07-01', '01:00', TZ);
+    const end = zonedDateTimeToMs('2026-07-01', '02:00', TZ);
+    seedState({
+      timezone: TZ,
+      attacks: [makeTimedAttack('cross-month-early', start, end)],
+    });
+
+    mountCalendar();
+    await waitForSync();
+
+    // July owns the attack event but no attributed day.
+    goToMonth('2026-07', TZ);
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe('0 attack days of 31 · 1 attack');
+    });
+
+    // June 30 is the attributed day, even though the attack starts after June
+    // ended. The +08:00 grid bound must keep it in the visible subset.
+    fireEvent.click(screen.getByLabelText('Previous month'));
+    await waitFor(() => {
+      expect(monthHeaderText()).toBe('1 attack day of 30 · 0 attacks');
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-day="2026-06-30"]')).not.toBeNull();
+    });
+    expect(
+      document.querySelector('[data-day="2026-06-30"]')?.getAttribute('aria-label'),
+    ).toContain('attack day, peak 6 of 10');
+  });
+});
+
+describe('CalendarPage ongoing 08:00 crossing', () => {
+  const TZ = 'UTC';
+
+  it('adds today when an ongoing attack crosses 08:00', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-06-15T07:59:00.000Z').getTime());
+      vi.resetModules();
+      captured = null;
+      localStorage.clear();
+      seedState({
+        timezone: TZ,
+        attacks: [makeTimedAttack(
+          'ongoing-0800',
+          Date.parse('2026-06-15T07:00:00.000Z'),
+          null,
+        )],
+      });
+      api = (await import('@/lib/api')).api as unknown as MockedBackend;
+      applyApiDefaults(api);
+      calendarPageModule = await import('@/pages/CalendarPage');
+      storeModule = await import('@/lib/store');
+      const clock = await import('@/lib/clock');
+
+      mountCalendar();
+      await waitForSync();
+
+      // 07:00-07:59 counts only the previous day (June 14).
+      await waitFor(() => {
+        expect(monthHeaderText()).toBe('1 attack day of 30 · 1 attack');
+      });
+
+      act(() => {
+        vi.setSystemTime(new Date('2026-06-15T08:01:00.000Z').getTime());
+        clock.bumpClock();
+      });
+
+      // After 08:00 the same ongoing attack also counts June 15. A cached
+      // finished day key must never freeze this.
+      await waitFor(() => {
+        expect(monthHeaderText()).toBe('2 attack days of 30 · 1 attack');
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

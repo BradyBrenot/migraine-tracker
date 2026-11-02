@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Attack } from '@/types';
-import { buildAttackIndex } from './attackToday.ts';
+import { attackDayKeys } from '../../shared/attackstats.ts';
+import {
+  attackDayKeysForFinished, buildAttackIndex, type FinishedAttack,
+} from './attackToday.ts';
 
 function attack(partial: Partial<Attack> & Pick<Attack, 'id'>): Attack {
   return {
@@ -31,8 +34,11 @@ describe('buildAttackIndex', () => {
     expect(index.ongoing).toHaveLength(2);
     expect(index.ongoing[0].startMs).toBe(Date.parse('2026-06-02T08:00:00.000Z'));
     expect(index.ongoing[1].startMs).toBe(Date.parse('2026-06-04T08:00:00.000Z'));
+    expect(index.ongoing.map((entry) => entry.order)).toEqual([1, 3]);
     // Finished intervals are parsed, never clock-substituted.
     expect(index.finished[0].endMs).toBe(Date.parse('2026-06-01T11:00:00.000Z'));
+    expect(index.finished.map((entry) => entry.order)).toEqual([0, 2]);
+    expect(index.finished[0].attack.id).toBe('f1');
   });
 
   it('keeps a dirty finished end in the finished bucket as degenerate', () => {
@@ -57,6 +63,44 @@ describe('buildAttackIndex', () => {
       attack({ id: 'bad-start', start: 'not-a-date', end: null }),
     ]);
     expect(index.finished).toHaveLength(0);
-    expect(index.ongoing).toEqual([{ startMs: null }]);
+    expect(index.ongoing).toHaveLength(1);
+    expect(index.ongoing[0]).toMatchObject({ startMs: null, order: 0 });
+    expect(index.ongoing[0].attack.id).toBe('bad-start');
+  });
+});
+
+describe('attackDayKeysForFinished', () => {
+  it('caches per attack and timezone, revalidating both raw strings', () => {
+    const a = attack({ id: 'cached' }) as FinishedAttack;
+
+    const utc1 = attackDayKeysForFinished(a, 'UTC');
+    const utc2 = attackDayKeysForFinished(a, 'UTC');
+    expect(utc2).toBe(utc1);
+    expect(utc1).toEqual(attackDayKeys(
+      Date.parse(a.start), Date.parse(a.end), 'UTC',
+    ));
+
+    const ny = attackDayKeysForFinished(a, 'America/New_York');
+    expect(ny).not.toBe(utc1);
+    expect(ny).toEqual(attackDayKeys(
+      Date.parse(a.start), Date.parse(a.end), 'America/New_York',
+    ));
+
+    // In-place mutation must not serve the old keys.
+    a.start = '2026-06-10T09:00:00.000Z';
+    a.end = '2026-06-10T11:00:00.000Z';
+    expect(attackDayKeysForFinished(a, 'UTC')).toEqual(['2026-06-10']);
+  });
+
+  it('matches the uncached helper for a dirty finished end', () => {
+    const a = attack({ id: 'dirty', end: 'garbage' }) as FinishedAttack;
+    expect(attackDayKeysForFinished(a, 'UTC')).toEqual(attackDayKeys(
+      Date.parse(a.start), null, 'UTC',
+    ));
+  });
+
+  it('structurally refuses ongoing attacks', () => {
+    const ongoing = attack({ id: 'open', end: null }) as unknown as FinishedAttack;
+    expect(() => attackDayKeysForFinished(ongoing, 'UTC')).toThrow(TypeError);
   });
 });

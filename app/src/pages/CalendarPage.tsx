@@ -3,10 +3,14 @@ import { ChevronLeft, ChevronRight, AlertTriangle, CalendarPlus } from 'lucide-r
 import { useStore } from '@/lib/store';
 import {
   NURTEC_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast, limitState,
-  medUnionDaysInWindow, painkillerBreakdown, painkillerMismatchNote,
-  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule,
-  usageDaysInWindow, type UsageRule,
+  medUnionDaysInWindowFromIndex, painkillerBreakdownFromIndex,
+  painkillerMismatchNote, painkillerRulesDiffer, resolveRule,
+  resolveSharedPainkillerRule, usageDaysInWindowFromIndex, type UsageRule,
 } from '@/lib/usage';
+import { buildMedIndex } from '@/lib/medIndex';
+import {
+  attackDayKeysForFinished, buildAttackIndex, type FinishedAttack,
+} from '@/lib/attackToday';
 import { useNow } from '@/lib/clock';
 import {
   MED_CATALOG, MED_MAP, allMedIds, medAbbr, medColor, medName,
@@ -15,10 +19,12 @@ import {
 import { fmtTime, fmtDuration } from '@/lib/format';
 import type { Attack, DayStateStatus, MedEvent, WorkoutKind } from '@/types';
 import {
-  addDays, addMonths, dayKeyStartMs, localDayKey, monthStartKey, weekdayOf, type DayKey,
+  addDays, addMonths, dayKeyStartMs, localDayKey, monthStartKey, weekdayOf,
+  zonedDateTimeToMs, type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
+  ATTACK_DAY_START_TIME, attackDayKeys, attackOverlapsRange, parseAttackTimes,
+  validDurationMs, type AttackTimes,
 } from '../../shared/attackstats.ts';
 import { effectiveDayState } from '../../shared/daystate.ts';
 import { PREVENTIVE_DUE_TIME, preventiveDue } from '../../shared/reminders.ts';
@@ -90,6 +96,13 @@ interface DayData {
   countsAsAttackDay: boolean;
   isToday: boolean;
   inMonth: boolean;
+}
+
+/** One attack interval visible in the grid, kept in the source array order. */
+interface ParsedAttackEntry {
+  attack: Attack;
+  times: AttackTimes;
+  order: number;
 }
 
 /** A continuous attack bar clipped to one week row. */
@@ -237,7 +250,13 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (me
   const { state } = useStore();
   const now = useNow();
   const def = MED_MAP[medId];
-  const days = daysSinceLast(state.meds, medId, now, state.timezone);
+  // One med's history is tiny; filtering once per data change keeps the
+  // per-tick daysSinceLast/preventiveDue scans proportional to that med only.
+  const medsForCard = useMemo(
+    () => state.meds.filter((m) => m.medId === medId),
+    [state.meds, medId],
+  );
+  const days = daysSinceLast(medsForCard, medId, now, state.timezone);
   const interval = def?.intervalDays ?? 30;
 
   // Shared with the server scheduler: planned dates override the automatic
@@ -246,7 +265,7 @@ function PreventiveCard({ medId, onSchedule }: { medId: string; onSchedule?: (me
   const dueInfo = preventiveDue({
     medId,
     intervalDays: interval,
-    meds: state.meds,
+    meds: medsForCard,
     planned: state.planned,
     now,
     timeZone: state.timezone,
@@ -369,51 +388,86 @@ export default function CalendarPage() {
     return byDay;
   }, [state.meds, state.timezone]);
 
-  // An ongoing attack's end instant is `now`, so finished history does not
-  // depend on the render clock at all (`parseAttackTimes` only consults it for
-  // `end === null`). Anchoring finished-only grids to today's configured
-  // midnight keeps the 42 cells and month stats memoized across 15s ticks and
-  // rebuilds them only at day rollover (isToday) or when data changes. Ongoing
-  // attacks still track `now` on every tick.
-  const hasOngoingAttack = useMemo(
-    () => state.attacks.some((attack) => attack.end === null),
-    [state.attacks],
-  );
-  const todayStartMs = useMemo(
-    () => dayKeyStartMs(todayKey, state.timezone),
-    [todayKey, state.timezone],
-  );
-  const gridNowMs = hasOngoingAttack ? now : todayStartMs;
+  const medIndex = useMemo(() => buildMedIndex(state.meds), [state.meds]);
+  const medIds = useMemo(() => allMedIds(state.meds), [state.meds]);
 
-  // Parse every attack interval ONCE per data/anchor change instead of once per
-  // grid cell, week filter, bar, and month-stat scan.
-  const parsedAttacks = useMemo(
-    () => state.attacks.map((attack) => ({
-      attack,
-      times: parseAttackTimes(attack, gridNowMs),
-    })),
-    [state.attacks, gridNowMs],
+  // Finished attacks are parsed once per data change; only ongoing attacks
+  // change with `now`. The index also lets the grid ignore history far outside
+  // the visible six weeks.
+  const attackIndex = useMemo(() => buildAttackIndex(state.attacks), [state.attacks]);
+
+  // Visible grid bounds, Monday-first. The last visible day's 08:00-to-08:00
+  // window ends at 08:00 the following local day; use that exact bound so an
+  // attack starting before then still attributes the last visible day.
+  const gridStartKey = useMemo(
+    () => addDays(cursor, -((weekdayOf(cursor) + 6) % 7)),
+    [cursor],
+  );
+  const lastVisibleKey = useMemo(
+    () => addDays(gridStartKey, 41),
+    [gridStartKey],
+  );
+  const gridStartMs = useMemo(
+    () => dayKeyStartMs(gridStartKey, state.timezone),
+    [gridStartKey, state.timezone],
+  );
+  const gridWindowEndMs = useMemo(
+    () => zonedDateTimeToMs(
+      addDays(lastVisibleKey, 1),
+      ATTACK_DAY_START_TIME,
+      state.timezone,
+    ),
+    [lastVisibleKey, state.timezone],
   );
 
-  // Counted attack/migraine days (08:00 rule) and their worst pain, built in
-  // ONE pass over attacks instead of checking every day against every attack.
-  // `countedPain` starts at -1 per day so an unreported (-1) peak is preserved.
+  // Cheap arithmetic filter: only attacks that can affect this grid survive.
+  const visibleFinished = useMemo(
+    () => attackIndex.finished.filter((entry) => attackOverlapsRange(
+      entry.startMs, entry.endMs, gridStartMs, gridWindowEndMs,
+    )),
+    [attackIndex, gridStartMs, gridWindowEndMs],
+  );
+
+  const visibleParsed = useMemo<ParsedAttackEntry[]>(() => {
+    const entries: ParsedAttackEntry[] = visibleFinished.map((entry) => ({
+      attack: entry.attack,
+      times: { startMs: entry.startMs, endMs: entry.endMs, ongoing: false },
+      order: entry.order,
+    }));
+    for (const entry of attackIndex.ongoing) {
+      entries.push({
+        attack: entry.attack,
+        times: { startMs: entry.startMs, endMs: now, ongoing: true },
+        order: entry.order,
+      });
+    }
+    // Preserve the store's attack order for the day sheet and bar lanes.
+    entries.sort((a, b) => a.order - b.order);
+    return entries;
+  }, [visibleFinished, attackIndex.ongoing, now]);
+
+  // Counted days/pain for the visible grid only. Finished day keys come from
+  // the per-attack cache; ongoing attacks are recomputed per tick.
   const { countedDays, countedPain } = useMemo(() => {
     const days = new Set<DayKey>();
     const pain = new Map<DayKey, number>();
-    for (const { attack, times } of parsedAttacks) {
-      for (const key of attackDayKeys(times.startMs, times.endMs, state.timezone)) {
+    for (const { attack, times } of visibleParsed) {
+      const keys = times.ongoing
+        ? attackDayKeys(times.startMs, times.endMs, state.timezone)
+        : attackDayKeysForFinished(attack as FinishedAttack, state.timezone);
+      for (const key of keys) {
+        // The index may include days outside the visible grid for a long
+        // attack; only grid days are needed by the cells/month header.
+        if (key < gridStartKey || key > lastVisibleKey) continue;
         days.add(key);
         const current = pain.get(key) ?? -1;
         if (attack.peakPain > current) pain.set(key, attack.peakPain);
       }
     }
     return { countedDays: days, countedPain: pain };
-  }, [parsedAttacks, state.timezone]);
+  }, [visibleParsed, state.timezone, gridStartKey, lastVisibleKey]);
 
   const weeks = useMemo(() => {
-    const startOffset = (weekdayOf(cursor) + 6) % 7; // Monday-first
-    const gridStartKey = addDays(cursor, -startOffset);
     const out: {
       days: DayData[];
       bars: BarSegment[];
@@ -432,7 +486,7 @@ export default function CalendarPage() {
         const key = addDays(weekStartKey, d);
         const dayStart = dayKeyStartMs(key, state.timezone);
         const dayEnd = dayKeyStartMs(addDays(key, 1), state.timezone);
-        const attacks = parsedAttacks
+        const attacks = visibleParsed
           .filter(({ times }) => (
             // Degenerate (zero/negative-duration) attacks count on their start
             // day instead of vanishing; half-open otherwise.
@@ -455,7 +509,7 @@ export default function CalendarPage() {
       }
 
       // continuous bars for attacks overlapping this week
-      const overlapping = parsedAttacks
+      const overlapping = visibleParsed
         .filter(({ times }) => attackOverlapsRange(times.startMs, times.endMs, weekStartMs, weekEndMs))
         .sort((a, b) => a.attack.start.localeCompare(b.attack.start));
       const weekEndKey = addDays(weekStartKey, 7);
@@ -485,7 +539,7 @@ export default function CalendarPage() {
     }
     return out;
   }, [
-    cursor, monthKey, parsedAttacks, countedDays, countedPain,
+    gridStartKey, monthKey, visibleParsed, countedDays, countedPain,
     medsByDay, state.timezone, todayKey,
   ]);
 
@@ -534,15 +588,15 @@ export default function CalendarPage() {
   // or an unexplained badge. Painkillers are a single MOH day budget: different
   // painkillers on one day count once.
   const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
-  const nurtecUsed = usageDaysInWindow(
-    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
+  const nurtecUsed = usageDaysInWindowFromIndex(
+    medIndex, 'nurtec', nurtecRule.windowDays, now, state.timezone,
   );
   const painkillerRule = resolveSharedPainkillerRule(state.rules);
-  const painkillerUsed = medUnionDaysInWindow(
-    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
+  const painkillerUsed = medUnionDaysInWindowFromIndex(
+    medIndex, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
   );
-  const painkillerNames = painkillerBreakdown(
-    state.meds, painkillerRule.windowDays, now, state.timezone,
+  const painkillerNames = painkillerBreakdownFromIndex(
+    medIndex, painkillerRule.windowDays, now, state.timezone,
   ).map((entry) => medName(entry.medId));
   const painkillerDetail = painkillerNames.length > 0
     ? `last ${painkillerRule.windowDays}d · ${painkillerNames.join(' + ')}`
@@ -561,6 +615,20 @@ export default function CalendarPage() {
     endMs: dayKeyStartMs(addMonths(cursor, 1), state.timezone),
   }), [cursor, state.timezone]);
 
+  // Custom (imported) med legend entries, computed once per data/month change
+  // instead of rescanning history for every custom id on every render.
+  const visibleCustomMedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const med of state.meds) {
+      if (MED_MAP[med.medId]) continue;
+      const t = Date.parse(med.ts);
+      if (Number.isFinite(t) && t >= monthBounds.startMs && t < monthBounds.endMs) {
+        ids.add(med.medId);
+      }
+    }
+    return ids;
+  }, [state.meds, monthBounds]);
+
   // "X attack days out of Y" for the visible configured-zone month — the
   // metric most migraine questionnaires (MIDAS, diaries) ask about. Days use
   // the counted 08:00-to-08:00 set (a pre-08:00 start can add the previous
@@ -568,7 +636,7 @@ export default function CalendarPage() {
   // still counts once as an attack but adds no attack day).
   const monthStats = useMemo(() => {
     const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    const attackCount = parsedAttacks
+    const attackCount = visibleParsed
       .filter(({ times }) => attackOverlapsRange(
         times.startMs, times.endMs, monthBounds.startMs, monthBounds.endMs,
       ))
@@ -578,7 +646,7 @@ export default function CalendarPage() {
       if (key.slice(0, 7) === monthKey) attackDays++;
     }
     return { attackDays, daysInMonth, attackCount };
-  }, [parsedAttacks, countedDays, monthKey, year, month, monthBounds]);
+  }, [visibleParsed, countedDays, monthKey, year, month, monthBounds]);
 
   return (
     <div className="space-y-4">
@@ -760,19 +828,10 @@ export default function CalendarPage() {
             <span className="text-slate-400">day tint = worst attack (08:00–08:00)</span>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
-            {allMedIds(state.meds)
+            {medIds
               // catalog meds always shown; custom (imported) meds only when
               // they actually appear in the visible month
-              .filter((id) => {
-                if (MED_MAP[id]) return true;
-                return state.meds.some((e) => {
-                  const t = Date.parse(e.ts);
-                  return e.medId === id
-                    && Number.isFinite(t)
-                    && t >= monthBounds.startMs
-                    && t < monthBounds.endMs;
-                });
-              })
+              .filter((id) => MED_MAP[id] !== undefined || visibleCustomMedIds.has(id))
               .map((id) => {
               const c = medColor(id);
               return (

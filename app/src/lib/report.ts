@@ -3,10 +3,16 @@ import { MED_CATALOG, allMedIds, medName } from '@/lib/meds';
 import { daysSinceLast } from '@/lib/usage';
 import { fmtDuration } from '@/lib/format';
 import {
-  addMonths, dayKeyStartMs, diffDayKeys, localDayKey, monthStartKey, type DayKey,
+  attackDayKeysForFinished, buildAttackIndex, type AttackIndex, type FinishedAttack,
+} from '@/lib/attackToday';
+import { buildMedIndex, lowerBound, type MedIndex } from '@/lib/medIndex';
+import {
+  addMonths, dayKeyStartMs, diffDayKeys, localDayKey, monthStartKey,
+  zonedDateTimeToMs, type DayKey,
 } from '../../shared/datetime.ts';
 import {
-  attackDayKeys, attackOverlapsRange, parseAttackTimes, validDurationMs,
+  ATTACK_DAY_START_TIME, attackDayKeys, attackOverlapsRange, parseAttackTimes,
+  validDurationMs,
 } from '../../shared/attackstats.ts';
 
 /**
@@ -130,25 +136,36 @@ export function buildMonthlyTrend(input: {
   nowMs: number;
   /** Defaults to 12. */
   months?: number;
+  /** Prebuilt page indexes; tests may omit them. */
+  attackIndex?: AttackIndex;
+  medIndex?: MedIndex;
 }): MonthlyTrendRow[] {
   const {
-    attacks, meds, timeZone, nowMs, months = 12,
+    attacks, meds, timeZone, nowMs, months = 12, attackIndex, medIndex,
   } = input;
   const currentMonth = monthStartKey(localDayKey(nowMs, timeZone));
-  const parsed = attacks.map((attack) => {
-    const times = parseAttackTimes(attack, nowMs);
-    return {
-      attack,
-      times,
-      // Enumerate the 08:00-to-08:00 attributed days ONCE per attack. A
-      // pre-08:00 start can contribute the previous month's last day.
-      dayKeys: attackDayKeys(times.startMs, times.endMs, timeZone),
-    };
-  });
-  const parsedMeds = meds
-    .map((med) => ({ med, ts: Date.parse(med.ts) }))
-    .filter(({ ts }) => Number.isFinite(ts));
+  const index = attackIndex ?? buildAttackIndex(attacks);
+  const medsIndex = medIndex ?? buildMedIndex(meds);
+
+  // Day keys are computed lazily per overlapping month (and cached for
+  // finished attacks), so a 10-year history is not enumerated on every tick
+  // while an attack is ongoing.
   const medIds = allMedIds(meds);
+
+  // Only attacks that can touch the plotted window participate in the
+  // per-month loops. The end is 08:00 after the last month so a next-month
+  // early-morning attack still attributes the last day.
+  const firstMonthKey = addMonths(currentMonth, -(months - 1));
+  const rangeStartMs = dayKeyStartMs(firstMonthKey, timeZone);
+  const rangeEndMs = zonedDateTimeToMs(
+    addMonths(currentMonth, 1), ATTACK_DAY_START_TIME, timeZone,
+  );
+  const relevantFinished = index.finished.filter((entry) => attackOverlapsRange(
+    entry.startMs, entry.endMs, rangeStartMs, rangeEndMs,
+  ));
+  const relevantOngoing = index.ongoing.filter((entry) => attackOverlapsRange(
+    entry.startMs, nowMs, rangeStartMs, rangeEndMs,
+  ));
 
   const rows: MonthlyTrendRow[] = [];
   for (let i = months - 1; i >= 0; i--) {
@@ -156,6 +173,11 @@ export function buildMonthlyTrend(input: {
     const monthPrefix = monthKey.slice(0, 7);
     const mStart = dayKeyStartMs(monthKey, timeZone);
     const mEnd = dayKeyStartMs(addMonths(monthKey, 1), timeZone);
+    // 08:00 after the next month starts: a next-month 00:00-08:00 attack is
+    // attributed to this month's last day.
+    const mWindowEnd = zonedDateTimeToMs(
+      addMonths(monthKey, 1), ATTACK_DAY_START_TIME, timeZone,
+    );
 
     // `days` holds counted attack/migraine days (the 08:00-to-08:00 window),
     // while `attackCount` counts every attack overlapping the month by raw
@@ -165,32 +187,62 @@ export function buildMonthlyTrend(input: {
     let attackCount = 0;
     let painSum = 0;
     let painN = 0;
-    for (const { attack, times, dayKeys } of parsed) {
-      for (const key of dayKeys) {
-        if (key.slice(0, 7) === monthPrefix) days.add(key);
+
+    const addFinished = (
+      attack: FinishedAttack, startMs: number | null, endMs: number | null,
+    ): void => {
+      if (attackOverlapsRange(startMs, endMs, mStart, mWindowEnd)) {
+        for (const key of attackDayKeysForFinished(attack, timeZone)) {
+          if (key.slice(0, 7) === monthPrefix) days.add(key);
+        }
       }
-      if (!attackOverlapsRange(times.startMs, times.endMs, mStart, mEnd)) continue;
+      if (!attackOverlapsRange(startMs, endMs, mStart, mEnd)) return;
       attackCount++;
       if (attack.peakPain >= 0) { painSum += attack.peakPain; painN++; }
+    };
+    const addOngoing = (attack: Attack, startMs: number | null): void => {
+      if (attackOverlapsRange(startMs, nowMs, mStart, mWindowEnd)) {
+        for (const key of attackDayKeys(startMs, nowMs, timeZone)) {
+          if (key.slice(0, 7) === monthPrefix) days.add(key);
+        }
+      }
+      if (!attackOverlapsRange(startMs, nowMs, mStart, mEnd)) return;
+      attackCount++;
+      if (attack.peakPain >= 0) { painSum += attack.peakPain; painN++; }
+    };
+
+    for (const entry of relevantFinished) {
+      addFinished(entry.attack, entry.startMs, entry.endMs);
+    }
+    for (const entry of relevantOngoing) {
+      addOngoing(entry.attack, entry.startMs);
     }
 
-    const monthMeds = parsedMeds.filter(({ ts }) => ts >= mStart && ts < mEnd);
-    // One pass over this month's doses fills every med bucket; the row still
-    // exposes every known med id (0 when unused) in `allMedIds` order.
-    const daySets = new Map<string, Set<DayKey>>();
-    for (const { med, ts } of monthMeds) {
-      const days = daySets.get(med.medId) ?? new Set<DayKey>();
-      days.add(localDayKey(ts, timeZone));
-      daySets.set(med.medId, days);
-    }
+    // Per-med day counts from the instant index; only this month's slice is
+    // visited. Every known med id still appears (0 when unused).
     const medDays: Record<string, number> = {};
+    let hasMonthMeds = false;
     for (const id of medIds) {
-      medDays[id] = daySets.get(id)?.size ?? 0;
+      const entry = medsIndex.byId.get(id);
+      if (!entry) {
+        medDays[id] = 0;
+        continue;
+      }
+      const usedDays = new Set<DayKey>();
+      for (
+        let j = lowerBound(entry.instantsAsc, mStart);
+        j < entry.instantsAsc.length && entry.instantsAsc[j] < mEnd;
+        j++
+      ) {
+        usedDays.add(localDayKey(entry.instantsAsc[j], timeZone));
+      }
+      medDays[id] = usedDays.size;
+      if (usedDays.size > 0) hasMonthMeds = true;
     }
 
     // A counted day, a raw attack overlap (even a 0-day tail), or any
     // medication makes the month known; otherwise it is unknown, not clear.
-    const hasData = days.size > 0 || attackCount > 0 || monthMeds.length > 0;
+    const hasData = days.size > 0 || attackCount > 0 || hasMonthMeds;
     rows.push({
       month: reportFormatter('monthShort', timeZone, { month: 'short', timeZone })
         .format(new Date(mStart)),

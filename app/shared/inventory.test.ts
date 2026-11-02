@@ -2,7 +2,7 @@
 // other shared modules). The server-side authority test mirrors several of
 // these scenarios through the real API in server/test/inventory.test.js.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { classifyStock, currentStock, DEFAULT_LOW_STOCK_THRESHOLD } from './inventory.ts';
 
 const TZ = 'America/New_York';
@@ -18,6 +18,48 @@ const baseline = (id: string, effectiveAt: string, quantity: number, createdAt =
 const REFILL_DAY = '2026-02-10'; // starts 2026-02-10T05:00:00.000Z
 // A correction on the evening of the same day:
 const CORRECTION_INSTANT = '2026-02-10T21:30:00.000Z';
+
+describe('currentStock instant cache', () => {
+  it('revalidates a cached dose instant after in-place mutation', () => {
+    const doses = [{ id: 'd1', ts: '2026-02-11T12:00:00.000Z', quantity: 1 }];
+    const baselines = [baseline('b1', '2026-02-01T00:00:00.000Z', 10)];
+    const options = { now: '2026-02-15T00:00:00.000Z', timeZone: TZ };
+
+    expect(currentStock({ baselines, doses, refills: [] }, options).quantity).toBe(9);
+    // Move the dose before the baseline: the memoized instant must not stick.
+    doses[0].ts = '2026-01-01T00:00:00.000Z';
+    expect(currentStock({ baselines, doses, refills: [] }, options).quantity).toBe(10);
+  });
+
+  it('revalidates cached refill instants per timezone', () => {
+    const baselines = [baseline('b1', '2026-02-01T00:00:00.000Z', 0)];
+    const refills = [{ id: 'r1', date: '2026-02-10', quantity: 8 }];
+    const now = '2026-02-10T00:00:00.000Z';
+
+    // NY starts the refill day at 05:00Z (after now); Kiritimati (+14) starts
+    // it at 2026-02-09T10:00Z (before now).
+    expect(currentStock({ baselines, doses: [], refills }, { now, timeZone: TZ }).quantity).toBe(0);
+    expect(currentStock({
+      baselines, doses: [], refills,
+    }, { now, timeZone: 'Pacific/Kiritimati' }).quantity).toBe(8);
+    // Switching back must not return a stale Kiritimati value.
+    expect(currentStock({ baselines, doses: [], refills }, { now, timeZone: TZ }).quantity).toBe(0);
+  });
+
+  it('does not re-parse an unchanged dose on a second call', () => {
+    const doseTs = '2026-02-11T12:00:00.000Z';
+    const doses = [{ id: 'd1', ts: doseTs, quantity: 1 }];
+    const baselines = [baseline('b1', '2026-02-01T00:00:00.000Z', 10)];
+    const options = { now: Date.parse('2026-02-15T00:00:00.000Z'), timeZone: TZ };
+
+    currentStock({ baselines, doses, refills: [] }, options);
+    const spy = vi.spyOn(Date, 'parse');
+    currentStock({ baselines, doses, refills: [] }, options);
+    const doseParses = spy.mock.calls.filter(([value]) => value === doseTs);
+    expect(doseParses).toHaveLength(0);
+    spy.mockRestore();
+  });
+});
 
 describe('currentStock', () => {
   it('is unknown before any applicable baseline — never zero', () => {

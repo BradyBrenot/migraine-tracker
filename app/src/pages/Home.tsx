@@ -3,10 +3,13 @@ import { toast } from 'sonner';
 import { Play, Square, Gauge, Pill, PenLine, History as HistoryIcon } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import {
-  NURTEC_DEFAULT_RULE, PAINKILLER_MED_IDS, limitState, medUnionDaysInWindow,
-  resolveRule, resolveSharedPainkillerRule, usageDaysInWindow, type LimitState,
+  NURTEC_DEFAULT_RULE, PAINKILLER_MED_IDS, latestMedInstant, limitState,
+  medUnionDaysInWindowFromIndex, resolveRule, resolveSharedPainkillerRule,
+  usageDaysInWindowFromIndex, type LimitState,
 } from '@/lib/usage';
-import { nurtecInventory, type NurtecInventory } from '@/lib/inventory';
+import { buildMedIndex } from '@/lib/medIndex';
+import { useNurtecInventory } from '@/lib/use-nurtec-inventory';
+import type { NurtecInventory } from '@/lib/inventory';
 import { useNow } from '@/lib/clock';
 import { MED_CATALOG, painColor, medColor, medName, textOn } from '@/lib/meds';
 import { fmtDuration, fmtTime, fmtDateFull } from '@/lib/format';
@@ -153,6 +156,11 @@ export default function Home() {
   // weekly workout goals), not the browser's day. Invalid timestamps are
   // skipped instead of producing an "Invalid Date" comparison.
   const todayKey = localDayKey(now, state.timezone);
+
+  // Medication instants are indexed once per history change; the rolling
+  // counters below then touch only the in-window instant tails per tick.
+  const medIndex = useMemo(() => buildMedIndex(state.meds), [state.meds]);
+
   const todaysMeds = useMemo(() => {
     return state.meds.filter((m) => {
       const ms = Date.parse(m.ts);
@@ -164,22 +172,22 @@ export default function Home() {
   // 15/30) drives the denominator and the window; a partial imported rule falls
   // back per field instead of rendering NaN or "undefinedd".
   const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
-  const nurtecDays = usageDaysInWindow(
-    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
+  const nurtecDays = usageDaysInWindowFromIndex(
+    medIndex, 'nurtec', nurtecRule.windowDays, now, state.timezone,
   );
   // Shared severity rule: over only past the limit; near needs a used day, so
   // an untouched low limit never warns.
   const nurtecUsage = limitState(nurtecDays, nurtecRule.limit);
   // Optimistic stock count next to it (server GET /api/inventory/nurtec is authoritative).
-  const nurtecStock = nurtecInventory(state, now);
+  const nurtecStock = useNurtecInventory(state, now);
   const nurtecBadge = nurtecStockBadge(nurtecStock, demo);
 
   // Tylenol, Ibuprofen and Naproxen share ONE MOH day budget, so all three
   // cards show the same combined chip (distinct configured-zone days across the
   // three). Nurtec keeps its own independent rule.
   const painkillerRule = resolveSharedPainkillerRule(state.rules);
-  const painkillerDays = medUnionDaysInWindow(
-    state.meds, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
+  const painkillerDays = medUnionDaysInWindowFromIndex(
+    medIndex, PAINKILLER_MED_IDS, painkillerRule.windowDays, now, state.timezone,
   );
   const painkillerUsage = limitState(painkillerDays, painkillerRule.limit);
   const painkillerUsageText =
@@ -198,29 +206,20 @@ export default function Home() {
   // appears/disappears without delaying the one-tap log. Preventive cards are
   // excluded — this context belongs to the acute grid only.
   //
-  // One pass over the medication history builds the latest usable instant per
-  // medId (previously each acute card rescanned the whole history). Invalid
-  // timestamps are ignored rather than compared; the latest usable event wins
-  // regardless of attackId, notes, or dose.
+  // The med index already holds the latest usable instant per medId, so a tick
+  // only walks the small catalog, not the whole medication history.
   const recentDoseHints = useMemo(() => {
-    const latestByMed = new Map<string, number>();
-    for (const med of state.meds) {
-      const ms = Date.parse(med.ts);
-      if (!Number.isFinite(ms)) continue;
-      const latest = latestByMed.get(med.medId);
-      if (latest === undefined || ms > latest) latestByMed.set(med.medId, ms);
-    }
     const hints = new Map<string, string>();
     for (const m of MED_CATALOG) {
       if (m.kind === 'preventive') continue;
-      const latest = latestByMed.get(m.id);
-      if (latest === undefined) continue;
+      const latest = latestMedInstant(medIndex, m.id);
+      if (latest === null) continue;
       const ageMs = now - latest;
       if (ageMs > RECENT_DOSE_WINDOW_MS || ageMs < -CLOCK_SKEW_TOLERANCE_MS) continue;
       hints.set(m.id, `Last ${doseAgeText(Math.max(0, ageMs))} ago`);
     }
     return hints;
-  }, [state.meds, now]);
+  }, [medIndex, now]);
 
   // ── Today's wellness state ─────────────────────────────────
   const todayRecord = state.dayStates.find((d) => d.day === todayKey) ?? null;

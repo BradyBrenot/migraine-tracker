@@ -106,23 +106,51 @@ function knownQuantity(value: number | null | undefined): value is number {
  * be ordered (malformed timestamp/date). Unorderable records are skipped by
  * design: the server validates new writes, so this only guards dirty legacy
  * rows from poisoning the whole calculation.
+ *
+ * The identity-keyed cache is a transparent memoization, not state: the
+ * source string is revalidated on every read, so an in-place mutation cannot
+ * return a stale instant. Output is identical with or without the cache.
  */
-function doseInstant(dose: StockDoseLike): number | null {
-  const ms = Date.parse(dose.ts);
-  return Number.isFinite(ms) ? ms : null;
-}
+const doseInstantCache = new WeakMap<StockDoseLike, { source: string; value: number | null }>();
 
-function refillInstant(refill: StockRefillLike, timeZone: string): number | null {
-  try {
-    return dayKeyStartMs(refill.date, timeZone);
-  } catch {
-    return null; // malformed day key
-  }
+function doseInstant(dose: StockDoseLike): number | null {
+  const cached = doseInstantCache.get(dose);
+  if (cached !== undefined && cached.source === dose.ts) return cached.value;
+  const ms = Date.parse(dose.ts);
+  const value = Number.isFinite(ms) ? ms : null;
+  doseInstantCache.set(dose, { source: dose.ts, value });
+  return value;
 }
 
 /**
- * Deterministic current-stock calculation. Pure: inject `now` and
- * `timeZone`; never reads the clock or the DOM.
+ * Refill instants depend on the configured zone, so both the source day key
+ * and the zone are revalidated. Malformed dates cache as null (still skipped).
+ */
+const refillInstantCache = new WeakMap<
+  StockRefillLike,
+  { source: string; timeZone: string; value: number | null }
+>();
+
+function refillInstant(refill: StockRefillLike, timeZone: string): number | null {
+  const cached = refillInstantCache.get(refill);
+  if (cached !== undefined && cached.source === refill.date && cached.timeZone === timeZone) {
+    return cached.value;
+  }
+  let value: number | null;
+  try {
+    value = dayKeyStartMs(refill.date, timeZone);
+  } catch {
+    value = null; // malformed day key
+  }
+  refillInstantCache.set(refill, { source: refill.date, timeZone, value });
+  return value;
+}
+
+/**
+ * Deterministic current-stock calculation. Inject `now` and `timeZone`; never
+ * reads the clock or the DOM. The identity-keyed instant caches above are
+ * transparent memoization (source strings and the zone are revalidated), so
+ * the result is identical with or without them.
  */
 export function currentStock(
   { baselines, doses, refills }: StockInput,

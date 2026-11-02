@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { MedEvent, TrackerState } from '@/types';
 import { localDayKey } from '../../shared/datetime.ts';
 import {
-  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast, isValidLimit,
-  isValidWindowDays, limitState, medUnionDaysInWindow, painkillerBreakdown,
-  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule, usageDaysInWindow,
+  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast, daysSinceLastFromIndex,
+  isValidLimit, isValidWindowDays, limitState, medUnionDaysInWindow,
+  medUnionDaysInWindowFromIndex, painkillerBreakdown, painkillerBreakdownFromIndex,
+  painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule,
+  usageDaysInWindow, usageDaysInWindowFromIndex,
 } from './usage';
+import { buildMedIndex } from './medIndex.ts';
 
 const DAY_MS = 86400000;
 
@@ -115,6 +118,12 @@ describe('daysSinceLast', () => {
     expect(daysSinceLast([bad], 'nurtec', now, 'UTC')).toBeNull();
     // A valid dose still wins; the invalid row does not poison Math.max.
     expect(daysSinceLast([bad, good], 'nurtec', now, 'UTC')).toBe(1);
+  });
+
+  it('ignores a non-string dirty timestamp instead of treating it as epoch', () => {
+    const now = Date.parse('2026-03-09T12:00:00.000Z');
+    const dirty = { ...dose('2026-03-08T12:00:00.000Z'), ts: null as unknown as string };
+    expect(daysSinceLast([dirty], 'nurtec', now, 'UTC')).toBeNull();
   });
 
   it('does not clamp a negative difference when now precedes the latest dose', () => {
@@ -305,6 +314,82 @@ describe('painkillerBreakdown', () => {
 
   it('omits unused meds and ignores invalid timestamps', () => {
     expect(painkillerBreakdown([dose('nope', 'ibuprofen', 'bad')], 30, now, 'UTC')).toEqual([]);
+  });
+});
+
+describe('med index variants', () => {
+  const now = Date.parse('2026-06-10T12:00:00.000Z');
+  const ZONES = ['UTC', 'America/New_York', 'Pacific/Kiritimati', 'Australia/Lord_Howe'];
+
+  function fixtureMeds(): MedEvent[] {
+    let seed = 12345;
+    const rand = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    const ids = ['nurtec', ...PAINKILLER_MED_IDS, 'emgality', 'custom'];
+    const meds: MedEvent[] = [];
+    for (let i = 0; i < 200; i++) {
+      const id = ids[Math.floor(rand() * ids.length)];
+      if (i % 37 === 0) {
+        meds.push(dose('not-a-date', id, `bad-${i}`));
+        continue;
+      }
+      // Spread across 100 days around now, including future instants.
+      const ts = new Date(now + Math.floor((rand() - 0.5) * 200 * DAY_MS)).toISOString();
+      meds.push(dose(ts, id, `m-${i}`));
+    }
+    return meds;
+  }
+
+  it('matches the array helpers across unsorted, dirty, future and duplicate data', () => {
+    const meds = fixtureMeds();
+    const index = buildMedIndex(meds);
+
+    for (const timeZone of ZONES) {
+      for (const windowDays of [0, 1, 30, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, windowDays, now, timeZone))
+          .toBe(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, windowDays, now, timeZone));
+        expect(usageDaysInWindowFromIndex(index, 'nurtec', windowDays, now, timeZone))
+          .toBe(usageDaysInWindow(meds, 'nurtec', windowDays, now, timeZone));
+        expect(painkillerBreakdownFromIndex(index, windowDays, now, timeZone))
+          .toEqual(painkillerBreakdown(meds, windowDays, now, timeZone));
+      }
+
+      expect(daysSinceLastFromIndex(index, 'nurtec', now, timeZone))
+        .toBe(daysSinceLast(meds, 'nurtec', now, timeZone));
+      expect(daysSinceLastFromIndex(index, 'custom', now, timeZone))
+        .toBe(daysSinceLast(meds, 'custom', now, timeZone));
+    }
+  });
+
+  it('keeps one index valid across timezone changes', () => {
+    const meds = [
+      dose('2026-05-31T00:30:00.000Z', 'tylenol', 't1'),
+      dose('2026-05-31T12:30:00.000Z', 'ibuprofen', 'i1'),
+    ];
+    const index = buildMedIndex(meds);
+    const at = Date.parse('2026-06-01T00:00:00.000Z');
+
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati'))
+      .toBe(2);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'UTC'))
+      .toBe(1);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati'))
+      .toBe(2);
+  });
+
+  it('preserves the inclusive cutoff and duplicate-dose counts', () => {
+    const meds = [
+      dose(new Date(now - 2 * DAY_MS).toISOString(), 'tylenol', 'cutoff'),
+      dose(new Date(now - 2 * DAY_MS - 1).toISOString(), 'tylenol', 'before'),
+      dose(new Date(now - 2 * DAY_MS).toISOString(), 'tylenol', 'dupe'),
+    ];
+    const index = buildMedIndex(meds);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(1);
+    expect(painkillerBreakdownFromIndex(index, 2, now, 'UTC')).toEqual([
+      { medId: 'tylenol', days: 1, doses: 2 },
+    ]);
   });
 });
 

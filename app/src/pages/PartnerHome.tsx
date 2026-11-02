@@ -2,8 +2,11 @@ import { useMemo } from 'react';
 import { Activity, Clock, Dumbbell, Package, Pill } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { useNow } from '@/lib/clock';
-import { NURTEC_DEFAULT_RULE, resolveRule, usageDaysInWindow } from '@/lib/usage';
-import { nurtecInventory } from '@/lib/inventory';
+import {
+  NURTEC_DEFAULT_RULE, resolveRule, usageDaysInWindowFromIndex,
+} from '@/lib/usage';
+import { buildMedIndex } from '@/lib/medIndex';
+import { useNurtecInventory } from '@/lib/use-nurtec-inventory';
 import { medColor, medName, painColor } from '@/lib/meds';
 import { fmtDateFull, fmtDuration, fmtTime } from '@/lib/format';
 import { localDayKey } from '../../shared/datetime.ts';
@@ -121,12 +124,13 @@ export default function PartnerHome() {
     [state.attacks],
   );
 
-  const nurtecStock = nurtecInventory(state, now);
+  const nurtecStock = useNurtecInventory(state, now);
   // Same resolved rule the writer's Home and the Calendar use: a partial or
   // malformed imported rule falls back per field instead of printing NaN.
+  const medIndex = useMemo(() => buildMedIndex(state.meds), [state.meds]);
   const nurtecRule = resolveRule(state.rules.nurtec, NURTEC_DEFAULT_RULE);
-  const nurtecUse = usageDaysInWindow(
-    state.meds, 'nurtec', nurtecRule.windowDays, now, state.timezone,
+  const nurtecUse = usageDaysInWindowFromIndex(
+    medIndex, 'nurtec', nurtecRule.windowDays, now, state.timezone,
   );
 
   const startMs = activeAttack ? Date.parse(activeAttack.start) : Number.NaN;

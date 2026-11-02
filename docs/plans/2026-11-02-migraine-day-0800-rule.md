@@ -50,26 +50,36 @@ predicate. `attackDayKeys` returns the attributed days:
 
 `attackDayKeysInMonth` remains a pass-through filter over those keys.
 
-### Performance fast path
+### Performance: steady-state ticks are history-independent
 
-`attackCountsAsAttackDay` is called by Home/PartnerHome for every attack on
-every 15s clock tick. Resolving two 08:00 boundaries with `zonedDateTimeToMs`
-for attacks years away was expensive on clear days (no matching attack, so
-`some()` scans all history): measured on Node 24 desktop for 500/2,000/5,000/
-10,000 attacks, **24.5 / 96 / 243 / 474 ms per tick** before the fix
-(`parseAttackTimes` itself is only 0.25 / 0.94 / 2.34 / 4.61 ms).
+Two layers keep the 15s Home/PartnerHome tick cheap.
 
-The predicate now first checks an Intl-free conservative UTC window
-`[UTC midnight - 24h, UTC midnight + 72h]`. Real IANA offsets are within
--12h..+14h (historical LMT within ±16h), so the true local 08:00-to-08:00
-window is contained; a miss cannot be a false negative, and every coarse hit
-still runs the exact `zonedDateTimeToMs` check. The year-9999 fail-open is
-checked before the fast path, so that documented behavior is unchanged.
-Measured after: **0.2 / 0.6 / 1.4 / 2.9 ms per tick** (plus parsing).
+**1. Intl-free coarse filter inside the predicate.** `attackCountsAsAttackDay`
+first checks a conservative UTC window `[UTC midnight - 24h, UTC midnight + 72h]`.
+Real IANA offsets are within -12h..+14h (historical LMT within ±16h), so the
+true local 08:00-to-08:00 window is contained; a miss cannot be a false
+negative, and every coarse hit still runs the exact `zonedDateTimeToMs` check.
+The year-9999 fail-open is checked before the fast path. This alone cut a
+full-history clear-day scan from **24.5 / 96 / 243 / 474 ms** to
+**0.2 / 0.6 / 1.4 / 2.9 ms** for 500 / 2,000 / 5,000 / 10,000 attacks on
+Node 24 desktop, and is pinned by a `formatToParts` zero-call test.
 
-A deterministic unit test spies on `Intl.DateTimeFormat.prototype.formatToParts`
-and asserts zero calls for a far-away attack, so the fast path is pinned without
-a timing-sensitive CI assertion.
+**2. Finished-history indexes in the pages.**
+`useTodayAttackFacts` + `buildAttackIndex` parse finished attacks once per data
+change and evaluate their day/overlap facts once per local day; only
+`end === null` attacks are re-evaluated per tick. A `buildMedIndex` per
+`state.meds` makes rolling usage/painkiller/hint queries touch only the
+in-window instant tail, and `useNurtecInventory` memoizes the Nurtec-only
+filtered parts while `shared/inventory.ts` revalidates source strings/timezone
+on its instant caches. On Node 24 desktop with 10,000 attacks the measured
+steady-state tick drops to **~0.005 ms** (finished build ~5 ms once on
+mount/data change); with 10,000 meds the uncached ~2.9 ms rolling scans become
+index queries over the window tail plus Nurtec-sized stock arithmetic.
+
+Deterministic tests pin this without timing thresholds: `Date.parse` is not
+called on a Home/PartnerHome tick for finished attacks, the med-index variants
+are differentially tested against the originals, and inventory caches are
+tested for in-place mutation and timezone revalidation.
 
 ## Consumers
 

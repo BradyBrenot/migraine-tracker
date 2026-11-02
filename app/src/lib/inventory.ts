@@ -22,24 +22,25 @@ export function parseTabletQuantity(raw: string): { valid: boolean; quantity: nu
   return { valid: true, quantity: value };
 }
 
+export type NurtecInventoryState = Pick<
+  TrackerState,
+  'stockBaselines' | 'meds' | 'refills' | 'timezone' | 'lowStockThreshold'
+>;
+
 /**
- * Optimistic Nurtec stock for display. Mirrors the server's scoping in
- * `GET /api/inventory/nurtec` (inventory is Nurtec-only today) and reuses the
- * same shared calculation, so the UI never invents a second interpretation.
- * The server count stays authoritative; this is only a local preview.
+ * Build the display inventory from parts ALREADY filtered to `nurtec`.
+ * Callers that render on a clock tick can memoize the filtering by data
+ * identity and only re-run the (Nurtec-sized) stock arithmetic per tick.
  */
-export function nurtecInventory(
-  state: Pick<
-    TrackerState,
-    'stockBaselines' | 'meds' | 'refills' | 'timezone' | 'lowStockThreshold'
-  >,
+export function nurtecInventoryFrom(
+  state: NurtecInventoryState,
   now: number,
 ): NurtecInventory {
   const stock = currentStock(
     {
-      baselines: state.stockBaselines.filter((b) => b.medId === 'nurtec'),
-      doses: state.meds.filter((m) => m.medId === 'nurtec'),
-      refills: state.refills.filter((r) => r.medId === 'nurtec'),
+      baselines: state.stockBaselines,
+      doses: state.meds,
+      refills: state.refills,
     },
     { now, timeZone: state.timezone },
   );
@@ -48,4 +49,23 @@ export function nurtecInventory(
     quantity: stock.quantity,
     level: classifyStock(stock.quantity, state.lowStockThreshold),
   };
+}
+
+/**
+ * Optimistic Nurtec stock for display. Mirrors the server's scoping in
+ * `GET /api/inventory/nurtec` (inventory is Nurtec-only today) and reuses the
+ * same shared calculation, so the UI never invents a second interpretation.
+ * The server count stays authoritative; this is only a local preview.
+ */
+export function nurtecInventory(
+  state: NurtecInventoryState,
+  now: number,
+): NurtecInventory {
+  return nurtecInventoryFrom({
+    stockBaselines: state.stockBaselines.filter((b) => b.medId === 'nurtec'),
+    meds: state.meds.filter((m) => m.medId === 'nurtec'),
+    refills: state.refills.filter((r) => r.medId === 'nurtec'),
+    timezone: state.timezone,
+    lowStockThreshold: state.lowStockThreshold,
+  }, now);
 }

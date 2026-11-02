@@ -1,5 +1,6 @@
 import type { MedEvent, MedRule, TrackerState } from '@/types';
 import { diffDayKeys, localDayKey } from '../../shared/datetime.ts';
+import { lowerBound, type MedIndex } from './medIndex.ts';
 
 /** A usable day limit/window pair (both fields valid). */
 export interface UsageRule {
@@ -217,11 +218,89 @@ export function daysSinceLast(
   // Legacy/imported rows may carry an unparseable ts (server validation only
   // requires a string). Ignore those rather than letting an invalid Date throw
   // inside Intl; a med with no usable dose is treated as never logged.
+  // `Date.parse` (not `new Date().getTime()`) keeps this aligned with
+  // `buildMedIndex` for dirty non-string values too.
   const times = meds
     .filter((m) => m.medId === medId)
-    .map((m) => new Date(m.ts).getTime())
+    .map((m) => Date.parse(m.ts))
     .filter(Number.isFinite);
   if (!times.length) return null;
   const latest = Math.max(...times);
+  return diffDayKeys(localDayKey(now, timeZone), localDayKey(latest, timeZone));
+}
+
+/**
+ * Index-backed equivalents of the rolling-window helpers. They produce the
+ * same results for the string `ts` values the app stores, but each query only
+ * touches the instants at/after the window cutoff instead of scanning all
+ * medication history. Day bucketing still uses the current `timeZone`.
+ */
+export function latestMedInstant(index: MedIndex, medId: string): number | null {
+  return index.byId.get(medId)?.latestMs ?? null;
+}
+
+export function usageDaysInWindowFromIndex(
+  index: MedIndex,
+  medId: string,
+  windowDays: number,
+  now: number,
+  timeZone?: string,
+): number {
+  return medUnionDaysInWindowFromIndex(index, [medId], windowDays, now, timeZone);
+}
+
+export function medUnionDaysInWindowFromIndex(
+  index: MedIndex,
+  medIds: readonly string[],
+  windowDays: number,
+  now: number,
+  timeZone?: string,
+): number {
+  if (!Number.isFinite(windowDays) || windowDays <= 0) return 0;
+  const ids = new Set(medIds);
+  if (ids.size === 0) return 0;
+  const cutoff = now - windowDays * 86400000;
+  const days = new Set<string>();
+  for (const id of ids) {
+    const entry = index.byId.get(id);
+    if (!entry) continue;
+    for (let i = lowerBound(entry.instantsAsc, cutoff); i < entry.instantsAsc.length; i++) {
+      days.add(localDayKey(entry.instantsAsc[i], timeZone));
+    }
+  }
+  return days.size;
+}
+
+export function painkillerBreakdownFromIndex(
+  index: MedIndex,
+  windowDays: number,
+  now: number,
+  timeZone?: string,
+): PainkillerBreakdownEntry[] {
+  if (!Number.isFinite(windowDays) || windowDays <= 0) return [];
+  const cutoff = now - windowDays * 86400000;
+  const entries: PainkillerBreakdownEntry[] = [];
+  for (const medId of PAINKILLER_MED_IDS) {
+    const entry = index.byId.get(medId);
+    if (!entry) continue;
+    const days = new Set<string>();
+    let doses = 0;
+    for (let i = lowerBound(entry.instantsAsc, cutoff); i < entry.instantsAsc.length; i++) {
+      days.add(localDayKey(entry.instantsAsc[i], timeZone));
+      doses++;
+    }
+    if (doses > 0) entries.push({ medId, days: days.size, doses });
+  }
+  return entries;
+}
+
+export function daysSinceLastFromIndex(
+  index: MedIndex,
+  medId: string,
+  now: number,
+  timeZone?: string,
+): number | null {
+  const latest = latestMedInstant(index, medId);
+  if (latest === null) return null;
   return diffDayKeys(localDayKey(now, timeZone), localDayKey(latest, timeZone));
 }

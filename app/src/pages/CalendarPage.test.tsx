@@ -475,8 +475,11 @@ describe('CalendarPage ongoing attacks', () => {
 
   it('shows an em dash, not negative elapsed, for an ongoing attack with a future start', async () => {
     const now = Date.now();
-    const startMs = now + 3 * 86400000;
-    const startDay = localDayKey(startMs, TZ);
+    // Anchor the future start at 14:00 local so the selected day always counts
+    // as an attack day; the day-state cell then shows "Off (from attacks)" and
+    // the only em dash in the sheet is the attack duration.
+    const startDay = localDayKey(now + 3 * 86400000, TZ);
+    const startMs = zonedDateTimeToMs(startDay, '14:00', TZ);
     seedState({
       timezone: TZ,
       attacks: [makeTimedAttack('future-ongoing', startMs, null)],

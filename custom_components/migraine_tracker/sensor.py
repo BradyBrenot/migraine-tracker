@@ -2,8 +2,10 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,6 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from . import MigraineTrackerConfigEntry
 from .const import (
+    ATTR_ACTIVE_ATTACK,
     ATTR_HISTORY,
     ATTR_INVENTORY,
     ATTR_LAST_ATTACK,
@@ -33,6 +36,13 @@ from .coordinator import (
 
 PARALLEL_UPDATES = 0
 
+# Top-level apiVersion 1 field; the integration's const module has no constant
+# for it because no other platform reads it.
+_ATTR_TODAY = "today"
+
+# Defensive fallback when the document omits or invalidates ``timeZone``.
+_DEFAULT_TIME_ZONE = ZoneInfo("UTC")
+
 
 def _as_int(value: Any) -> int | None:
     """Return an integer value, or None for anything else."""
@@ -44,6 +54,121 @@ def _as_int(value: Any) -> int | None:
 def _history(data: StatusData) -> dict[str, Any]:
     """Return the history section of a status document."""
     return as_dict(data.get(ATTR_HISTORY))
+
+
+def _load_zone(name: str) -> ZoneInfo | None:
+    """Return a ``ZoneInfo`` for an exact name, or None when unavailable."""
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return None
+    except ValueError:
+        return None
+    except OSError:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _canonical_zone_names() -> dict[str, str]:
+    """Return lowercase IANA name -> canonical name, built once per process.
+
+    The tracker derives ``timeZone`` from ``Intl.DateTimeFormat``, which accepts
+    names such as ``america/new_york``; ``zoneinfo`` lookups are case-sensitive.
+    The map is cached so a state update never rescans the filesystem.
+    """
+    try:
+        names = available_timezones()
+    except OSError:
+        return {}
+    return {name.lower(): name for name in names}
+
+
+def _zone(data: StatusData) -> ZoneInfo:
+    """Return the tracker time zone, falling back to UTC.
+
+    Resolution order: the exact document name (preserving aliases and the case
+    as given), a case-insensitive match against the platform's canonical IANA
+    names, then UTC.
+    """
+    name = data.get("timeZone")
+    if not isinstance(name, str) or not name:
+        return _DEFAULT_TIME_ZONE
+    zone = _load_zone(name)
+    if zone is not None:
+        return zone
+    canonical = _canonical_zone_names().get(name.lower())
+    if canonical is not None:
+        zone = _load_zone(canonical)
+        if zone is not None:
+            return zone
+    return _DEFAULT_TIME_ZONE
+
+
+def _today_date(data: StatusData) -> date | None:
+    """Return the document's ``today.day`` as a date."""
+    day = as_dict(data.get(_ATTR_TODAY)).get("day")
+    if not isinstance(day, str) or not day:
+        return None
+    try:
+        return date.fromisoformat(day)
+    except ValueError:
+        return None
+
+
+def _parse_attack_end(data: StatusData) -> datetime | None:
+    """Return ``lastAttack.end`` as a timezone-aware datetime, or None."""
+    end = as_dict(data.get(ATTR_LAST_ATTACK)).get("end")
+    if not isinstance(end, str) or not end:
+        return None
+    try:
+        parsed = dt_util.parse_datetime(end)
+    except ValueError:
+        return None
+    except OverflowError:
+        return None
+    except OSError:
+        return None
+    if parsed is None or parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _local_date(value: datetime, zone: ZoneInfo) -> date | None:
+    """Return ``value``'s date in ``zone``, or None when unrepresentable.
+
+    Converting an instant at the edges of the datetime domain (year 1 or 9999)
+    to a zone with a nonzero offset can overflow; that must never escape into
+    the entity state property.
+    """
+    try:
+        return value.astimezone(zone).date()
+    except ValueError:
+        return None
+    except OverflowError:
+        return None
+    except OSError:
+        return None
+
+
+def _last_attack_end_date(data: StatusData) -> date | None:
+    """Return the local date ``lastAttack.end`` falls on, in the tracker zone."""
+    parsed = _parse_attack_end(data)
+    if parsed is None:
+        return None
+    return _local_date(parsed, _zone(data))
+
+
+def _days_since_last_attack(data: StatusData) -> int | None:
+    """Return 0 while an attack is active, else calendar days since the last attack ended (tracker time zone)."""
+    # The active attack short-circuits before any date or zone work, so a
+    # running attack reports 0 even when the end or today fields are unusable.
+    if data.get(ATTR_ACTIVE_ATTACK) is not None:
+        return 0
+    today = _today_date(data)
+    end = _last_attack_end_date(data)
+    if today is None or end is None:
+        return None
+    return max((today - end).days, 0)
 
 
 def _nurtec(data: StatusData) -> dict[str, Any]:
@@ -86,7 +211,7 @@ SENSOR_DESCRIPTIONS: tuple[MigraineTrackerSensorEntityDescription, ...] = (
     MigraineTrackerSensorEntityDescription(
         key="days_since_last_attack",
         translation_key="days_since_last_attack",
-        value_fn=lambda data: _as_int(_history(data).get("daysSinceLastAttackStart")),
+        value_fn=_days_since_last_attack,
     ),
     MigraineTrackerSensorEntityDescription(
         key="attack_days_last_7_days",
@@ -139,6 +264,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Migraine Tracker sensors."""
     coordinator = entry.runtime_data
+    # ``available_timezones()`` scans the filesystem; do the one-time build in an
+    # executor so a case-variant zone name can never trigger it on the event loop.
+    await hass.async_add_executor_job(_canonical_zone_names)
     async_add_entities(
         MigraineTrackerSensor(coordinator, entry, description)
         for description in SENSOR_DESCRIPTIONS

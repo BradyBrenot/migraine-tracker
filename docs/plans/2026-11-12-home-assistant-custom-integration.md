@@ -399,7 +399,7 @@ notes record implementation state, not a publication claim.
   (`probatio.compat.install_as_voluptuous`), so the config flow imports
   `voluptuous` *after* homeassistant — valid on both the declared 2025.8 floor
   and the tested 2026.10 — instead of importing probatio directly.
-- **Tests** (`tests/homeassistant/`): 205 tests, all passing, covering all 11
+- **Tests** (`tests/homeassistant/`): 224 tests, all passing, covering all 11
   categories of the test definition of done. Read-only coverage is layered: root
   `conftest.py` declares `pytest_plugins` so the bare `python -m pytest -q`
   collects the suite from the repository root; an autouse guard in
@@ -409,7 +409,9 @@ notes record implementation state, not a publication claim.
 - **Final-review corrections applied in this pass:** root conftest/bare
   `python -m pytest -q`; `aioresponses` removed from
   `requirements-homeassistant-dev.txt`; entity display names shortened to
-  Status, Active attack, Last attack started, Days since last attack, Attack
+  Status, Active attack, Last attack started, Days since last attack ended
+  (renamed from "Days since last attack" in the end-based follow-up below),
+  Attack
   days last 7/30 days, Attacks started last 30 days, Attack event (Nurtec names
   unchanged); `apiVersion` must be the exact JSON integer `1` (`true`, `1.0`,
   `"1"`, and missing are rejected); new `invalid_authorization` validation and
@@ -427,7 +429,7 @@ notes record implementation state, not a publication claim.
   without logging the value; and new tests cover same-normalized-URL
   reconfigure, unknown additive fields, and the A-ends/B-starts-between-polls
   limitation (only `attack_started` for B).
-- **Verification run by the Feature Lead on the final tree:** pytest 205 passed;
+- **Verification run by the Feature Lead on the final tree:** pytest 224 passed;
   ruff check + format --check clean; compileall clean; manifest/strings/
   translations/hacs JSON parse clean; hassfest green via the official
   digest-pinned container (`ghcr.io/home-assistant/hassfest`, `Integrations: 1,
@@ -454,3 +456,162 @@ notes record implementation state, not a publication claim.
   AGENTS.md Python workflow added, including the version gap and limitations
   (null-start end suppression, multiple ongoing attacks, in-one-interval misses,
   `status_changed` display-state semantics, recorder sensitivity).
+
+## Follow-up (2026-11-12): end-based days-since sensor
+
+Two iterations were required. The first one (below, superseded) reported `0`
+while an attack was active and otherwise passed through the API's start-based
+`history.daysSinceLastAttackStart`. The user rejected start-based semantics
+entirely: the entity must report days since the last attack **ended**.
+
+Final decision: `sensor.migraine_tracker_days_since_last_attack` is `0`
+whenever `activeAttack` is not null. Otherwise it is the whole calendar days
+between the tracker-local date of `lastAttack.end` and the document's
+`today.day`: `end` is parsed with `dt_util.parse_datetime`, must be
+timezone-aware, and is converted to the document's top-level `timeZone` (a
+`zoneinfo.ZoneInfo`), which is resolved by exact IANA name first (preserving
+aliases and the case as given), then case-insensitively against the platform's
+canonical IANA names (so `america/new_york` resolves), then the documented
+`UTC` fallback for a missing or invalid id; the one-time lowercase→canonical
+map is warmed with `hass.async_add_executor_job` during sensor platform setup,
+so the `available_timezones()` filesystem scan never runs on the event loop;
+`today.day` is parsed with `datetime.date.fromisoformat` and never read from
+Home Assistant's local clock; the difference is clamped to `>= 0`. It is
+`None` (`unknown`) when `lastAttack` is absent, when `end` is null/empty/
+unparseable, when the parsed `end` is timezone-naive, when `today.day` is
+missing/unparseable, or when the local zone cannot represent the end instant
+at the datetime-domain edges (extreme years). There is **no** fallback to
+`lastAttack.start` and **no**
+fallback to `history.daysSinceLastAttackStart`; that field keeps its start-based
+API meaning and is not read by the integration. Presentation-only: the API
+document, `coordinator.data`, and every other entity are unchanged.
+
+The display name is now **Days since last attack ended**, in both `strings.json`
+and `translations/en.json`. The translation key and unique-ID suffix stay
+`days_since_last_attack` (`f"{entry.entry_id}_{key}"`), so an existing install
+keeps its entity, its `sensor.migraine_tracker_days_since_last_attack` entity ID,
+and its recorder history; a fresh install derives
+`sensor.migraine_tracker_days_since_last_attack_ended` from the new name. The
+manifest stays `0.1.1` (the `0.1.0` → `0.1.1` bump is part of this follow-up).
+
+Tests added to `tests/homeassistant/test_sensor.py` (the existing
+`test_active_attack_reports_zero_days_since_last_attack` is kept and still shows
+the API field remaining `1`):
+
+- `test_finished_attack_uses_end_date_not_start_date` — start and end on
+  different local dates with `daysSinceLastAttackStart: 3`; expects `1` from the
+  end date.
+- `test_days_since_last_attack_uses_the_tracker_time_zone` — end
+  `2026-11-10T02:00:00.000Z` in `America/New_York` is local 2026-11-09; expects
+  `2`, where a naive UTC date diff would give `1`.
+- `test_null_attack_end_is_unknown_not_history` — `end: null` with a populated
+  history count; expects `None`/`unknown`.
+- `test_unparseable_attack_end_is_unknown` — `end: "not-a-date"` with a
+  populated history count; expects `None`/`unknown`.
+- `test_missing_last_attack_is_unknown_not_history` — `lastAttack: null` with
+  `daysSinceLastAttackStart: 2`; expects `None`/`unknown`.
+- `test_attack_end_after_today_clamps_to_zero` — end local date after
+  `today.day`; expects `0`.
+
+`tests/homeassistant/test_entity_metadata.py` now expects
+`("Days since last attack ended",
+"sensor.migraine_tracker_days_since_last_attack_ended")` for the fresh-setup
+name/entity-id pair, with a comment that the registry key is unchanged.
+
+Verified in the `migraine-ha-test:local` Linux image from the repository root:
+`python -m pytest -q` → 224 passed (sensor file 33, entity metadata 6); the
+focused sensor + entity-metadata run → 39 passed; `ruff check` and
+`ruff format --check` clean; `compileall` clean; manifest/strings/translations/
+hacs JSON validation ok.
+
+Superseded first iteration: it added only `activeAttack` → `0` on top of
+`history.daysSinceLastAttackStart` (pytest 206 passed, sensor file 16).
+
+### Reviewer corrections (2026-11-12)
+
+Review of the end-based follow-up required four corrections, all in
+`custom_components/migraine_tracker/sensor.py` plus its tests and docs:
+
+- **Exception-safe end parsing and representation.** The entity state property
+  must never raise, or HA drops the state write. `lastAttack.end` parsing now
+  treats `dt_util.parse_datetime` raising `ValueError`/`OverflowError`/
+  `OSError`, an empty or unparseable value, and a
+  conversion whose local date falls outside the datetime domain (year 1 or
+  9999 with a nonzero zone offset) all as "no usable end" → `None` →
+  `unknown`. The `activeAttack` short-circuit is still the first branch of the
+  value function, before any date or zone work. A timezone-naive parsed end
+  remains `None`. Tuple-form `except` clauses are deliberately avoided: `ruff
+  format` with `target-version = "py314"` rewrites them to PEP 758 syntax,
+  which is a `SyntaxError` on the declared Python 3.13 HA floor; the code uses
+  single-type handlers in small helpers instead.
+- **Case-insensitive IANA zone resolution.** The tracker derives `timeZone`
+  from `Intl.DateTimeFormat`, which accepts names such as `america/new_york`,
+  while `zoneinfo.ZoneInfo` is case-sensitive. `_zone` now resolves the exact
+  name first (preserving aliases and the case as given), then a
+  case-insensitive match against the platform's canonical IANA names, then the
+  documented UTC fallback. The lowercase→canonical map is built once per
+  process by a module-level `functools.lru_cache(maxsize=1)` function over
+  `zoneinfo.available_timezones()`, so state updates never rebuild the map or
+  rescan the filesystem; an `OSError` from `available_timezones()` degrades to
+  an empty map (UTC). `ZoneInfo(...)` itself is guarded for
+  `ZoneInfoNotFoundError`, `ValueError`, and defensively `OSError`.
+- **Tests.** `tests/homeassistant/test_sensor.py` adds
+  `test_lowercase_time_zone_name_resolves_to_the_canonical_zone` (lowercase
+  zone → `2`, where UTC would give `1`);
+  `test_extreme_attack_end_is_unknown` (parametrized: year 9999 in
+  `Pacific/Kiritimati` and year 1 in `America/New_York` → `None`/`unknown`);
+  `test_timezone_naive_attack_end_is_unknown`;
+  `test_missing_or_malformed_today_day_is_unknown` (parametrized: no `today`
+  section, `"day": null`, `"day": "not-a-date"`);
+  `test_missing_or_invalid_time_zone_falls_back_to_utc` (parametrized: missing
+  `timeZone`, `Not/AZone` → `1`); and
+  `test_active_attack_wins_over_unusable_date_fields` (`activeAttack` with
+  `today: null`, an invalid zone, and an unparseable end → `0`).
+  `tests/homeassistant/test_entity_metadata.py` adds
+  `test_existing_entity_keeps_its_id_after_the_display_name_change`, which
+  pre-creates the registry row with the old
+  `sensor.migraine_tracker_days_since_last_attack` entity id, sets the entry
+  up, and asserts that one row for the unique id survives on that id with the
+  new friendly name and value `2`, with no
+  `..._days_since_last_attack_ended` entity or state. The active-attack test
+  docstring was rewritten to describe the fixture's start-based
+  `daysSinceLastAttackStart: 1` generically instead of claiming a
+  08:00-boundary story the timestamps do not support.
+- **Docs.** `docs/home-assistant.md` records the `0.1.1` recorder step change
+  (pre-`0.1.1` samples used the start-based `history.daysSinceLastAttackStart`)
+  and the case-insensitive zone / unrepresentable-end rules. Earlier sections
+  of this plan that still said "Days since last attack" are corrected/marked
+  superseded.
+
+**Final non-blocking pass (2026-11-12).** `async_setup_entry` now warms the
+cached lowercase→canonical zone map with `hass.async_add_executor_job` before
+adding entities, so a case-variant zone name can never trigger the
+`available_timezones()` filesystem scan on the event loop; the cache, the
+signature, and `_zone`'s exact-then-case-insensitive-then-UTC order are
+unchanged. `test_unparseable_attack_end_is_unknown` is parametrized over
+`not-a-date` (parsing returns `None`) and `2026-02-30T00:00:00.000Z` (parsing
+raises `ValueError`, guarded to `None`), both asserting `None`/`unknown`. The
+suite is 224 tests, sensor file 33.
+
+Verification on the final tree, from the repository root unless noted, in the
+`migraine-ha-test:local` image (pytest does not run on native Windows):
+
+```sh
+docker run --rm -v "D:/ai/projects/migraine-tracker:/src" -w /src migraine-ha-test:local python -m pytest -q
+# 224 passed
+docker run --rm -v "D:/ai/projects/migraine-tracker:/src" -w /src migraine-ha-test:local python -m pytest tests/homeassistant/test_sensor.py tests/homeassistant/test_entity_metadata.py -q
+# 39 passed
+docker run --rm -v "D:/ai/projects/migraine-tracker:/src" -w /src migraine-ha-test:local python -m ruff check custom_components/migraine_tracker tests/homeassistant conftest.py
+docker run --rm -v "D:/ai/projects/migraine-tracker:/src" -w /src migraine-ha-test:local python -m ruff format --check custom_components/migraine_tracker tests/homeassistant conftest.py
+docker run --rm -v "D:/ai/projects/migraine-tracker:/src" -w /src migraine-ha-test:local python -m compileall -q custom_components/migraine_tracker
+docker run --rm -v "D:/ai/projects/migraine-tracker:/github/workspace" ghcr.io/home-assistant/hassfest@sha256:da6522993280166fe072704989a2b4c33e639e8ceb69c8ab6ad7ec5045c1a1e3
+# Integrations: 1 / Invalid integrations: 0
+```
+
+Pytest total 224 (config flow 67, coordinator 54, events 18, sensors 33,
+options 16, binary sensors 9, reconfigure 7, init/setup 6, diagnostics 5,
+entity metadata 6, forward compatibility 2, smoke 1). `ruff check` and
+`ruff format --check` report clean; `compileall` is silent; the
+manifest/strings/translations/hacs JSON validation prints `json ok`; hassfest
+reports `Integrations: 1` and `Invalid integrations: 0`; `git diff --check`
+is clean and `git status --short` lists only the eight allowed paths.

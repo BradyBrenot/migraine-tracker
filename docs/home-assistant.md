@@ -131,6 +131,21 @@ always means `status: null`.
 | `attackDaysLast7Days` | integer | Distinct local days in `today-6..today` where an attack overlaps that day's 08:00-to-08:00 window. |
 | `attackDaysLast30Days` | integer | Same over `today-29..today`. |
 
+`daysSinceLastAttackStart` keeps its start-based API meaning. The integration's
+`sensor.migraine_tracker_days_since_last_attack` (display name **Days since
+last attack ended**) does not use it. The sensor is a presentation rule built
+from `lastAttack.end`: it is `0` while `activeAttack` is not null, and
+otherwise the whole calendar days between the local date of `lastAttack.end`
+(the end instant converted to the document's top-level `timeZone`) and
+`today.day`, clamped to `>= 0`. The `timeZone` name is matched
+case-insensitively against the platform's canonical IANA names (exact name
+first, then the canonical spelling, then UTC), so a producer name such as
+`america/new_york` still dates the end locally rather than in UTC. It is `None`
+→ `unknown` when there is no attack, no end, an unparseable end, a
+timezone-naive end, an end instant the local zone cannot represent (an extreme
+year at the edge of the datetime domain), or no parseable `today.day`. It never
+falls back to `lastAttack.start` or to `history.daysSinceLastAttackStart`.
+
 `attacksStartedLast30Days` is start-day anchored; it intentionally differs from
 the app's Reports "attacks" count, which counts any attack overlapping the
 period. Attack-day counts use attack records only — an explicit `attack` day
@@ -455,6 +470,11 @@ Why the availability guards:
   numeric-ish, so their state templates always render a number and availability
   is reported separately. Never expose the inventory `status`/`level` strings as
   entity states; `unknown` is a reserved Home Assistant state.
+- The `Migraine days since last attack` template reports the start-based API
+  field (`history.daysSinceLastAttackStart`); Path A does not implement the
+  integration's end-based rule. To match it, compute the days yourself from
+  `lastAttack.end` converted to the document's `timeZone`, report `0` while
+  `activeAttack` is not null, and clamp the result to `>= 0`.
 - `activeAttack` is the activeness signal. Do not derive it from
   `state == 'attack'` (a legacy day record can produce that with no attack).
 
@@ -625,7 +645,7 @@ pinned by the test plugin); the live instance is 2026.11.1. See
   "issue_tracker": "https://github.com/BradyBrenot/migraine-tracker/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
 ```
 
@@ -766,7 +786,7 @@ Home Assistant combines the translated entity name below with the device name
 | `binary_sensor` | `nurtec_negative` | Nurtec stock negative | `inventory.nurtec.negative`; no device class |
 | `sensor` | `status` | Status | enum with options exactly `attack`, `off`, `well`, `no_data`; state names translated |
 | `sensor` | `last_attack_started` | Last attack started | timestamp; timezone-aware datetime from `lastAttack.start`, `None` when absent or unparseable |
-| `sensor` | `days_since_last_attack` | Days since last attack | integer or `None` |
+| `sensor` | `days_since_last_attack` | Days since last attack ended | `0` while `activeAttack is not None`; otherwise whole calendar days from the local `lastAttack.end` date (document `timeZone`, matched case-insensitively) to `today.day`, clamped `>= 0`; `None` → `unknown` also for an unparseable, naive, or unrepresentable end; never start-based or history-based |
 | `sensor` | `attack_days_last_7_days` | Attack days last 7 days | integer count |
 | `sensor` | `attack_days_last_30_days` | Attack days last 30 days | integer count |
 | `sensor` | `attacks_started_last_30_days` | Attacks started last 30 days | start-day anchored count |
@@ -781,15 +801,22 @@ Entity details:
 
 - Unique IDs are `f"{entry.entry_id}_{key}"`, so a reconfigure cannot change
   them; `entry.entry_id` is also the device identifier.
+- The `days_since_last_attack` key remains the unique-ID suffix and translation
+  key after its display name changed to **Days since last attack ended**, so an
+  existing install keeps its entity, its
+  `sensor.migraine_tracker_days_since_last_attack` entity ID, and its recorder
+  history. A fresh install derives
+  `sensor.migraine_tracker_days_since_last_attack_ended` from the new name;
+  rename it in the UI if you want the shorter old ID.
 - The device is one `DeviceInfo` with `name="Migraine Tracker"`,
   `manufacturer="migraine-tracker"`, and `configuration_url` set to the current
   base URL.
 - All value entities are populated from the first refresh before the platforms
   are forwarded, so setup never exposes a transient `unknown`. A sensor whose
   value is legitimately `None` (for example days since last attack with no
-  history) reports `unknown`, which is its real value, not a loading state. The
-  event entity is the exception: it starts `unknown` and stays there until its
-  first event.
+  attack end) reports `unknown`, which is its real value, not a loading state.
+  The event entity is the exception: it starts `unknown` and stays there until
+  its first event.
 - `available` follows `coordinator.last_update_success`: a failed poll makes
   every entity `unavailable` until the next success.
 - No entity sets `state_class`. That keeps attack counts, days since the last
@@ -885,9 +912,9 @@ the integration is not currently loaded, and the key set never changes.
 
 ### Testing
 
-The pytest suite is `tests/homeassistant/`: 205 tests (config flow 67,
-coordinator 54, events 18, sensors 15, options 16, binary sensors 9,
-reconfigure 7, init/setup 6, diagnostics 5, entity metadata 5, forward
+The pytest suite is `tests/homeassistant/`: 224 tests (config flow 67,
+coordinator 54, events 18, sensors 33, options 16, binary sensors 9,
+reconfigure 7, init/setup 6, diagnostics 5, entity metadata 6, forward
 compatibility 2, smoke 1). Read-only coverage is layered: an autouse fixture
 inspects the `aioclient_mock` calls of every test that uses that plugin
 fixture and fails on anything except `GET {base}/api/status`; tests that drive
@@ -1008,6 +1035,12 @@ automation:
 
   Excluding from the recorder also removes them from history and statistics;
   automations still work, they just lose the timeline.
+
+- Recorder samples for `sensor.migraine_tracker_days_since_last_attack` written
+  before integration version `0.1.1` used the start-based
+  `history.daysSinceLastAttackStart`, possibly with no special handling while an
+  attack was active. Expect a step change in that entity's recorder history at
+  the `0.1.1` upgrade, and do not compare samples across it.
 
 - `/api/status` is **server truth**, not the phone's live state. The writer
   keeps an optimistic localStorage cache, so it can be failed/unconfirmed or in

@@ -85,7 +85,7 @@
         "name": "Last attack started"
       },
       "days_since_last_attack": {
-        "name": "Days since last attack"
+        "name": "Days since last attack ended"
       },
       "attack_days_last_7_days": {
         "name": "Attack days last 7 days"

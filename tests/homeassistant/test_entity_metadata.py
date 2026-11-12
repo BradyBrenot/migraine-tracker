@@ -14,7 +14,13 @@ from custom_components.migraine_tracker.const import (
     DOMAIN,
 )
 
-from .helpers import ACTIVE_ATTACK, setup_mocked_entry
+from .helpers import (
+    ACTIVE_ATTACK,
+    FINISHED_WELL,
+    STATUS_URL,
+    make_entry,
+    setup_mocked_entry,
+)
 
 ENTITY_UNIQUE_ID_KEYS = {
     "sensor": {
@@ -33,6 +39,10 @@ ENTITY_UNIQUE_ID_KEYS = {
 # ``DeviceInfo.name`` is "Migraine Tracker", so each entity name is relative to
 # it: the friendly name is "Migraine Tracker <name>" and the entity id is the
 # slug of that whole name. The Nurtec names stay self-describing.
+#
+# The registry key stays ``days_since_last_attack`` (``entry.entry_id + key``)
+# while a fresh setup derives the entity id from the new "Days since last attack
+# ended" name; an existing install keeps its old entity id and history.
 ENTITY_DISPLAY_NAMES = {
     "sensor": {
         "status": ("Status", "sensor.migraine_tracker_status"),
@@ -41,8 +51,8 @@ ENTITY_DISPLAY_NAMES = {
             "sensor.migraine_tracker_last_attack_started",
         ),
         "days_since_last_attack": (
-            "Days since last attack",
-            "sensor.migraine_tracker_days_since_last_attack",
+            "Days since last attack ended",
+            "sensor.migraine_tracker_days_since_last_attack_ended",
         ),
         "attack_days_last_7_days": (
             "Attack days last 7 days",
@@ -209,3 +219,58 @@ async def test_entity_names_do_not_repeat_the_device_name(
             ]
             assert not translated.startswith("Migraine"), translated
             assert translated == name
+
+
+async def test_existing_entity_keeps_its_id_after_the_display_name_change(
+    hass, enable_custom_integrations, aioclient_mock
+) -> None:
+    """An upgraded install keeps its entity id and gains the end-based name."""
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    unique_id = f"{entry.entry_id}_days_since_last_attack"
+
+    # Simulate an entry created before the display-name change: the registry
+    # row already exists under the old entity id.
+    pre_existing = registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        unique_id,
+        config_entry=entry,
+        suggested_object_id="migraine_tracker_days_since_last_attack",
+    )
+    assert pre_existing.entity_id == "sensor.migraine_tracker_days_since_last_attack"
+
+    aioclient_mock.get(STATUS_URL, json=FINISHED_WELL)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Exactly one registry row for the key, still on the pre-existing id.
+    matches = [
+        item
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if item.unique_id == unique_id
+    ]
+    assert len(matches) == 1
+    assert matches[0].entity_id == "sensor.migraine_tracker_days_since_last_attack"
+    assert (
+        registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        == "sensor.migraine_tracker_days_since_last_attack"
+    )
+
+    state = hass.states.get("sensor.migraine_tracker_days_since_last_attack")
+    assert state is not None
+    assert (
+        state.attributes["friendly_name"]
+        == "Migraine Tracker Days since last attack ended"
+    )
+    # FINISHED_WELL ends 2026-11-09 in UTC with today.day 2026-11-11.
+    assert state.state == "2"
+
+    # The new name does not add a second entity under the derived id.
+    assert (
+        registry.async_get("sensor.migraine_tracker_days_since_last_attack_ended")
+        is None
+    )
+    ended = hass.states.get("sensor.migraine_tracker_days_since_last_attack_ended")
+    assert ended is None

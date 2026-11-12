@@ -52,6 +52,7 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 - Internal reminder occurrence/delivery state is excluded from `/api/export` and the nightly backup (and `/api/reset` clears it). ntfy URL/token/public-URL configuration stays server-only environment secrets — never persist, export, back up, or log it.
 - `app/shared/*.ts` is imported by both Vite and Node 24 native type-stripping, so only erasable TypeScript syntax is allowed (no enums, namespaces, or parameter properties); the Docker runtime image copies `shared/` for that reason.
 - Bulk `/api/import` is additive and uses `INSERT OR IGNORE`, not replace/upsert. `/api/reset` deletes all server records and settings.
+- `GET /api/status` is a read-only, versioned (`apiVersion: 1`) projection for Home Assistant, built by `app/shared/status.ts` from existing rows and the same shared rules (`shared/attackstats.ts` 08:00 attack days, `shared/daystate.ts` precedence, `shared/inventory.ts` stock): `state` (`attack`/`off`/`well`/`no_data`), `activeAttack`, `today`, `lastAttack`, `history`, and `inventory.nurtec` (both inventory routes share `computeNurtecStock` in `server/app.js`). It adds no schema, write path, setting, or auth/CORS behavior, is never cached (`Cache-Control: no-store`), and normalizes every instant; activeness is `activeAttack`, never `state == "attack"`. `docs/home-assistant.md` is the consumer handoff.
 
 ## Data safety and deployment
 

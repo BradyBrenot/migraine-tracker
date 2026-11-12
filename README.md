@@ -65,6 +65,15 @@ The main mode and partner view both support installing as an "app" on mobile. In
 
 Off by default, set up in Settings
 
+### Home Assistant
+
+`GET /api/status` exposes a versioned, read-only summary for Home Assistant:
+current attack, today's migraine day, history counts, and Nurtec stock, all
+computed with the same rules the app uses. See
+[docs/home-assistant.md](docs/home-assistant.md) for ready-to-paste YAML
+sensors, the existing ntfy attack-event path, and a custom-integration
+blueprint.
+
 ### Backups
 
 The database is backed up nightly to `data/backups/migraine-YYYY-MM-DD.json`, or can be manually exported from Settings. Can be imported in Settings.

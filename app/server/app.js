@@ -20,6 +20,7 @@ import { exportEnvelope, collectSettings } from './snapshot.js';
 import { parseBackup } from '../shared/backup.ts';
 import { currentStock, classifyStock, DEFAULT_LOW_STOCK_THRESHOLD } from '../shared/inventory.ts';
 import { isValidTimeZone } from '../shared/datetime.ts';
+import { buildStatus } from '../shared/status.ts';
 import { normalizeReminderSettings, reminderSettingsErrors } from '../shared/reminders.ts';
 import {
   emptyWeatherStatus, normalizeGeocodeQuery, normalizeWeatherSettings,
@@ -363,8 +364,11 @@ export async function buildApp({
       : DEFAULT_LOW_STOCK_THRESHOLD;
   }
 
-  app.get('/api/inventory/nurtec', () => {
-    const nowMs = Date.now();
+  // One computation shared by GET /api/inventory/nurtec and GET /api/status so
+  // the two documents can never disagree about stock. `nowMs` is supplied by
+  // the caller (one captured clock read per request).
+  function computeNurtecStock(db, nowMs) {
+    const timeZone = inventoryTimeZone();
     const baselines = db.prepare(
       "SELECT * FROM stock_baselines WHERE med_id = 'nurtec'").all().map(baselineFromRow);
     const doses = db.prepare(
@@ -373,7 +377,7 @@ export async function buildApp({
       "SELECT id, date, quantity FROM refills WHERE med_id = 'nurtec'").all();
     const stock = currentStock(
       { baselines, doses, refills },
-      { now: nowMs, timeZone: inventoryTimeZone() },
+      { now: nowMs, timeZone },
     );
     const threshold = lowStockThreshold();
     return {
@@ -386,9 +390,31 @@ export async function buildApp({
       negative: stock.quantity !== null && stock.quantity < 0,
       baselineId: stock.baselineId,
       baselineEffectiveAt: stock.baselineEffectiveAt,
-      timeZone: inventoryTimeZone(),
+      timeZone,
       computedAt: new Date(nowMs).toISOString(),
     };
+  }
+
+  app.get('/api/inventory/nurtec', () => computeNurtecStock(db, Date.now()));
+
+  // ── derived status for Home Assistant (read-only, apiVersion 1) ─────
+  // A projection of the existing rows through the same shared pure rules the
+  // app uses (08:00 attack-day rule, explicit-day precedence, Nurtec stock).
+  // No schema, no writes, no auth/CORS change; see docs/home-assistant.md.
+  // `Cache-Control: no-store` keeps health data out of proxy caches, and the
+  // whole document is built from ONE captured clock read so a response can
+  // never straddle local midnight.
+  app.get('/api/status', (req, reply) => {
+    const nowMs = Date.now();
+    const timeZone = inventoryTimeZone();
+    reply.header('Cache-Control', 'no-store');
+    return buildStatus({
+      nowMs,
+      timeZone,
+      attacks: db.prepare('SELECT * FROM attacks').all().map(attackFromRow),
+      dayStates: db.prepare('SELECT * FROM day_states').all().map(dayStateFromRow),
+      nurtec: computeNurtecStock(db, nowMs),
+    });
   });
 
   // ── settings (rules + dose defaults) ───────────────────────────────

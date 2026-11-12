@@ -1,8 +1,9 @@
 # Home Assistant integration
 
-Status: interface implemented (`GET /api/status`, apiVersion 1). The Home
-Assistant integration itself is a separate deliverable; this document is the
-complete handoff for building it.
+Status: `GET /api/status` (apiVersion 1) and the Home Assistant custom
+integration in this repository (`custom_components/migraine_tracker`) are
+implemented. The integration is tested against Home Assistant 2026.10.4;
+installation on the live Home Assistant instance is still pending.
 
 ## Why this endpoint exists
 
@@ -192,10 +193,10 @@ attacks with an unparseable start sort last. `activeAttack` is the first
 parseable start** in that order. Only one ongoing attack is reported; the
 document does not enumerate the rest.
 
-Consequence for a custom integration's event entity: closing the earliest
-ongoing attack while a later one continues produces a spurious
-started/ended-looking pair unless the integration compares attack ids (see the
-event mapping below).
+Consequence for the custom integration's event entity: closing the earliest
+ongoing attack while a later one continues reports only `attack_started` for
+the newly revealed id and never a fabricated end (the integration compares
+attack ids; see the event rules below).
 
 ### Timezone fallback and the writer caveat
 
@@ -544,10 +545,15 @@ automation:
 Force a refresh from an automation with
 `action: homeassistant.update_entity` targeting `sensor.migraine_status`.
 
-## Path B: custom integration blueprint
+## Path B: custom integration (implemented)
 
-This section is a build plan, not code to copy verbatim. Re-read the official
-docs before starting:
+The custom integration is implemented in this repository at
+`custom_components/migraine_tracker/`, with tests under
+`tests/homeassistant/`. It is read-only: one `GET {base}/api/status` per scan
+interval, no writes, and no authentication required (an optional proxy
+`Authorization` header is supported).
+
+Reference material (Home Assistant changes quickly; check the release you run):
 
 - Data fetching and coordinators:
   https://contributors.home-assistant.io/docs/integration_fetching_data/
@@ -557,10 +563,12 @@ docs before starting:
   https://developers.home-assistant.io/docs/core/entity/event/
 - Sensor entity:
   https://developers.home-assistant.io/docs/core/entity/sensor/
+- Options flow:
+  https://developers.home-assistant.io/docs/config_entries_options_flow_handler/
 - RESTful sensor (for YAML/Path A):
   https://www.home-assistant.io/integrations/rest/
 
-### Layout (HACS-compatible)
+### Layout and installation
 
 ```text
 custom_components/migraine_tracker/
@@ -575,23 +583,33 @@ custom_components/migraine_tracker/
   sensor.py
   strings.json
   translations/en.json
-hacs.json                     # repo root; HACS reads it
-README.md
+hacs.json                        # repo root; HACS reads it
+requirements-homeassistant-dev.txt
+tests/homeassistant/
+pyproject.toml
 ```
 
-`hacs.json` for a YAML-free custom repository:
+There is **no tagged release yet**, so HACS cannot install the component from a
+release. Copy `custom_components/migraine_tracker/` into the Home Assistant
+config directory's `custom_components/`, restart Home Assistant, then add
+**Migraine Tracker** under Settings → Devices & services. The layout is
+HACS-compatible for a future release, but nothing has been published to the
+HACS default repository or the Home Assistant Marketplace.
+
+`hacs.json` is exactly:
 
 ```json
 {
   "name": "Migraine Tracker",
-  "render_readme": true,
-  "homeassistant": "2025.5.0"
+  "homeassistant": "2025.8.0"
 }
 ```
 
-(HACS installs the `custom_components/migraine_tracker` directory. Publish at
-least one tagged GitHub release; HACS normally installs a release rather than a
-moving branch.)
+The `2025.8.0` floor is an **API-compatibility claim by inspection**, not a
+tested matrix: the integration needs `OptionsFlowWithReload`, which exists in
+that release. Development and CI test Home Assistant 2026.10.4 (the version
+pinned by the test plugin); the live instance is 2026.11.1. See
+[Testing and verification](#testing-and-verification-for-the-integration-session).
 
 ### `manifest.json`
 
@@ -599,12 +617,12 @@ moving branch.)
 {
   "domain": "migraine_tracker",
   "name": "Migraine Tracker",
-  "codeowners": ["@your-handle"],
+  "codeowners": ["@BradyBrenot"],
   "config_flow": true,
-  "documentation": "https://github.com/you/migraine-tracker-ha",
+  "documentation": "https://github.com/BradyBrenot/migraine-tracker",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/you/migraine-tracker-ha/issues",
+  "issue_tracker": "https://github.com/BradyBrenot/migraine-tracker/issues",
   "requirements": [],
   "single_config_entry": true,
   "version": "0.1.0"
@@ -613,268 +631,284 @@ moving branch.)
 
 `single_config_entry: true` is correct here: one tracker, one status document.
 `iot_class: local_polling` matches the REST sensor's classification and the
-fact that no cloud account exists.
+fact that no cloud account exists. There are no Python requirements to install.
 
 ### Config flow
 
-- Step 1 asks for the base URL (`http://tracker:8097`, trailing slash
-  normalized away). Validate by calling `GET {base}/api/status`.
-- Distinct error keys, so the UI can explain the failure:
-  - `cannot_connect`: DNS/timeout/connection error;
-  - `invalid_response`: non-200 or not JSON;
-  - `unsupported_api_version`: JSON without `apiVersion == 1` (the field may be
-    missing entirely; treat that as unsupported).
-- Do not accept credentials: the tracker has no authentication. If someone
-  fronts it with an authenticating proxy, allow an optional
-  `Authorization` header in the options flow rather than storing a password.
-- Options flow: scan interval, integer seconds, clamp to **15–3600**, default
-  **60**. Store it in `entry.options["scan_interval"]` and reload the entry on
-  change.
-- Provide a reconfigure step (`async_step_reconfigure`) that re-validates the
-  URL and updates `entry.data["url"]`.
-- Unique ID: the normalized base URL, so the same tracker cannot be added
-  twice.
+- One step asks for the base URL (`http://tracker:8097`, a reverse-proxy base
+  path is allowed) and an optional `Authorization` header value.
+- URL normalization: the scheme and host are lowercased, the path keeps its
+  case, and trailing slashes are stripped. The flow rejects non-`http(s)`
+  schemes, a missing host, embedded credentials, a query string, a fragment, an
+  invalid, non-numeric, or out-of-range port, and any base path ending in
+  `/api/status` (people paste the endpoint by mistake). All of those produce the
+  dedicated `invalid_url` field error before any request is made.
+- Validation is exactly one `GET {base}/api/status` with a 10-second timeout and
+  `allow_redirects=False`. Error mapping:
 
-```python
-class MigraineTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+  | Error key | Cause |
+  | --- | --- |
+  | `cannot_connect` | DNS failure, refused connection, timeout |
+  | `invalid_response` | any non-200 status (including a 3xx, which is never followed), non-JSON, not a JSON object, or an unknown display state |
+  | `unsupported_api_version` | `apiVersion` is missing or is not the exact JSON integer `1` (`true`, `1.0`, and `"1"` are all rejected) |
+  | `unauthorized` | the tracker or its proxy returned 401/403 |
+  | `invalid_url` | normalization rejected the URL before any request |
+  | `invalid_authorization` | the `Authorization` value contains a character that cannot be sent in an HTTP header (a control character, or anything above U+00FF that Latin-1 cannot encode), checked before any request |
 
-    async def async_step_user(self, user_input=None):
-        errors = {}
-        if user_input is not None:
-            url = user_input[CONF_URL].rstrip("/")
-            try:
-                await self._async_fetch_status(url)  # GET {url}/api/status + checks
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-            except InvalidResponseError:
-                errors["base"] = "invalid_response"
-            except UnsupportedVersionError:
-                errors["base"] = "unsupported_api_version"
-            else:
-                await self.async_set_unique_id(url)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title="Migraine Tracker", data={CONF_URL: url}
-                )
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_URL): str}),
-            errors=errors,
-        )
-```
+- An `invalid_url` or `invalid_authorization` result performs no request and does
+  not create, change, or reload the entry; the form is shown again with that
+  error.
+
+- The unique ID is the normalized base URL, so the same tracker cannot be added
+  twice. `single_config_entry: true` means Home Assistant aborts a new flow with
+  `single_instance_allowed` before the user step; should the step be reached
+  directly, the same URL still aborts `already_configured` and a different URL
+  aborts `single_instance_allowed`.
+- Reconfigure validates the new URL, then updates the entry's URL and unique ID
+  with `async_update_reload_and_abort`. The config entry survives, so the
+  device and every entity-to-device link survive too. That works because the
+  device identity is `(DOMAIN, entry.entry_id)` — **never the URL**; keying the
+  device or unique IDs on the URL would orphan them on every reconfigure.
+
+### Optional `Authorization` header
+
+The tracker itself has no authentication. But when it sits behind an
+authenticating reverse proxy, a missing or wrong header yields 401/403, which
+would otherwise be indistinguishable from a broken tracker. The header is
+therefore supported in **both** the initial setup form and the options form:
+
+- It is stored in `entry.options["authorization"]`, not entry data, so it is
+  not part of the entry identity and is not shown as a form default.
+- It is sent as the `Authorization` header on every status GET; leading and
+  trailing whitespace is trimmed, so an all-whitespace value means "no header".
+- It is never logged by the integration, never prefilled into a form, and never
+  exported in diagnostics.
+- The value is validated before it is sent: CR, LF, NUL, DEL, and the other
+  control characters (everything below 0x20 except horizontal tab) are rejected
+  with `invalid_authorization` in the setup, reconfigure, and options forms.
+  Horizontal tab and ordinary spaces are allowed, and non-ASCII obs-text
+  (U+0080–U+00FF) values are allowed. Characters that aiohttp cannot encode as
+  Latin-1 (anything above U+00FF, such as an emoji or the euro sign) are
+  rejected the same way, before any request, instead of raising
+  `UnicodeEncodeError` mid-request. A rejected value performs no request and
+  does not create, change, or reload the entry.
+- A corrupt value already stored in options (for example from a hand-edited
+  `.storage`) makes the coordinator raise `UpdateFailed` explaining that the
+  stored authorization is invalid until it is cleared or replaced in options.
+  The value itself is never logged.
+- Status requests use `allow_redirects=False`, so a 3xx is an
+  `invalid_response` and the header is never forwarded to another host.
+- Saving options for the interval alone keeps the stored header. Entering a new
+  value replaces it; a dedicated **Remove the stored Authorization header**
+  toggle deliberately clears it (the toggle wins over a value entered in the
+  same save). Reconfigure keeps the stored header when its field is left empty.
+
+### Options
+
+The options flow uses `OptionsFlowWithReload` (framework-supplied
+`self.config_entry`, no-argument constructor). It exposes the scan interval in
+seconds, default **60**, clamped to **15–3600**; out-of-range values are
+corrected rather than rejected. The interval and the header both live in
+`entry.options`.
+
+Do **not** register an update listener for options: `OptionsFlowWithReload`
+reloads the entry itself, and the integration keeps `entry.update_listeners`
+empty. Home Assistant 2026.12 makes the update-listener/reconfigure combination
+an error, so this is also forward-compatible.
 
 ### Coordinator
 
-The snippet omits imports, `DOMAIN`, `_LOGGER`, and the URL-validation helpers
-introduced by the config flow (`CannotConnectError`, `InvalidResponseError`,
-`UnsupportedVersionError`, and an `async_fetch_status` helper that performs the
-same GET/parse/version checks).
+- `DataUpdateCoordinator` constructed with `config_entry=entry`, the shared HA
+  `aiohttp` session, and `always_update=False`; one GET per interval, a
+  10-second timeout, and the optional `Authorization` header.
+- `generatedAt` is stripped before the document is stored. With equality-based
+  suppression, a poll that differs only in `generatedAt` produces no listener
+  notification and no entity state writes.
+- Every failure becomes `UpdateFailed`: non-200 (including a 3xx, because
+  redirects are never followed), non-JSON, unsupported `apiVersion`, an invalid
+  display state (anything outside `attack`/`off`/`well`/`no_data`),
+  connection/timeout, and 401/403. Only a `ValueError` from `response.json()`
+  is treated as a non-JSON body; unrelated value errors are not swallowed. A bad
+  document therefore marks the entities unavailable and retries; it is never
+  silently mapped onto Home Assistant's `unknown`.
+- The status GET always uses `allow_redirects=False`, so the optional
+  `Authorization` header is never forwarded to a redirect target.
+- The first successful poll only establishes the event baseline. A restart or
+  reload with an attack already running never synthesizes a transition, and
+  the event entity's restored state is not a new event. A failed poll does not
+  move the baseline, so the next success is diffed against the last good one.
+- Pending events are **replaced** on every successful poll (bounded to one
+  poll's events). A disabled event entity therefore never replays events it
+  missed when it is re-enabled.
 
-```python
-from datetime import timedelta
-
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-    DataUpdateCoordinator,
-    UpdateFailed,
-)
-
-DEFAULT_SCAN_INTERVAL = 60
-
-
-class MigraineTrackerCoordinator(DataUpdateCoordinator[dict]):
-    def __init__(self, hass, session, url: str, scan_interval: int):
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=DOMAIN,
-            update_interval=timedelta(seconds=scan_interval),
-            # Equality-based suppression: with generatedAt stripped below,
-            # an unchanged document produces no state writes at all.
-            always_update=False,
-        )
-        self._session = session
-        self._url = f"{url}/api/status"
-        self._baselined = False
-        self._last_active_id: str | None = None
-        self._last_state: str | None = None
-        self.pending_events: list[tuple[str, dict]] = []
-
-    async def _async_update_data(self) -> dict:
-        try:
-            async with asyncio.timeout(10):
-                resp = await self._session.get(self._url)
-                if resp.status != 200:
-                    raise UpdateFailed(f"unexpected status {resp.status}")
-                data = await resp.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError) as err:
-            raise UpdateFailed("cannot reach the tracker") from err
-        except ValueError as err:  # non-JSON body
-            raise UpdateFailed("invalid JSON from the tracker") from err
-
-        if not isinstance(data, dict) or data.get("apiVersion") != 1:
-            raise UpdateFailed("unsupported apiVersion")
-
-        # generatedAt changes on every request. Storing it would defeat
-        # always_update=False and write a state change on every poll.
-        data.pop("generatedAt", None)
-        self._diff(data)
-        return data
-
-    def _diff(self, data: dict) -> None:
-        active_id = (data.get("activeAttack") or {}).get("id")
-        last = data.get("lastAttack") or {}
-        state = data.get("state")
-
-        if not self._baselined:
-            # First successful poll only establishes the baseline: a restart
-            # with an attack already running must not fire attack_started.
-            self._baselined = True
-        else:
-            if active_id is not None and active_id != self._last_active_id:
-                self.pending_events.append(("attack_started", {"attack_id": active_id}))
-            if (
-                self._last_active_id is not None
-                and active_id is None
-                and last.get("id") == self._last_active_id
-                and last.get("ongoing") is False
-            ):
-                # Only the SAME attack finishing counts as an end; a deleted
-                # row (lastAttack moves on/back) fires nothing.
-                self.pending_events.append(
-                    ("attack_ended", {"attack_id": self._last_active_id})
-                )
-            if state != self._last_state:
-                self.pending_events.append(("status_changed", {"state": state}))
-
-        self._last_active_id = active_id
-        self._last_state = state
-
-    def drain_events(self) -> list[tuple[str, dict]]:
-        events, self.pending_events = self.pending_events, []
-        return events
-```
-
-`async_setup_entry` creates the session (or requests a shared one), builds the
-coordinator, stores it on `entry.runtime_data`, awaits
-`async_config_entry_first_refresh()` (it already converts a first-refresh
-`UpdateFailed` into `ConfigEntryNotReady`), forwards the platform setups, and
-registers `entry.async_on_unload(entry.add_update_listener(...))` to reload on
-options changes.
+`async_setup_entry` builds the coordinator, stores it on `entry.runtime_data`,
+awaits `async_config_entry_first_refresh()` (which converts a first-refresh
+`UpdateFailed` into `ConfigEntryNotReady`), and forwards the platform setups.
+There is no update listener; unloading forwards platform unloads.
 
 `PARALLEL_UPDATES = 0` in each platform module: the coordinator already
 single-flights the fetch, so entities must not issue their own requests.
 
 ### Entity mapping
 
-| Platform | Entity | Notes |
-| --- | --- | --- |
-| `binary_sensor` | `migraine_active` | `activeAttack is not None`; no `device_class` (a migraine is not a device problem). Exposes `active_attack_id` for the ended-attack guard. |
-| `sensor` | `migraine_status` | `SensorDeviceClass.ENUM` with `options=["attack", "off", "well", "no_data"]`; `translation_key`/`entity_id` stable. |
-| `sensor` | `migraine_last_attack_started` | `SensorDeviceClass.TIMESTAMP`, value `lastAttack.start` (already offset-bearing), `None` when absent. |
-| `sensor` | `migraine_days_since_last_attack` | `None` when `daysSinceLastAttackStart` is null. |
-| `sensor` | `migraine_attack_days_last_7_days` / `_last_30_days` | Counts, `state_class=MEASUREMENT` optional. |
-| `sensor` | `migraine_attacks_started_last_30_days` | Start-day anchored count. |
-| `sensor` | `nurtec_tablets` | `None` when unknown; never report `0` for unknown. |
-| `binary_sensor` | `nurtec_low` / `nurtec_negative` | From the booleans; `device_class=PROBLEM` for low. |
-| `event` | `migraine_attack_event` | `attack_started`, `attack_ended`, `status_changed`. |
+Eleven entities share one device and use `_attr_has_entity_name = True`, so
+Home Assistant combines the translated entity name below with the device name
+(**Migraine Tracker**) for the friendly name and derives entity IDs from it
+(for example `sensor.migraine_tracker_status`,
+`binary_sensor.migraine_tracker_active_attack`,
+`binary_sensor.migraine_tracker_nurtec_low_stock`, and
+`event.migraine_tracker_attack_event`).
+
+| Platform | Key (unique ID suffix) | Name | Behavior |
+| --- | --- | --- | --- |
+| `binary_sensor` | `active` | Active attack | on when `activeAttack is not None` (never `state == "attack"`); no device class; only extra attribute `active_attack_id` |
+| `binary_sensor` | `nurtec_low` | Nurtec low stock | `inventory.nurtec.low`; `device_class: problem` |
+| `binary_sensor` | `nurtec_negative` | Nurtec stock negative | `inventory.nurtec.negative`; no device class |
+| `sensor` | `status` | Status | enum with options exactly `attack`, `off`, `well`, `no_data`; state names translated |
+| `sensor` | `last_attack_started` | Last attack started | timestamp; timezone-aware datetime from `lastAttack.start`, `None` when absent or unparseable |
+| `sensor` | `days_since_last_attack` | Days since last attack | integer or `None` |
+| `sensor` | `attack_days_last_7_days` | Attack days last 7 days | integer count |
+| `sensor` | `attack_days_last_30_days` | Attack days last 30 days | integer count |
+| `sensor` | `attacks_started_last_30_days` | Attacks started last 30 days | start-day anchored count |
+| `sensor` | `nurtec_tablets` | Nurtec tablets | integer or `None`; unknown stays `None`, never `0`; negatives are preserved |
+| `event` | `attack_event` | Attack event | `attack_started`, `attack_ended`, `status_changed` |
 
 Do not expose the inventory `status`/`level` strings as entity states: their
 literal `unknown` value collides with Home Assistant's reserved state. Use the
 `nurtec_tablets` quantity plus the `low`/`negative` booleans.
 
-All entities: `_attr_has_entity_name = True`, a shared `DeviceInfo`
-(`identifiers={(DOMAIN, entry.unique_id)}`, `name="Migraine Tracker"`,
-`manufacturer="migraine-tracker"`, `configuration_url=base_url`) and stable
-`unique_id`s (`f"{entry.entry_id}_{suffix}"`). `available` follows
-`coordinator.last_update_success`.
+Entity details:
 
-### Event entity and edge detection
+- Unique IDs are `f"{entry.entry_id}_{key}"`, so a reconfigure cannot change
+  them; `entry.entry_id` is also the device identifier.
+- The device is one `DeviceInfo` with `name="Migraine Tracker"`,
+  `manufacturer="migraine-tracker"`, and `configuration_url` set to the current
+  base URL.
+- All value entities are populated from the first refresh before the platforms
+  are forwarded, so setup never exposes a transient `unknown`. A sensor whose
+  value is legitimately `None` (for example days since last attack with no
+  history) reports `unknown`, which is its real value, not a loading state. The
+  event entity is the exception: it starts `unknown` and stays there until its
+  first event.
+- `available` follows `coordinator.last_update_success`: a failed poll makes
+  every entity `unavailable` until the next success.
+- No entity sets `state_class`. That keeps attack counts, days since the last
+  attack, and Nurtec stock out of long-term statistics; the values remain
+  normal recorder-tracked states (exclude them from the recorder if that
+  history is unwanted).
+- Because of `_attr_has_entity_name`, Home Assistant derives the default entity
+  IDs from the device and translated entity names, for example
+  `sensor.migraine_tracker_status`,
+  `binary_sensor.migraine_tracker_active_attack`,
+  `sensor.migraine_tracker_nurtec_tablets`, and
+  `event.migraine_tracker_attack_event`. Renaming in the UI changes the
+  entity ID; use the IDs your instance actually shows.
 
-`EventEntity.event_types` is the set of values the entity can emit; the
-integration adds its own event names, and Home Assistant records the last event
-on the entity.
+### Event entity and edge rules
 
-```python
-class MigraineAttackEvent(CoordinatorEntity, EventEntity):
-    _attr_event_types = ["attack_started", "attack_ended", "status_changed"]
-    _attr_translation_key = "attack_event"
+The event entity advertises `attack_started`, `attack_ended`, and
+`status_changed`. Its state is the timestamp of the last event; the event type
+is the `event_type` attribute, and the payload is the remaining attributes:
 
-    def _handle_coordinator_update(self) -> None:
-        events = self.coordinator.drain_events()
-        for event_type, event_data in events:
-            self._trigger_event(event_type, event_data)
-            # The base class does NOT write state for us; one poll can produce
-            # attack_started + status_changed, and each must be published.
-            self.async_write_ha_state()
-        if not events:
-            super()._handle_coordinator_update()
-```
+| Event type | Payload |
+| --- | --- |
+| `attack_started` | `{"attack_id": "<id>"}` |
+| `attack_ended` | `{"attack_id": "<id>"}` |
+| `status_changed` | `{"state": "attack" \| "off" \| "well" \| "no_data"}` |
 
-Edge rules (implemented in `_diff` above), comparing the previous successful
-poll with the new one:
+A poll can produce several events (for example `attack_started` and
+`status_changed`); each is published as its own state change, so automations see
+one event per transition.
+
+Edge rules, comparing the previous successful poll with the new one:
 
 - `attack_started` when `activeAttack.id` is present and differs from the last
-  seen active id;
+  seen active id.
 - `attack_ended` only when `activeAttack` is now null, the last seen active id
-  is still the `lastAttack.id`, and that row has `ongoing: false`. A deleted row
-  fires nothing (the id no longer matches);
-- `status_changed` when `state` differs (this covers `well` → `off` → `no_data`
-  and the 08:00 boundary);
-- the first refresh only establishes the baseline, so a restart never fires an
-  event;
-- polling cannot observe an attack that starts and ends entirely between two
-  polls. The ntfy path below covers that case when configured.
+  is still `lastAttack.id`, and that row has `ongoing: false`. A deleted or
+  replaced row fires nothing.
+- `status_changed` when the display `state` differs. This follows `state`, not
+  `today.status`: editing a day record without changing the display state (for
+  example setting `today.status` while an attack keeps `state: "attack"`) fires
+  nothing.
+- The first successful poll only establishes the baseline, so a restart, a
+  reload, or a restored event entity never fires an event.
+- `attack_started` and `attack_ended` carry the attack id, so consumers can
+  correlate start/end pairs without guessing.
 
-Because only one ongoing attack is reported, closing the earliest of two
-ongoing attacks while a later one continues yields `attack_started` for the
-remaining id (the end is suppressed because the id changed, not finished).
-Document that limitation; do not try to reconstruct the full set from this
-endpoint.
+Known limitations (document these; do not try to reconstruct data the endpoint
+does not expose):
+
+- **Multiple ongoing attacks.** Only `activeAttack` (the earliest ongoing row)
+  is reported. Closing the earliest of two ongoing attacks while a later one
+  continues yields only `attack_started` for the newly revealed id — no
+  fabricated `attack_ended` for the closed one.
+- **Replacement between two polls.** If attack A ends and attack B starts
+  between two polls, only `attack_started(B)` is emitted and no
+  `attack_ended(A)`: the active-id guard cannot prove the replacement, because
+  the last seen active id A is not a finished `lastAttack` row.
+- **Active attack with an unparseable start.** `attack_ended` requires
+  `lastAttack.id` to match the last seen active id. If the active row's start is
+  null, `lastAttack` can point at a different row, so the later end event is
+  suppressed (API limitation).
+- **Starts and ends inside one interval.** Polling cannot observe an attack that
+  starts and ends entirely between two polls. The ntfy push path below covers
+  that case when configured.
+- **Event history is not replayed.** Pending events are replaced each poll, so a
+  disabled event entity misses transitions that happen while it is disabled.
 
 ### Diagnostics
 
-```python
-async def async_get_config_entry_diagnostics(hass, entry):
-    coordinator = entry.runtime_data
-    # Operational data only: no URL, health state, time zone, attack ids, or
-    # inventory. Diagnostics are attached to public issue reports.
-    return {
-        "scan_interval": entry.options.get(CONF_SCAN_INTERVAL),
-        "last_update_success": coordinator.last_update_success,
-        "api_version": (coordinator.data or {}).get("apiVersion"),
-    }
+Diagnostics return exactly three keys:
+
+```json
+{
+  "scan_interval": 60,
+  "last_update_success": true,
+  "api_version": 1
+}
 ```
 
-Never dump the raw response body wholesale: it is small today, but diagnostics
-are shared in issue reports.
+`scan_interval` is the effective (clamped) options value. There is no URL,
+`Authorization` header, health data, time zone, attack id, or raw document:
+diagnostics are attached to public issue reports.
+
+Two distinct not-loaded cases are covered. After the entry has been unloaded
+there is no `runtime_data`, so a fallback returns `scan_interval` from the entry
+options, `last_update_success: false`, and `api_version: null`. During
+`SETUP_RETRY` after a failed first refresh, Home Assistant retains the failed
+coordinator in `runtime_data`, so diagnostics read the coordinator rather than
+the fallback; it reports `last_update_success: false` and `api_version: null`
+because no successful poll ever populated its data. In both cases diagnostics
+still return exactly the same three keys, the download never fails just because
+the integration is not currently loaded, and the key set never changes.
 
 ### Testing
 
-Use `pytest-homeassistant-custom-component` for the HA fixture, and
-`aioresponses` (or an `aiohttp` test server) for the tracker:
+The pytest suite is `tests/homeassistant/`: 205 tests (config flow 67,
+coordinator 54, events 18, sensors 15, options 16, binary sensors 9,
+reconfigure 7, init/setup 6, diagnostics 5, entity metadata 5, forward
+compatibility 2, smoke 1). Read-only coverage is layered: an autouse fixture
+inspects the `aioclient_mock` calls of every test that uses that plugin
+fixture and fails on anything except `GET {base}/api/status`; tests that drive
+a recording fake session assert the method and URL of every recorded call
+directly. Root `conftest.py` declares `pytest_plugins`, so the bare
+`python -m pytest -q` from the repository root collects the whole suite.
 
-- config flow: success, connection error, non-JSON body, `apiVersion: 2`
-  rejected, duplicate URL aborted, options clamp 14 → 15 and 3601 → 3600;
-- coordinator: 200 → data stored without `generatedAt`; 500/non-JSON/timeout →
-  `UpdateFailed`; unchanged payload → no entity state write;
-- entities: enum options, timestamp value and `None`, unknown quantity remains
-  `None`, availability mirrors `last_update_success`;
-- event entity: first refresh fires nothing; id change fires `attack_started`;
-  finished same id fires `attack_ended`; deleted id fires nothing;
-  `state` change fires `status_changed`; reload fires nothing.
-
-Fixture payloads: copy the examples from this document. Prefer two fixtures
-(active attack, inferred off day) plus one explicit-well and one empty.
-Deterministic clocks: pass `generatedAt` in the fixture but assert it is absent
-from `coordinator.data`.
+Commands, the POSIX harness caveat, the test-vs-live version gap, and manual
+checks are in
+[Testing and verification for the integration session](#testing-and-verification-for-the-integration-session).
 
 ### `strings.json` / translations
 
-At minimum: `config.step.user.title/data/description`, the three error keys,
-`config.abort.already_configured`, the options step, and entity names for the
-status/level enums and the event entity.
+`strings.json` and `translations/en.json` cover the config and reconfigure
+steps, all six config error keys (`cannot_connect`, `invalid_response`,
+`unsupported_api_version`, `unauthorized`, `invalid_url`,
+`invalid_authorization`) plus the options `invalid_authorization` key,
+`already_configured`/`single_instance_allowed`/`reconfigure_successful`, the
+options step (including the clear-header toggle), every entity name, the four
+translated status state names, and the event name. Tests assert the
+translations resolve.
 
 ## Real-time attack events via ntfy
 
@@ -949,21 +983,27 @@ automation:
 
 ## Recorder, privacy, and security
 
-- The recorder persists every state and attribute. The REST sensor's
-  `activeAttack`/`lastAttack`/`history`/`inventory` attributes are written on
-  each change, and `history`/`activeAttack` are health data. Exclude the
-  migraine entities from the recorder if history churn or attribute retention
-  is unwanted:
+- The recorder persists every state and attribute. Path A's status sensor
+  carries `activeAttack`/`lastAttack`/`history`/`inventory` as attributes,
+  written on each change; `history`/`activeAttack` are health data. Path B's
+  entities are individual states with no `state_class` (so no long-term
+  statistics), but their state history — and every attack event — is still
+  recorder data. Exclude the migraine entities from the recorder if history
+  churn or attribute retention is unwanted:
 
   ```yaml
   recorder:
     exclude:
       entity_globs:
+        # Both paths match: Path B entity IDs are device-prefixed, e.g.
+        # sensor.migraine_tracker_status, which still starts with
+        # "migraine_".
         - sensor.migraine_*
         - binary_sensor.migraine_*
+        - event.migraine_*
+        # Path A only; Path B's Nurtec entities match the globs above.
         - sensor.nurtec_*
         - binary_sensor.nurtec_*
-        - event.migraine_*
   ```
 
   Excluding from the recorder also removes them from history and statistics;
@@ -984,13 +1024,53 @@ automation:
 
 ## Testing and verification for the integration session
 
+The Python commands run from the repository root (unlike the `app/` npm
+commands):
+
+```sh
+python -m venv .venv
+. .venv/bin/activate                 # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements-homeassistant-dev.txt
+
+python -m pytest -q                  # full suite, from the repository root
+# python -m pytest tests/homeassistant -q   # focused alternative
+python -m ruff check custom_components/migraine_tracker tests/homeassistant
+python -m ruff format --check custom_components/migraine_tracker tests/homeassistant
+python -m compileall -q custom_components/migraine_tracker
+python -c "import json; [json.load(open(p, encoding='utf-8')) for p in ('custom_components/migraine_tracker/manifest.json','custom_components/migraine_tracker/strings.json','custom_components/migraine_tracker/translations/en.json','hacs.json')]"
+
+# hassfest is not on PyPI and is not shipped in the homeassistant wheel.
+docker run --rm -v "$PWD:/github/workspace" ghcr.io/home-assistant/hassfest@sha256:da6522993280166fe072704989a2b4c33e639e8ceb69c8ab6ad7ec5045c1a1e3
+```
+
+Caveats:
+
+- The HA test harness is **POSIX-only**: `pytest-homeassistant-custom-component`
+  imports `homeassistant.runner`, which imports `fcntl`. `pytest` therefore does
+  not run on native Windows — use Linux, WSL, or a container. `ruff` and
+  `compileall` work on any OS.
+- The toolchain is pinned by `pytest-homeassistant-custom-component==0.13.375`,
+  which pins `homeassistant==2026.10.4` and requires Python >= 3.14.2 (local and
+  CI run Python 3.14.x). The live Home Assistant instance is 2026.11.1:
+  **tests run one minor release behind live**, and the gap is recorded rather
+  than papered over by forcing versions.
+- CI runs the same steps (pytest, ruff check, ruff format --check, compileall,
+  JSON validation, and a digest-pinned hassfest image) in the `homeassistant`
+  job on `ubuntu-latest`.
+- `hacs validate` is not run: there is no release or HACS repository entry to
+  validate yet.
+
+Manual checks against a running tracker:
+
 - `curl http://<tracker>:8097/api/status` must return the documented v1 shape
   with `Cache-Control: no-store`. Use the sample payloads above as fixtures.
-- With YAML: restart Home Assistant, then check `sensor.migraine_status` and
+- With YAML, restart Home Assistant, then check `sensor.migraine_status` and
   that `binary_sensor.migraine_active` follows a logged attack within one
   `scan_interval`.
-- With the custom integration: run `pytest` (config flow, coordinator, entity
-  and event tests) and `hassfest`/`hacs validate` if available.
+- With the custom integration, add it, then confirm the value entities (and the
+  Nurtec entities) have values immediately. The event entity legitimately stays
+  `unknown` until the first transition it observes; an attack start/end then
+  shows up within one scan interval.
 - Edge cases worth an explicit check: empty database (`no_data`), a legacy
   explicit `attack` day (`state: attack` with `activeAttack: null`), a finished
   attack ending exactly at 08:00, multiple ongoing attacks, and a restart with

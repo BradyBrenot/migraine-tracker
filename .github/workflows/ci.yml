@@ -1,12 +1,13 @@
-# CI: verify every push/PR to main, then publish a tested linux/amd64 image to
-# GHCR and deploy the static demo to GitHub Pages.
+# CI: verify pushes to main and feature/**, and pull requests to main, then
+# publish a tested linux/amd64 image to GHCR and deploy the static demo to
+# GitHub Pages from main. Verification also runs on manual dispatch.
 # Actions are pinned to full commit SHAs (with the release tag in a comment) so a
 # moved tag can never silently swap the code that runs here.
 name: CI
 
 'on':
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -80,15 +81,73 @@ jobs:
       - name: Audit production server dependencies
         run: npm audit --omit=dev --prefix server
 
+  # The Home Assistant custom integration is Python and lives at the repository
+  # root (`custom_components/migraine_tracker`), not under `app`. The `app`
+  # `working-directory` default is set per job on `verify`/`pages` only, so this
+  # job deliberately sets no default and every command below runs from the
+  # checkout root. Verification runs for pushes to `main` and `feature/**`,
+  # pull requests to `main`, and manual dispatch, so a feature branch is tested
+  # on push without publishing anything; `publish` and `pages` still require
+  # refs/heads/main in this repository.
+  homeassistant:
+    name: Home Assistant integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Python 3.14: pytest-homeassistant-custom-component==0.13.375 pins
+      # homeassistant==2026.10.4, which requires Python >=3.14.2 (the pinned
+      # toolchain was verified locally on 3.14.3). The requirements file already
+      # pins every package with `==`, so a plain install is the whole setup.
+      - name: Set up Python 3.14
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-homeassistant-dev.txt
+
+      - name: Install pinned Home Assistant test dependencies
+        run: python -m pip install -r requirements-homeassistant-dev.txt
+
+      - name: Run Python test suite
+        run: python -m pytest -q
+
+      - name: Lint integration and tests
+        run: python -m ruff check custom_components/migraine_tracker tests/homeassistant conftest.py
+
+      - name: Check integration and test formatting
+        run: python -m ruff format --check custom_components/migraine_tracker tests/homeassistant conftest.py
+
+      - name: Byte-compile integration
+        run: python -m compileall -q custom_components/migraine_tracker
+
+      # hassfest is not published to PyPI (and the `homeassistant` wheel does
+      # not ship `script.hassfest`), so the only supportable route is the
+      # official hassfest container — the same image the home-assistant/actions
+      # workflow runs — digest-pinned so it cannot silently change.
+      - name: Validate integration JSON
+        run: python -c "import json; [json.load(open(p, encoding='utf-8')) for p in ('custom_components/migraine_tracker/manifest.json','custom_components/migraine_tracker/strings.json','custom_components/migraine_tracker/translations/en.json','hacs.json')]"
+
+      - name: Run hassfest
+        run: >-
+          docker run --rm -v "$PWD:/github/workspace"
+          ghcr.io/home-assistant/hassfest@sha256:da6522993280166fe072704989a2b4c33e639e8ceb69c8ab6ad7ec5045c1a1e3
+
   # Publishing is deliberately gated: it only runs on a push or manual dispatch
-  # whose ref is refs/heads/main in this repository. Pull requests, including
-  # those from forks, can never reach this job, and it additionally requires
-  # `verify` to pass first. Forks of this repository never publish — their
-  # push/dispatch runs skip this job, so they cannot fail trying to push the
-  # upstream GHCR namespace.
+  # whose ref is refs/heads/main in this repository. Verification also runs on
+  # feature/** pushes, but those runs skip this job (as do pull requests, which
+  # can never reach it). It additionally requires BOTH `verify` and
+  # `homeassistant` to pass first, so an image can never be published while the
+  # Home Assistant integration job is red. Forks of this repository never
+  # publish — their push/dispatch runs skip this job, so they cannot fail trying
+  # to push the upstream GHCR namespace.
   publish:
     name: Publish image
-    needs: verify
+    needs: [verify, homeassistant]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && github.repository == 'BradyBrenot/migraine-tracker'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -143,12 +202,15 @@ jobs:
           cache-to: type=gha,mode=max
 
       # Prove the just-built image actually serves traffic before it is published:
-      # /api/health must report ok and both HTML shells (writer `/` and partner
-      # `/view`) must come from the same container. `--pull never` guarantees the
-      # just-loaded local image is what gets tested, never a registry copy. No ntfy
-      # variables are set, so the container disables notifications and can never
-      # send anything. Container and volume are removed even on failure.
-      - name: Smoke test image (health + web shells)
+      # /api/health must report ok, /api/status must return the empty-volume
+      # apiVersion-1 document with `Cache-Control: no-store`, one built
+      # `/assets/*.js` bundle must serve a non-empty body, and both HTML shells
+      # (writer `/` and partner `/view`) must come from the same container.
+      # `--pull never` guarantees the just-loaded local image is what gets
+      # tested, never a registry copy. No ntfy variables are set, so the
+      # container disables notifications and can never send anything. Container
+      # and volume are removed even on failure.
+      - name: Smoke test image (health + status + assets + web shells)
         env:
           SMOKE_IMAGE: ghcr.io/bradybrenot/migraine-tracker:sha-${{ github.sha }}
           SMOKE_CONTAINER: migraine-tracker-smoke-${{ github.run_id }}
@@ -202,6 +264,43 @@ jobs:
             exit 1
           fi
 
+          # One-shot assertions on the warm container, still inside this step so
+          # the EXIT trap above removes the container and volume if any of them
+          # fail. The container started from an EMPTY tracker volume, so
+          # /api/status legitimately answers with the `no_data` document at
+          # apiVersion 1 — assert exactly that shape plus the no-store header,
+          # never anything health-specific. `curl -D -` writes the headers to
+          # stdout ahead of the body, so one variable holds both and the checks
+          # stay pipe-free like the loop above.
+          if ! status="$(curl -fsS -D - "http://localhost:${SMOKE_PORT}/api/status" 2>/dev/null)"; then
+            echo "::error::Smoke test failed: GET /api/status did not return HTTP 200."
+            exit 1
+          fi
+          grep -q '"apiVersion":1' <<<"$status" \
+            || { echo "::error::Smoke test failed: /api/status body is not an apiVersion 1 document."; exit 1; }
+          grep -qi '^cache-control:[[:space:]]*no-store' <<<"$status" \
+            || { echo "::error::Smoke test failed: /api/status is missing a 'Cache-Control: no-store' header."; exit 1; }
+          echo "status (/api/status): $status"
+
+          # Cover the static-asset path (@fastify/static over glob) that `verify`
+          # only exercises at build time: take one hashed `/assets/*.js` URL out
+          # of the writer HTML captured above and prove it serves a non-empty
+          # 200. Matches are collected into one variable and the first line is
+          # taken with parameter expansion, because piping grep into `head -n1`
+          # could SIGPIPE under `set -o pipefail`.
+          asset_matches="$(grep -o '/assets/[^"]*\.js' <<<"$shell" || true)"
+          asset="${asset_matches%%$'\n'*}"
+          if [ -z "$asset" ]; then
+            echo "::error::Smoke test failed: no /assets/*.js URL found in the writer HTML."
+            exit 1
+          fi
+          if ! asset_body="$(curl -fsS "http://localhost:${SMOKE_PORT}${asset}" 2>/dev/null)" || [ -z "$asset_body" ]; then
+            echo "::error::Smoke test failed: ${asset} did not serve a non-empty 200 body."
+            exit 1
+          fi
+          echo "asset (${asset}): ${#asset_body} bytes"
+          echo "Extended smoke checks passed: /api/status (apiVersion 1, no-store) and ${asset} responded correctly."
+
       # Prevent a stale run from moving `latest` backward: verification of an
       # older commit can finish after a newer merge. Ask GitHub (authenticated
       # with the job token) what the current tip of main is. Only when this
@@ -251,9 +350,9 @@ jobs:
 
   # The static demo is a separate artifact (app/dist-demo) deployed to GitHub
   # Pages. It is gated exactly like publish: only a push or manual dispatch of
-  # refs/heads/main in this repository, never a PR or a fork. It runs beside
-  # publish (both wait only for verify) and deploys writer-only sample data with
-  # no backend and no persistence.
+  # refs/heads/main in this repository — never a pull request, a feature-branch
+  # push, or a fork. It runs beside publish (both wait only for verify) and
+  # deploys writer-only sample data with no backend and no persistence.
   pages:
     name: Deploy demo to GitHub Pages
     needs: verify

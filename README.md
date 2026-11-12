@@ -67,12 +67,19 @@ Off by default, set up in Settings
 
 ### Home Assistant
 
-`GET /api/status` exposes a versioned, read-only summary for Home Assistant:
-current attack, today's migraine day, history counts, and Nurtec stock, all
-computed with the same rules the app uses. See
-[docs/home-assistant.md](docs/home-assistant.md) for ready-to-paste YAML
-sensors, the existing ntfy attack-event path, and a custom-integration
-blueprint.
+This repo ships a read-only Home Assistant custom integration in
+`custom_components/migraine_tracker`. There's no HACS release published yet, so
+copy that folder into your HA `custom_components/` directory, restart, and add
+**Migraine Tracker** in the UI. It needs HA >= 2025.8.0 (that floor is by
+inspection; it's developed and tested against 2026.10.4).
+
+It polls `/api/status` and gives you status / active attack / last attack /
+history / Nurtec entities plus `attack_started`, `attack_ended`, and
+`status_changed` events. See
+[docs/home-assistant.md](docs/home-assistant.md) for install details, the YAML +
+ntfy alternatives, and the honest limitations: polling can miss an attack that
+starts and ends between polls, only one of several ongoing attacks is reported,
+and an active attack with no parseable start can lose its end event.
 
 ### Backups
 

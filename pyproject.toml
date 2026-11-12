@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 88
+# homeassistant 2026.10.4 (the version pinned by the test plugin) requires Python >=3.14.2.
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "SIM"]
+# E501: the formatter enforces 88 columns for code; long comments/strings are allowed.
+# SIM105/SIM108: explicit try/except-pass and if/else are clearer in HA entity code.
+ignore = ["E501", "SIM105", "SIM108"]
+
+[tool.ruff.lint.isort]
+# Match HA core: plain imports and from-imports sort together, so
+# `import voluptuous as vol` legally follows the `from homeassistant ...` block
+# (it must be imported after homeassistant, which aliases voluptuous).
+force-sort-within-sections = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The HA test plugin does not enable pytest-asyncio's auto mode itself.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -9,7 +9,7 @@ npm ci
 npm ci --prefix server
 ```
 
-Verification (the commands below run locally and in CI; `.github/workflows/ci.yml` runs this full suite on pushes and pull requests to `main` and publishes the tested GHCR image from `main`):
+Verification (the commands below run locally and in CI; `.github/workflows/ci.yml` runs this full suite and the separate `homeassistant` job for the Python custom integration on pushes to `main` and `feature/**`, on pull requests to `main`, and on manual dispatch, and publishes the tested GHCR image from `main` only after both `verify` and `homeassistant` pass):
 
 ```sh
 npm test                     # Vitest: shared/ unit tests and src/ tests
@@ -21,6 +21,25 @@ npm run validate:demo        # demo artifact: marker, base paths, SPA fallback, 
 node --check server/index.js # server syntax check
 npm test --prefix server     # Node built-in test runner (server/test)
 ```
+
+The Home Assistant integration and its tests are Python and run from the **repository root** (not `app/`), with Python 3.14.2+:
+
+```sh
+python -m venv .venv
+. .venv/bin/activate                 # Windows: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements-homeassistant-dev.txt
+
+python -m pytest -q                 # full suite from the repository root
+# Focused alternative while iterating:
+# python -m pytest tests/homeassistant -q
+python -m ruff check custom_components/migraine_tracker tests/homeassistant conftest.py
+python -m ruff format --check custom_components/migraine_tracker tests/homeassistant conftest.py
+python -m compileall -q custom_components/migraine_tracker
+python -c "import json; [json.load(open(p, encoding='utf-8')) for p in ('custom_components/migraine_tracker/manifest.json','custom_components/migraine_tracker/strings.json','custom_components/migraine_tracker/translations/en.json','hacs.json')]"
+docker run --rm -v "$PWD:/github/workspace" ghcr.io/home-assistant/hassfest@sha256:da6522993280166fe072704989a2b4c33e639e8ceb69c8ab6ad7ec5045c1a1e3
+```
+
+`pytest` does not run on native Windows: the HA test harness imports `homeassistant.runner`, which imports `fcntl`. Run it under Linux, WSL, or a container; `ruff` and `compileall` work anywhere. CI runs the same steps on `ubuntu-latest` in the `homeassistant` job (hassfest via the official, digest-pinned container image — it is not on PyPI and is not shipped in the `homeassistant` wheel).
 
 Vitest defaults to the `node` environment in `vite.config.ts`; component/store tests opt into jsdom with a `// @vitest-environment jsdom` pragma and use React Testing Library. Run `npm run build` before `npm run validate:pwa` for the full check — the validator skips `dist/` when it is absent.
 
@@ -53,6 +72,9 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 - `app/shared/*.ts` is imported by both Vite and Node 24 native type-stripping, so only erasable TypeScript syntax is allowed (no enums, namespaces, or parameter properties); the Docker runtime image copies `shared/` for that reason.
 - Bulk `/api/import` is additive and uses `INSERT OR IGNORE`, not replace/upsert. `/api/reset` deletes all server records and settings.
 - `GET /api/status` is a read-only, versioned (`apiVersion: 1`) projection for Home Assistant, built by `app/shared/status.ts` from existing rows and the same shared rules (`shared/attackstats.ts` 08:00 attack days, `shared/daystate.ts` precedence, `shared/inventory.ts` stock): `state` (`attack`/`off`/`well`/`no_data`), `activeAttack`, `today`, `lastAttack`, `history`, and `inventory.nurtec` (both inventory routes share `computeNurtecStock` in `server/app.js`). It adds no schema, write path, setting, or auth/CORS behavior, is never cached (`Cache-Control: no-store`), and normalizes every instant; activeness is `activeAttack`, never `state == "attack"`. `docs/home-assistant.md` is the consumer handoff.
+- `custom_components/migraine_tracker/` is the Home Assistant custom integration (manifest plus root `hacs.json`, config flow, coordinator, diagnostics, binary sensor/sensor/event platforms, `strings.json` and `translations/en.json`). It is read-only: one `GET {base}/api/status` per scan interval and no other method or URL. Tests live in `tests/homeassistant/`; an autouse guard rejects any non-GET or non-status URL recorded by the plugin's `aioclient_mock`, and tests that drive the recording fake session assert the method and URL of every recorded call. There is no tagged release or HACS/Marketplace publication yet, so installation is a manual copy into HA's `custom_components/` directory. Device identity is `entry.entry_id`, never the URL, so reconfigure keeps one device and its entity links.
+- HA toolchain pinning is `requirements-homeassistant-dev.txt` (`pytest-homeassistant-custom-component==0.13.375` pins `homeassistant==2026.10.4`, plus `ruff==0.17.4`) and root `pyproject.toml` (pytest asyncio mode, ruff configuration). Requires Python >= 3.14.2. HA 2026.10 replaced voluptuous with probatio but aliases `import voluptuous` (`probatio.compat.install_as_voluptuous()`); the integration imports `voluptuous` after `homeassistant`, so it works on both the declared 2025.8 floor and tested 2026.10.
+- The config entry keeps `scan_interval` and the optional reverse-proxy `Authorization` header in `entry.options` (never entry data, never logged, never exported in diagnostics). No update listeners are registered: `OptionsFlowWithReload` reloads the entry. Version-gap policy: tests pin whatever `pytest-homeassistant-custom-component` pins and the live instance may be one minor ahead — record the gap (`tests` 2026.10.4 vs live 2026.11.1) rather than forcing versions.
 
 ## Data safety and deployment
 
@@ -70,6 +92,7 @@ For a production-like local run, `npm run build` then `npm start --prefix server
 - Lint: `npm run lint`
 - Typecheck: `npm run build` (there is no separate typecheck script; `tsc -b` runs first)
 - Full verification: `npm test`, `npm run lint`, `npm run build`, `npm run validate:pwa`, `npm run build:demo`, `npm run validate:demo`, `node --check server/index.js`, and `npm test --prefix server`, all from `app/`
+- Home Assistant integration (from the repository root, Python 3.14.2+): `python -m pytest -q` (or the focused `python -m pytest tests/homeassistant -q`), `python -m ruff check custom_components/migraine_tracker tests/homeassistant conftest.py`, `python -m ruff format --check custom_components/migraine_tracker tests/homeassistant conftest.py`, `python -m compileall -q custom_components/migraine_tracker`, the manifest/strings/translations/hacs JSON validation one-liner, and the digest-pinned hassfest container command listed under Commands. `pytest` requires Linux, WSL, or a container (the HA harness imports `fcntl`).
 
 ## Project boundaries
 

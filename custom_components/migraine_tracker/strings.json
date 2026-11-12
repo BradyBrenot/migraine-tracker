@@ -1,0 +1,109 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Migraine Tracker",
+        "description": "Enter the base URL of your Migraine Tracker, for example http://migraine-tracker:8097. The integration periodically reads GET /api/status. If the tracker sits behind an authenticating reverse proxy, also enter the Authorization header value it expects.",
+        "data": {
+          "url": "Base URL",
+          "authorization": "Authorization header (optional)"
+        },
+        "data_description": {
+          "authorization": "Sent verbatim as the Authorization header. Leave empty when the tracker or its proxy requires no authentication."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Migraine Tracker",
+        "description": "Update the base URL of the tracker. The URL is validated with a single GET of /api/status before it is saved.",
+        "data": {
+          "url": "Base URL",
+          "authorization": "New Authorization header (optional)"
+        },
+        "data_description": {
+          "authorization": "Leave empty to keep the stored header. Enter a value only to replace it."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the tracker. Check the URL and that the tracker is reachable from Home Assistant.",
+      "invalid_response": "The tracker returned a response that is not a valid apiVersion 1 status document.",
+      "unsupported_api_version": "The tracker does not support API version 1. Update the tracker and try again.",
+      "unauthorized": "The tracker or its reverse proxy rejected the request (401 or 403). Check the Authorization header.",
+      "invalid_url": "Enter the base URL only: an http or https URL without credentials, query string, or fragment, and without the /api/status path.",
+      "invalid_authorization": "The Authorization header contains a character that cannot be sent in an HTTP header (such as a line break or unsupported Unicode). Remove it and try again."
+    },
+    "abort": {
+      "already_configured": "This tracker is already configured.",
+      "single_instance_allowed": "Only one Migraine Tracker entry is allowed.",
+      "reconfigure_successful": "Migraine Tracker was reconfigured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Migraine Tracker options",
+        "description": "Choose how often the tracker is polled and manage the optional Authorization header.",
+        "data": {
+          "scan_interval": "Scan interval (seconds)",
+          "authorization": "New Authorization header (optional)",
+          "clear_authorization": "Remove the stored Authorization header"
+        },
+        "data_description": {
+          "scan_interval": "Between 15 and 3600 seconds. Values outside that range are clamped.",
+          "authorization": "Leave empty to keep the stored header. Enter a value only to replace it.",
+          "clear_authorization": "Deliberately deletes the stored header. Takes precedence over the field above."
+        }
+      }
+    },
+    "error": {
+      "invalid_authorization": "The Authorization header contains a character that cannot be sent in an HTTP header (such as a line break or unsupported Unicode). Remove it and try again."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "active": {
+        "name": "Active attack"
+      },
+      "nurtec_low": {
+        "name": "Nurtec low stock"
+      },
+      "nurtec_negative": {
+        "name": "Nurtec stock negative"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "attack": "Attack",
+          "off": "Off day",
+          "well": "Well",
+          "no_data": "No data"
+        }
+      },
+      "last_attack_started": {
+        "name": "Last attack started"
+      },
+      "days_since_last_attack": {
+        "name": "Days since last attack"
+      },
+      "attack_days_last_7_days": {
+        "name": "Attack days last 7 days"
+      },
+      "attack_days_last_30_days": {
+        "name": "Attack days last 30 days"
+      },
+      "attacks_started_last_30_days": {
+        "name": "Attacks started last 30 days"
+      },
+      "nurtec_tablets": {
+        "name": "Nurtec tablets"
+      }
+    },
+    "event": {
+      "attack_event": {
+        "name": "Attack event"
+      }
+    }
+  }
+}

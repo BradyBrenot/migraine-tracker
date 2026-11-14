@@ -12,6 +12,10 @@ import {
 } from '../migrations.js';
 import { makeTempDir, cleanupDir, LEGACY_DDL } from './helpers.js';
 
+const tableNames = (db) => db.prepare(
+  "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+).all().map((r) => r.name);
+
 test('fresh database migrates from version 0 to the current schema version', () => {
   const dir = makeTempDir('migraine-fresh');
   try {
@@ -23,6 +27,14 @@ test('fresh database migrates from version 0 to the current schema version', () 
       const row = db.prepare('SELECT * FROM attacks WHERE id = ?').get('a1');
       assert.equal(row.peak_pain, -1); // column default applied
       assert.equal(row.pain_log, '[]');
+      // v2 workouts defaults: duration unknown, empty notes, manual source.
+      db.prepare(`INSERT INTO workouts (id,performed_at,kind,effort)
+        VALUES ('w1','2026-01-01T00:00:00Z','cardio','low')`).run();
+      const workout = db.prepare('SELECT * FROM workouts WHERE id = ?').get('w1');
+      assert.equal(workout.duration_minutes, null);
+      assert.equal(workout.notes, '');
+      assert.equal(workout.source, 'manual');
+      assert.ok(tableNames(db).includes('day_states'));
     } finally {
       db.close();
     }
@@ -80,9 +92,6 @@ test('populated v0/v1/v2 databases upgrade to v4: rows intact, quantities NULL, 
     { version: 1, withV2Tables: false },
     { version: 2, withV2Tables: true },
   ];
-  const tableNames = (db) => db.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-  ).all().map((r) => r.name);
 
   for (const { version, withV2Tables } of cases) {
     const dir = makeTempDir(`migraine-v${version}-to-current`);
@@ -141,7 +150,17 @@ test('populated v0/v1/v2 databases upgrade to v4: rows intact, quantities NULL, 
           assert.equal(db.prepare('SELECT COUNT(*) AS n FROM workouts').get().n, 1);
           assert.equal(db.prepare('SELECT COUNT(*) AS n FROM day_states').get().n, 1);
           assert.equal(db.prepare('SELECT notes FROM workouts WHERE id = ?').get('w1').notes, 'walk');
+        } else {
+          // v0/v1 acquire both v2 tables empty; the exact table set is below.
+          assert.equal(db.prepare('SELECT COUNT(*) AS n FROM workouts').get().n, 0);
+          assert.equal(db.prepare('SELECT COUNT(*) AS n FROM day_states').get().n, 0);
         }
+
+        // Exact v4 table set for every upgrade path (no leftovers, no gaps).
+        assert.deepEqual(tableNames(db).sort(), [
+          'attacks', 'day_states', 'meds', 'refills', 'reminder_occurrences',
+          'reminder_state', 'settings', 'stock_baselines', 'workouts',
+        ]);
 
         // inventory table is created empty and usable
         assert.ok(tableNames(db).includes('stock_baselines'));

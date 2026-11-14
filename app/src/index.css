@@ -45,14 +45,6 @@
     --input: 217.2 32.6% 24%;
     --ring: 231 68% 74%;
     --radius: 0.75rem;
-    --sidebar-background: 222.2 47.4% 11.2%;
-    --sidebar-foreground: 213 31% 91%;
-    --sidebar-primary: 231 68% 74%;
-    --sidebar-primary-foreground: 231 45% 12%;
-    --sidebar-accent: 217.2 32.6% 20%;
-    --sidebar-accent-foreground: 213 31% 93%;
-    --sidebar-border: 217.2 32.6% 20%;
-    --sidebar-ring: 231 68% 74%;
     color-scheme: dark;
   }
 }

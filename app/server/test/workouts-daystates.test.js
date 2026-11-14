@@ -1,115 +1,21 @@
-// Schema v2: workouts + day states. Covers the additive migration, validated
-// CRUD/upsert routes, and deliberate export/import/backup/reset inclusion.
+// Schema v2: workouts + day states. Covers validated CRUD/upsert routes and
+// deliberate export/import/backup/reset inclusion.
 // Every database lives in a disposable temp dir; requests use inject() only.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from '../db.js';
 import { currentUserVersion, SCHEMA_VERSION } from '../migrations.js';
 import { dumpBackup } from '../backup.js';
 import { isValidIsoInstant } from '../validate.js';
-import { makeApp, makeTempDir, cleanupDir, LEGACY_DDL } from './helpers.js';
+import { makeApp, makeTempDir, cleanupDir } from './helpers.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const workout = (overrides = {}) => ({
   performedAt: '2026-03-01T07:00:00.000Z', kind: 'strength', effort: 'medium', ...overrides,
-});
-
-const tableNames = (db) => db.prepare(
-  "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-).all().map((r) => r.name).sort();
-
-// ── migrations ────────────────────────────────────────────────────────
-test('fresh database reaches the current schema with workouts and day_states', () => {
-  const dir = makeTempDir('migraine-v2-fresh');
-  try {
-    const db = openDatabase(dir, { log: () => {} });
-    try {
-      assert.equal(SCHEMA_VERSION, 4);
-      assert.equal(currentUserVersion(db), SCHEMA_VERSION);
-      assert.ok(tableNames(db).includes('workouts'));
-      assert.ok(tableNames(db).includes('day_states'));
-      assert.ok(tableNames(db).includes('reminder_occurrences'));
-      assert.ok(tableNames(db).includes('reminder_state'));
-      // NOT NULL + defaults behave as designed
-      db.prepare(`INSERT INTO workouts (id,performed_at,kind,effort) VALUES ('w1','2026-01-01T00:00:00Z','cardio','low')`).run();
-      const w = db.prepare('SELECT * FROM workouts WHERE id = ?').get('w1');
-      assert.equal(w.duration_minutes, null);
-      assert.equal(w.notes, '');
-      assert.equal(w.source, 'manual');
-    } finally {
-      db.close();
-    }
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-test('legacy v0 database upgrades to the current schema without data loss and gains both tables', () => {
-  const dir = makeTempDir('migraine-v2-from-v0');
-  try {
-    const file = join(dir, 'migraine.db');
-    const legacy = new DatabaseSync(file);
-    legacy.exec(LEGACY_DDL);
-    legacy.prepare(`INSERT INTO attacks (id,start,notes) VALUES ('atk1','2025-06-01T08:00:00Z','legacy')`).run();
-    legacy.prepare(`INSERT INTO meds (id,med_id,ts) VALUES ('m1','nurtec','2025-06-01T09:00:00Z')`).run();
-    legacy.prepare(`INSERT INTO refills (id,med_id,date) VALUES ('r1','nurtec','2025-05-20')`).run();
-    legacy.prepare(`INSERT INTO settings (key,value) VALUES ('rules','{}')`).run();
-    assert.equal(currentUserVersion(legacy), 0);
-    legacy.close();
-
-    const db = openDatabase(dir, { log: () => {} });
-    try {
-      assert.equal(currentUserVersion(db), SCHEMA_VERSION);
-      assert.ok(tableNames(db).includes('workouts'));
-      assert.ok(tableNames(db).includes('day_states'));
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM attacks').get().n, 1);
-      assert.equal(db.prepare('SELECT notes FROM attacks WHERE id = ?').get('atk1').notes, 'legacy');
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM meds').get().n, 1);
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM refills').get().n, 1);
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM settings').get().n, 1);
-    } finally {
-      db.close();
-    }
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-test('v1 database upgrades to the current schema without data loss and gains both tables', () => {
-  const dir = makeTempDir('migraine-v2-from-v1');
-  try {
-    const file = join(dir, 'migraine.db');
-    const v1 = new DatabaseSync(file);
-    v1.exec(LEGACY_DDL);
-    v1.exec('PRAGMA user_version = 1');
-    v1.prepare(`INSERT INTO attacks (id,start) VALUES ('atk1','2026-01-01T00:00:00Z')`).run();
-    v1.prepare(`INSERT INTO refills (id,med_id,date) VALUES ('r1','nurtec','2026-01-02')`).run();
-    assert.equal(currentUserVersion(v1), 1);
-    v1.close();
-
-    const db = openDatabase(dir, { log: () => {} });
-    try {
-      assert.equal(currentUserVersion(db), SCHEMA_VERSION);
-      assert.deepEqual(
-        tableNames(db),
-        [
-          'attacks', 'day_states', 'meds', 'refills', 'reminder_occurrences',
-          'reminder_state', 'settings', 'stock_baselines', 'workouts',
-        ],
-      );
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM attacks').get().n, 1);
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM refills').get().n, 1);
-    } finally {
-      db.close();
-    }
-  } finally {
-    cleanupDir(dir);
-  }
 });
 
 // ── workouts CRUD ─────────────────────────────────────────────────────

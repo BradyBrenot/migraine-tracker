@@ -2,7 +2,6 @@
 import path from "path"
 import react from "@vitejs/plugin-react"
 import { defineConfig, type Plugin } from "vite"
-import { inspectAttr } from 'kimi-plugin-inspect-react'
 
 /**
  * GitHub Pages serves a project site under `/<repository>/`. CI supplies the
@@ -61,7 +60,7 @@ export default defineConfig(({ mode }) => {
     // VITE_BASE is demo-only: production/Docker always stays at the origin root
     // with its existing root-scoped manifests, regardless of ambient CI env.
     base: demo ? normalizeBase(process.env.VITE_BASE, DEMO_DEFAULT_BASE) : '/',
-    plugins: demo ? [inspectAttr(), react(), demoMarker()] : [inspectAttr(), react()],
+    plugins: demo ? [react(), demoMarker()] : [react()],
     server: {
       port: 3000,
       proxy: {

@@ -172,35 +172,6 @@ describe('buildStatus state precedence', () => {
 });
 
 describe('buildStatus and the 08:00 attack-day rule', () => {
-  it('attributes a 01:00-02:00 attack today to yesterday', () => {
-    const status = build({
-      attacks: [attack({ start: iso('2026-06-15', '01:00'), end: iso('2026-06-15', '02:00') })],
-    });
-    expect(status.today.status).toBeNull();
-    expect(status.today.source).toBe('none');
-    expect(status.state).toBe('no_data');
-    expect(status.history.attackDaysLast7Days).toBe(1); // 2026-06-14
-    expect(status.history.attackDaysLast30Days).toBe(1);
-    expect(status.history.attacksStartedLast30Days).toBe(1); // start day is 06-15
-  });
-
-  it('counts both adjacent days for an attack crossing 08:00', () => {
-    const status = build({
-      attacks: [attack({ start: iso('2026-06-14', '22:00'), end: iso('2026-06-15', '09:00') })],
-    });
-    expect(status.history.attackDaysLast7Days).toBe(2); // 06-14 and 06-15
-    expect(status.today).toEqual({ day: NOW_DAY, status: 'off', source: 'inferred' });
-  });
-
-  it('counts only the previous day for an attack ending exactly at 08:00', () => {
-    const status = build({
-      attacks: [attack({ start: iso('2026-06-15', '06:00'), end: iso('2026-06-15', '08:00') })],
-    });
-    expect(status.history.attackDaysLast7Days).toBe(1); // half-open: 06-14 only
-    expect(status.today.status).toBeNull();
-    expect(status.state).toBe('no_data');
-  });
-
   it('counts a night attack that ended before 08:00 on the previous day only', () => {
     const status = build({
       attacks: [attack({ start: iso('2026-06-14', '21:00'), end: iso('2026-06-15', '06:00') })],

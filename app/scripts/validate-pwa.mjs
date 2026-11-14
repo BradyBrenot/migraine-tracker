@@ -177,6 +177,21 @@ function validateIndex(html, label, options = {}) {
   if (options.title) {
     check(html.includes(`<title>${options.title}</title>`), `${label}: title must be ${options.title}`);
   }
+  if (options.requireEntryScript) {
+    check(html.includes('src="/src/main.tsx"'), `${label}: missing /src/main.tsx entry script`);
+  }
+  if (options.requireNoindex) {
+    check(
+      html.includes('name="robots" content="noindex, nofollow"'),
+      `${label}: missing noindex robots meta`,
+    );
+  }
+  if (options.requireDescription) {
+    check(
+      /name="description"\s+content="[^"]{20,}"/.test(html),
+      `${label}: missing a description of at least 20 characters`,
+    );
+  }
   check(html.includes(`name="theme-color" content="${BACKGROUND}"`), `${label}: theme-color`);
   check(html.includes('viewport-fit=cover'), `${label}: viewport-fit=cover`);
   check(/<link[^>]+rel="apple-touch-icon"[^>]+href="\/[^"]+"/.test(html), `${label}: apple-touch-icon`);
@@ -189,7 +204,10 @@ console.log(`  source root: ${APP_ROOT}`);
 const sourceManifestFile = join(PUBLIC_DIR, 'manifest.webmanifest');
 const sourceManifest = readJson(sourceManifestFile, 'source manifest');
 console.log('  source manifest: public/manifest.webmanifest');
-validateManifest(sourceManifest, 'source manifest');
+validateManifest(sourceManifest, 'source manifest', {
+  name: 'Migraine Tracker',
+  short_name: 'Migraine',
+});
 if (sourceManifest) {
   console.log(
     `    id=${sourceManifest.id} start_url=${sourceManifest.start_url} ` +
@@ -238,8 +256,12 @@ const sourceIndexFile = join(APP_ROOT, 'index.html');
 if (existsSync(sourceIndexFile)) {
   validateIndex(readFileSync(sourceIndexFile, 'utf8'), 'source index.html', {
     forbiddenHref: '/partner.webmanifest',
+    title: 'Migraine Tracker',
+    requireEntryScript: true,
+    requireNoindex: true,
+    requireDescription: true,
   });
-  console.log('  source index.html: manifest link, theme-color, viewport-fit=cover');
+  console.log('  source index.html: manifest link, title, entry script, noindex, theme-color, viewport-fit=cover');
 } else {
   fail(`source index.html: missing ${sourceIndexFile}`);
 }
@@ -251,10 +273,30 @@ if (existsSync(sourceViewFile)) {
     manifestHref: '/partner.webmanifest',
     forbiddenHref: '/manifest.webmanifest',
     title: 'Migraine Partner',
+    requireEntryScript: true,
+    requireNoindex: true,
+    requireDescription: true,
   });
-  console.log('  source view.html: partner manifest link, theme-color, viewport-fit=cover');
+  console.log('  source view.html: partner manifest link, title, entry script, noindex, theme-color, viewport-fit=cover');
 } else {
   fail(`source view.html: missing ${sourceViewFile}`);
+}
+
+// ── source: robots.txt privacy policy ─────────────────────────────────
+const sourceRobotsFile = join(PUBLIC_DIR, 'robots.txt');
+let sourceRobots = null;
+if (existsSync(sourceRobotsFile)) {
+  sourceRobots = readFileSync(sourceRobotsFile, 'utf8');
+  check(/^User-agent:\s*\*$/m.test(sourceRobots), 'source robots.txt: missing User-agent: *');
+  // An empty Disallow allows crawlers to read the noindex meta tags.
+  check(/^Disallow:\s*$/m.test(sourceRobots), 'source robots.txt: missing an empty Disallow:');
+  check(
+    !/^Disallow:\s*\//m.test(sourceRobots),
+    'source robots.txt: Disallow: / would block crawlers from the noindex page',
+  );
+  console.log('  source robots.txt: User-agent: * with an empty Disallow:');
+} else {
+  fail(`source robots.txt: missing ${sourceRobotsFile}`);
 }
 
 // ── built output (optional) ───────────────────────────────────────────
@@ -332,6 +374,19 @@ if (!distBuilt) {
     console.log('    dist view.html: root-absolute /assets/ URLs');
   } else {
     fail(`dist view.html: missing ${distViewFile} (stale build — run \`npm run build\`)`);
+  }
+
+  const distRobotsFile = join(DIST_DIR, 'robots.txt');
+  if (sourceRobots !== null) {
+    if (existsSync(distRobotsFile)) {
+      check(
+        readFileSync(distRobotsFile, 'utf8') === sourceRobots,
+        'dist robots.txt: differs from public/robots.txt',
+      );
+      console.log('    dist robots.txt: unchanged from source');
+    } else {
+      fail(`dist robots.txt: missing ${distRobotsFile} (stale build — run \`npm run build\`)`);
+    }
   }
 }
 

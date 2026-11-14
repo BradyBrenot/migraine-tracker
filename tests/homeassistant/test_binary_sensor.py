@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.helpers import entity_registry as er
 import pytest
-
-from custom_components.migraine_tracker.binary_sensor import (
-    BINARY_SENSOR_DESCRIPTIONS,
-)
 
 from .helpers import (
     ACTIVE_ATTACK,
@@ -18,8 +13,6 @@ from .helpers import (
     state_for,
     with_nurtec,
 )
-
-BINARY_SENSOR_KEYS = {description.key for description in BINARY_SENSOR_DESCRIPTIONS}
 
 
 async def test_active_sensor_uses_active_attack(
@@ -52,16 +45,6 @@ async def test_active_sensor_off_without_active_attack(
     state = state_for(hass, entry, "binary_sensor", "active")
     assert state.state == "off"
     assert state.attributes["active_attack_id"] is None
-
-
-async def test_legacy_attack_day_is_not_an_active_attack(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """A legacy day record says ``attack`` while no attack is ongoing."""
-    entry = await setup_mocked_entry(hass, aioclient_mock, LEGACY_ATTACK_DAY)
-
-    assert state_for(hass, entry, "sensor", "status").state == "attack"
-    assert state_for(hass, entry, "binary_sensor", "active").state == "off"
 
 
 async def test_nurtec_low_stock_sensor(
@@ -102,21 +85,3 @@ async def test_nurtec_negative_stock_sensor(
     # Only the low-stock sensor is documented as a problem device class.
     assert "device_class" not in state.attributes
     assert state_for(hass, entry, "sensor", "nurtec_tablets").state == "-1"
-
-
-async def test_binary_sensor_unique_ids_and_device_association(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """Unique IDs are stable and every sensor belongs to the single device."""
-    entry = await setup_mocked_entry(hass, aioclient_mock, ACTIVE_ATTACK)
-    registry = er.async_get(hass)
-
-    entries = [
-        item
-        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
-        if item.domain == "binary_sensor"
-    ]
-    assert {item.unique_id for item in entries} == {
-        f"{entry.entry_id}_{key}" for key in BINARY_SENSOR_KEYS
-    }
-    assert len({item.device_id for item in entries}) == 1

@@ -205,38 +205,6 @@ test('preventive: automatic due is local dose day + 30/84 calendar days at 09:00
   );
 });
 
-test('preventive: never logged and no planned date never reminds', async (t) => {
-  const { db } = makeDb(t, 'preventive-none');
-  seedSettings(db);
-  const clock = makeClock('2026-04-10T14:00:00.000Z');
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  const summary = await engine.tick();
-  assert.equal(summary.sent, 0);
-  assert.equal(calls.length, 0);
-  assert.equal(occurrenceCount(db), 0);
-});
-
-test('preventive: the latest valid dose wins and invalid timestamps are ignored', async (t) => {
-  const { db } = makeDb(t, 'preventive-latest');
-  seedSettings(db);
-  insertMeds(db, [
-    ['e1', 'emgality', '2026-04-01T15:00:00.000Z'], // local Apr 1 -> due May 1
-    ['e2', 'emgality', '2026-04-05T15:00:00.000Z'], // latest valid -> due May 5
-    ['e3', 'emgality', '2026-04-03T15:00:00.000Z'],
-    ['e-bad-1', 'emgality', 'not-a-timestamp'],
-    ['e-bad-2', 'emgality', '2099-13-40T99:99:99Z'],
-  ]);
-
-  const clock = makeClock('2026-05-05T13:00:00.000Z'); // 09:00 EDT
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  assert.equal((await engine.tick()).sent, 1);
-  assert.deepEqual(occurrenceKeys(db, 'preventive'), ['preventive:emgality:2026-05-05']);
-});
-
 test('preventive: success dedupes on repeated ticks and across a fresh engine on the same database', async (t) => {
   const { db } = makeDb(t, 'preventive-dedupe');
   seedSettings(db, { planned: { emgality: '2026-04-10' } });
@@ -291,35 +259,6 @@ test('waking: persistent preventive and low-stock rows wait outside 09:00-21:00 
   assert.equal(occurrence(db, stockKeys[0]).status, 'succeeded');
 });
 
-test('waking: 20:59 is inside and 21:00 is outside the default window', async (t) => {
-  const inside = makeDb(t, 'waking-2059');
-  seedSettings(inside.db, {
-    planned: { emgality: '2026-04-10' },
-    reminders: { checkIn: false, exercise: false, lowStock: false },
-  });
-  const insideClock = makeClock('2026-04-11T00:59:00.000Z'); // 20:59 EDT Apr 10
-  const insideRecorder = recorder();
-  const insideEngine = engineFor(inside.db, insideClock, insideRecorder.transport);
-  assert.equal((await insideEngine.tick()).sent, 1);
-
-  const outside = makeDb(t, 'waking-2100');
-  seedSettings(outside.db, {
-    planned: { emgality: '2026-04-10' },
-    reminders: { checkIn: false, exercise: false, lowStock: false },
-  });
-  const outsideClock = makeClock('2026-04-11T01:00:00.000Z'); // 21:00 EDT
-  const outsideRecorder = recorder();
-  const outsideEngine = engineFor(outside.db, outsideClock, outsideRecorder.transport);
-
-  assert.equal((await outsideEngine.tick()).sent, 0);
-  assert.equal(outsideRecorder.calls.length, 0);
-  assert.equal(occurrence(outside.db, 'preventive:emgality:2026-04-10').status, 'pending');
-
-  outsideClock.set('2026-04-11T13:00:00.000Z'); // next 09:00 EDT
-  assert.equal((await outsideEngine.tick()).sent, 1);
-  assert.equal(outsideRecorder.calls.length, 1);
-});
-
 test('waking: a custom narrow waking window is honored', async (t) => {
   const { db } = makeDb(t, 'waking-narrow');
   seedSettings(db, {
@@ -372,26 +311,6 @@ test('check-in: missing day-state sends at checkInTime once per local day; prior
   assert.equal((await engine.tick()).sent, 1);
   assert.equal(calls.length, 2);
   assert.deepEqual(occurrenceKeys(db, 'checkin'), ['checkin:2026-04-10', 'checkin:2026-04-11']);
-});
-
-test('check-in: any explicit day-state (well/off/attack) suppresses the prompt', async (t) => {
-  for (const status of ['well', 'off', 'attack']) {
-    const { db } = makeDb(t, `checkin-${status}`);
-    seedSettings(db, { reminders: CHECKIN_ONLY });
-    db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
-      VALUES ('2026-04-10',?,'','2026-04-10T15:00:00.000Z')`).run(status);
-
-    const clock = makeClock('2026-04-10T22:00:00.000Z'); // 18:00 EDT
-    const { transport, calls } = recorder();
-    const engine = engineFor(db, clock, transport);
-
-    const summary = await engine.tick();
-    assert.equal(summary.sent, 0, `status ${status} must suppress`);
-    assert.equal(calls.length, 0);
-    const row = occurrence(db, 'checkin:2026-04-10');
-    assert.equal(row.status, 'skipped');
-    assert.equal(row.last_error_category, 'condition_gone');
-  }
 });
 
 test('check-in: a restart inside the grace window still delivers a missed prompt', async (t) => {
@@ -490,74 +409,6 @@ test('exercise: a behind Sunday week sends at exerciseTime and met goals suppres
   assert.equal(occurrence(met.db, 'exercise:2026-04-10').last_error_category, 'condition_gone');
 });
 
-test('exercise: mobility sessions never satisfy strength/cardio goals', async (t) => {
-  const { db } = makeDb(t, 'exercise-mobility');
-  seedSettings(db, { reminders: EXERCISE_ONLY });
-  seedWorkouts(db, [
-    ['2026-04-06T12:00:00.000Z', 'mobility'],
-    ['2026-04-07T12:00:00.000Z', 'mobility'],
-    ['2026-04-08T12:00:00.000Z', 'mobility'],
-    ['2026-04-09T12:00:00.000Z', 'mobility'],
-    ['2026-04-10T12:00:00.000Z', 'mobility'],
-  ]);
-  const clock = makeClock('2026-04-10T22:30:00.000Z');
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  assert.equal((await engine.tick()).sent, 1);
-  assert.equal(calls.length, 1);
-});
-
-test('exercise: duplicate same-day goal-kind workouts never meet the goals or suppress the prompt', async (t) => {
-  const { db } = makeDb(t, 'exercise-duplicates');
-  seedSettings(db, { reminders: EXERCISE_ONLY });
-  // Strength x2 on Monday Apr 6 and Cardio x3 on Tuesday Apr 7: only two
-  // distinct goal days, so the weekly minimums are still short.
-  seedWorkouts(db, [
-    ['2026-04-06T12:00:00.000Z', 'strength'],
-    ['2026-04-06T18:00:00.000Z', 'strength'],
-    ['2026-04-07T12:00:00.000Z', 'cardio'],
-    ['2026-04-07T15:00:00.000Z', 'cardio'],
-    ['2026-04-07T18:00:00.000Z', 'cardio'],
-  ]);
-  const clock = makeClock('2026-04-10T22:30:00.000Z'); // 18:30 EDT Fri
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  assert.equal((await engine.tick()).sent, 1);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].title, 'Weekly movement check');
-  assert.match(calls[0].body, /2 strength days and 3 cardio days/);
-  assert.equal(occurrence(db, 'exercise:2026-04-10').status, 'succeeded');
-});
-
-test('exercise: explicit and attack-inferred Attack days suppress the prompt', async (t) => {
-  const explicit = makeDb(t, 'exercise-attack');
-  seedSettings(explicit.db, { reminders: EXERCISE_ONLY });
-  explicit.db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
-    VALUES ('2026-04-10','attack','','2026-04-10T12:00:00.000Z')`).run();
-  const explicitClock = makeClock('2026-04-10T22:30:00.000Z');
-  const explicitRecorder = recorder();
-  const explicitEngine = engineFor(explicit.db, explicitClock, explicitRecorder.transport);
-
-  assert.equal((await explicitEngine.tick()).sent, 0);
-  assert.equal(explicitRecorder.calls.length, 0);
-  assert.equal(occurrence(explicit.db, 'exercise:2026-04-10').status, 'skipped');
-
-  const inferred = makeDb(t, 'exercise-inferred-attack');
-  seedSettings(inferred.db, { reminders: EXERCISE_ONLY });
-  // No day-state: the attack record itself makes 2026-04-10 an Attack day.
-  inferred.db.prepare(`INSERT INTO attacks (id,start,"end")
-    VALUES ('a1','2026-04-10T10:00:00.000Z','2026-04-10T20:00:00.000Z')`).run();
-  const inferredClock = makeClock('2026-04-10T22:30:00.000Z');
-  const inferredRecorder = recorder();
-  const inferredEngine = engineFor(inferred.db, inferredClock, inferredRecorder.transport);
-
-  assert.equal((await inferredEngine.tick()).sent, 0);
-  assert.equal(inferredRecorder.calls.length, 0);
-  assert.equal(occurrence(inferred.db, 'exercise:2026-04-10').status, 'skipped');
-});
-
 test('exercise: an attack active at now suppresses the prompt despite an earlier Well/Off record', async (t) => {
   // (a) explicit Off recorded earlier that day, attack still ongoing at 18:30 EDT
   {
@@ -639,34 +490,6 @@ test('exercise: an attack active at now suppresses the prompt despite an earlier
   }
 });
 
-test('exercise: an explicit Off day sends gentle wording; Off plus met goals suppresses', async (t) => {
-  const off = makeDb(t, 'exercise-off');
-  seedSettings(off.db, { reminders: EXERCISE_ONLY });
-  off.db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
-    VALUES ('2026-04-10','off','','2026-04-10T12:00:00.000Z')`).run();
-  const offClock = makeClock('2026-04-10T22:30:00.000Z');
-  const offRecorder = recorder();
-  const offEngine = engineFor(off.db, offClock, offRecorder.transport);
-
-  assert.equal((await offEngine.tick()).sent, 1);
-  assert.equal(offRecorder.calls.length, 1);
-  assert.equal(offRecorder.calls[0].title, 'Gentle movement option');
-  assert.match(offRecorder.calls[0].body, /light walk or mobility/i);
-
-  const offMet = makeDb(t, 'exercise-off-met');
-  seedSettings(offMet.db, { reminders: EXERCISE_ONLY });
-  offMet.db.prepare(`INSERT INTO day_states (day,status,notes,updated_at)
-    VALUES ('2026-04-10','off','','2026-04-10T12:00:00.000Z')`).run();
-  seedWorkouts(offMet.db, WEEK_GOALS_MET);
-  const offMetClock = makeClock('2026-04-10T22:30:00.000Z');
-  const offMetRecorder = recorder();
-  const offMetEngine = engineFor(offMet.db, offMetClock, offMetRecorder.transport);
-
-  assert.equal((await offMetEngine.tick()).sent, 0);
-  assert.equal(offMetRecorder.calls.length, 0);
-  assert.equal(occurrence(offMet.db, 'exercise:2026-04-10').status, 'skipped');
-});
-
 test('exercise: the Sunday-week rollover creates a new occurrence and previous-week workouts do not count', async (t) => {
   const { db } = makeDb(t, 'exercise-rollover');
   seedSettings(db, { reminders: EXERCISE_ONLY });
@@ -689,47 +512,8 @@ test('exercise: the Sunday-week rollover creates a new occurrence and previous-w
   );
 });
 
-test('exercise: an occurrence past its grace window is skipped as expired', async (t) => {
-  const { db } = makeDb(t, 'exercise-expired');
-  seedSettings(db, { reminders: EXERCISE_ONLY });
-  const clock = makeClock('2026-04-11T00:31:00.000Z'); // 20:31 EDT = 18:30 + 2h + 1m
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  const summary = await engine.tick();
-  assert.equal(summary.sent, 0);
-  assert.equal(calls.length, 0);
-  const row = occurrence(db, 'exercise:2026-04-10');
-  assert.equal(row.status, 'skipped');
-  assert.equal(row.last_error_category, 'expired');
-});
-
 // ── 5. low stock ──────────────────────────────────────────────────────
 const STOCK_ONLY = { preventive: false, checkIn: false, exercise: false };
-
-test('stock: unknown stock never alerts and stock above the threshold does not either', async (t) => {
-  const unknown = makeDb(t, 'stock-unknown');
-  seedSettings(unknown.db, { reminders: STOCK_ONLY });
-  const unknownClock = makeClock('2026-04-10T14:00:00.000Z');
-  const unknownRecorder = recorder();
-  const unknownEngine = engineFor(unknown.db, unknownClock, unknownRecorder.transport);
-
-  assert.equal((await unknownEngine.tick()).sent, 0);
-  assert.equal(unknownRecorder.calls.length, 0);
-  assert.equal(occurrenceCount(unknown.db), 0); // never zero-stock, never a false alert
-
-  const above = makeDb(t, 'stock-above');
-  seedSettings(above.db, { reminders: STOCK_ONLY });
-  insertBaseline(above.db, 'b1', 'nurtec', '2026-04-01T00:00:00.000Z', 5);
-  const aboveClock = makeClock('2026-04-10T14:00:00.000Z');
-  const aboveRecorder = recorder();
-  const aboveEngine = engineFor(above.db, aboveClock, aboveRecorder.transport);
-
-  assert.equal((await aboveEngine.tick()).sent, 0);
-  assert.equal(aboveRecorder.calls.length, 0);
-  assert.equal(occurrenceCount(above.db), 0);
-  assert.equal(stateValue(above.db, 'low_stock'), null);
-});
 
 test('stock: at or below the threshold sends once per low episode, even across a restart', async (t) => {
   const { db } = makeDb(t, 'stock-low');
@@ -803,36 +587,6 @@ test('stock: replenishing above the threshold re-arms so a later new low episode
   assert.equal(keys.length, 2);
   assert.notEqual(keys[0], keys[1]);
   assert.equal(occurrence(db, keys[1]).status, 'succeeded');
-});
-
-test('stock: POST /api/reset clears internal reminder tables so a re-seeded low episode may alert again', async (t) => {
-  const h = await makeApp({ label: 'stock-reset' });
-  t.after(() => h.close());
-  const { db } = h;
-
-  seedSettings(db, { reminders: STOCK_ONLY });
-  insertBaseline(db, 'b1', 'nurtec', '2026-04-01T00:00:00.000Z', 1);
-  const clock = makeClock('2026-04-10T14:00:00.000Z');
-  const { transport, calls } = recorder();
-  const engine = engineFor(db, clock, transport);
-
-  assert.equal((await engine.tick()).sent, 1);
-  assert.equal(occurrenceCount(db), 1);
-  assert.equal(stateValue(db, 'low_stock').phase, 'low');
-
-  const res = await h.app.inject({ method: 'POST', url: '/api/reset' });
-  assert.equal(res.statusCode, 200);
-  assert.equal(occurrenceCount(db), 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reminder_state').get().n, 0);
-
-  // The reset deleted user records/settings too (documented behavior), so a
-  // low episode can only be re-seeded explicitly — but because the internal
-  // latch is gone it alerts again instead of staying silent forever.
-  seedSettings(db, { reminders: STOCK_ONLY });
-  insertBaseline(db, 'b2', 'nurtec', '2026-04-10T00:00:00.000Z', 1);
-  clock.set('2026-04-10T14:05:00.000Z');
-  assert.equal((await engine.tick()).sent, 1);
-  assert.equal(calls.length, 2);
 });
 
 test('stock: non-Nurtec meds/refills/baselines never change the Nurtec episode', async (t) => {

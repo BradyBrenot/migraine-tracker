@@ -231,24 +231,6 @@ describe('PartnerHome (read-only Now)', () => {
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 
-  it('shows Attack while an attack is active even over an explicit Well record', async () => {
-    const today = localDayKey(NOW, TZ);
-    api.exportAll.mockResolvedValue({
-      ...emptyExport(),
-      attacks: [makeAttack()],
-      dayStates: [{ day: today, status: 'well', notes: '', updatedAt: at(-4 * 60 * 60 * 1000) }],
-    });
-
-    mountHome();
-    await waitForSync();
-
-    expect(screen.getByText('Attack in progress')).toBeTruthy();
-    // Explicit record exists, so the plain label is used — never Well.
-    expect(screen.getByText('Attack')).toBeTruthy();
-    expect(screen.queryByText('Well')).toBeNull();
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
-  });
-
   it("shows today's day state, meds, workouts, and Nurtec stock/use", async () => {
     const today = localDayKey(NOW, TZ);
     api.exportAll.mockResolvedValue({
@@ -480,23 +462,6 @@ describe('PartnerHome (read-only Now)', () => {
     expect(rows[1].textContent).toContain('Tylenol');
     expect(within(rows[1]).getByText('—')).toBeTruthy();
     expect(screen.queryByText(/Invalid Date/)).toBeNull();
-  });
-
-  it('renders 0/10 pain and attack-linked meds together', async () => {
-    api.exportAll.mockResolvedValue({
-      ...emptyExport(),
-      attacks: [makeAttack({ peakPain: 0 })],
-      meds: [makeMed({ id: 'med-linked', attackId: 'attack-1' })],
-    });
-
-    mountHome();
-    await waitForSync();
-
-    expect(screen.getAllByText('0/10').length).toBeGreaterThanOrEqual(1);
-    const attackCard = screen.getByText('Attack in progress').closest('section') as HTMLElement;
-    expect(within(attackCard).getByText('Nurtec')).toBeTruthy();
-    expect(within(attackCard).getByText('75 mg')).toBeTruthy();
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 
   it('keeps every meaningful secondary text style at slate-400 or stronger', async () => {

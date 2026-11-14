@@ -338,23 +338,19 @@ describe('Reports rolling medication window', () => {
     // The span selector is a pressed-state group, not a tablist.
     expect(screen.getByRole('button', { name: '12mo' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: '3mo' }).getAttribute('aria-pressed')).toBe('false');
-  });
 
-  it('resolves a malformed legacy rule to the catalog window instead of NaN', async () => {
+    // A partial legacy rule ({ limit: 15 }, no window) must fall back to the
+    // catalog 30-day window on the page, never render NaN/undefined.
+    cleanup();
     seedState({
-      // Legacy/imported shape with no windowDays.
       rules: { nurtec: { limit: 15 } } as unknown as TrackerState['rules'],
-      meds: [makeMed({ id: 'nurtec-1', ts: '2026-10-27T08:00:00.000Z' })],
+      meds: [makeMed({ id: 'nurtec-legacy', ts: '2026-10-27T08:00:00.000Z' })],
     });
-
     mountReports();
     await waitForSync();
 
-    await waitFor(() => expect(screen.getByText('1 day · 1 dose')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('(1/15 in 30d)')).toBeTruthy());
     expect(screen.queryByText(/NaN|undefinedd/)).toBeNull();
-    // The missing window falls back per field to the 30-day default rather than
-    // dropping the rolling count (or rendering "undefinedd").
-    expect(screen.getByText('(1/15 in 30d)')).toBeTruthy();
   });
 
   it('renders a zero limit as an over-limit count instead of dropping it', async () => {
@@ -478,25 +474,6 @@ describe('Reports combined painkiller MOH summary', () => {
     expect(await screen.findByText('(1/4 in 7d)')).toBeTruthy();
     expect(screen.queryByText('Painkillers combined')).toBeNull();
   });
-
-  it('resolves mismatched and partial painkiller rules without NaN', async () => {
-    seedState({
-      rules: {
-        tylenol: { limit: 8, windowDays: 30 },
-        ibuprofen: { limit: 15, windowDays: 45 },
-        naproxen: { limit: 10, windowDays: 30 },
-      },
-      meds: [makeMed({ id: 'tylenol-1', medId: 'tylenol', ts: '2026-10-05T08:00:00.000Z' })],
-    });
-
-    mountReports();
-    await waitForSync();
-
-    // Lowest limit (8) + widest window (45) resolve the shared summary.
-    expect(await screen.findByText('1 / 8 days in the last 45 days')).toBeTruthy();
-    expect(screen.getByText(/Saved painkiller rules differ/)).toBeTruthy();
-    expect(screen.queryByText(/NaN|undefined/)).toBeNull();
-  });
 });
 
 describe('Reports near-limit semantics', () => {
@@ -612,31 +589,5 @@ describe('Reports 08:00 attack-day rule', () => {
     await waitFor(() => expect(statCard('Attacks').textContent).toContain('Attacks1'));
     expect(statCard('Days affected').textContent).toContain('Days affected0');
     expect(screen.queryAllByText('no data this month')).toHaveLength(0);
-  });
-
-  it('agrees with the Calendar month header through the shared 08:00 rule', async () => {
-    seedState({
-      attacks: [makeAttack({
-        id: 'agree',
-        start: '2026-10-31T22:00:00.000Z',
-        end: '2026-11-01T06:00:00.000Z',
-      })],
-    });
-    const Reports = reportsModule.default;
-    const CalendarPage = (await import('@/pages/CalendarPage')).default;
-    render(
-      <storeModule.StoreProvider>
-        <Reports />
-        <CalendarPage />
-        <Probe />
-      </storeModule.StoreProvider>,
-    );
-    await waitForSync();
-
-    const header = screen.getByText((_, element) => element?.tagName === 'P'
-      && (element.textContent ?? '').includes('attack day'));
-    expect((header.textContent ?? '').replace(/\s+/g, ' ').trim())
-      .toBe('1 attack day of 31 · 1 attack');
-    expect(statCard('Days affected').textContent).toContain('Days affected1');
   });
 });

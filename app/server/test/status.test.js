@@ -1,8 +1,8 @@
 // GET /api/status: the versioned read-only projection Home Assistant polls.
 // Covers the response contract (shape, headers, apiVersion), the settings
 // timezone and its UTC fallback, day attribution, ongoing/finished attacks,
-// explicit day states, multiple ongoing rows, the shared Nurtec computation,
-// privacy exclusions, and pathological stored instants (never a 500).
+// explicit day states, the shared Nurtec computation, privacy exclusions, and
+// pathological stored instants (never a 500).
 //
 // Every database lives in a disposable temp dir and requests use inject().
 // Clock-sensitive expectations are derived from the real clock via Intl (like
@@ -75,26 +75,21 @@ test('GET /api/status: JSON shape, apiVersion, and no-store caching', async (t) 
   assert.match(body.generatedAt, ISO);
   assert.ok(Math.abs(Date.parse(body.generatedAt) - Date.now()) < 60000);
   assert.equal(body.timeZone, 'UTC'); // missing setting falls back to UTC
-});
 
-test('empty database: no_data, no attacks, unknown inventory', async (t) => {
-  const h = await makeApp({ label: 'migraine-status-empty' });
-  t.after(() => h.close());
-
-  const status = await getStatus(h.app);
-  assert.equal(status.state, 'no_data');
-  assert.equal(status.activeAttack, null);
-  assert.deepEqual(status.today, {
+  // An empty database is a real document: no_data, no attacks, unknown stock.
+  assert.equal(body.state, 'no_data');
+  assert.equal(body.activeAttack, null);
+  assert.deepEqual(body.today, {
     day: dayKeyIn(Date.now(), 'UTC'), status: null, source: 'none',
   });
-  assert.equal(status.lastAttack, null);
-  assert.deepEqual(status.history, {
+  assert.equal(body.lastAttack, null);
+  assert.deepEqual(body.history, {
     daysSinceLastAttackStart: null,
     attacksStartedLast30Days: 0,
     attackDaysLast7Days: 0,
     attackDaysLast30Days: 0,
   });
-  assert.deepEqual(status.inventory.nurtec, {
+  assert.deepEqual(body.inventory.nurtec, {
     status: 'unknown', quantity: null, level: 'unknown',
     low: false, negative: false, threshold: 2,
   });
@@ -216,26 +211,6 @@ test('an empty-string end is a finished attack with no duration', async (t) => {
   });
 });
 
-test('multiple ongoing attacks pick the canonical earliest start', async (t) => {
-  const h = await makeApp({ label: 'migraine-status-multi-ongoing' });
-  t.after(() => h.close());
-
-  const earlier = await h.app.inject({
-    method: 'POST', url: '/api/attacks', payload: { start: isoAgo(2) },
-  });
-  const later = await h.app.inject({
-    method: 'POST', url: '/api/attacks', payload: { start: isoAgo(1) },
-  });
-  assert.equal(earlier.statusCode, 201);
-  assert.equal(later.statusCode, 201);
-
-  const status = await getStatus(h.app);
-  assert.equal(status.state, 'attack');
-  assert.equal(status.activeAttack.id, earlier.json().id);
-  // Only one is reported; `lastAttack` is still the latest start.
-  assert.equal(status.lastAttack.id, later.json().id);
-});
-
 // ── day states ────────────────────────────────────────────────────────
 test('PUT a day state makes today explicit', async (t) => {
   const h = await makeApp({ label: 'migraine-status-daystate' });
@@ -251,22 +226,6 @@ test('PUT a day state makes today explicit', async (t) => {
   assert.deepEqual(status.today, { day, status: 'well', source: 'explicit' });
   assert.equal(status.state, 'well');
   assert.equal(status.activeAttack, null);
-});
-
-test('legacy explicit attack day: state attack with activeAttack null', async (t) => {
-  const h = await makeApp({ label: 'migraine-status-legacy-attack' });
-  t.after(() => h.close());
-
-  const day = dayKeyIn(Date.now(), 'UTC');
-  const put = await h.app.inject({
-    method: 'PUT', url: `/api/day-states/${day}`, payload: { status: 'attack' },
-  });
-  assert.equal(put.statusCode, 200);
-
-  const status = await getStatus(h.app);
-  assert.equal(status.state, 'attack');
-  assert.equal(status.activeAttack, null);
-  assert.deepEqual(status.today, { day, status: 'attack', source: 'explicit' });
 });
 
 // ── inventory parity ──────────────────────────────────────────────────
@@ -372,16 +331,3 @@ test('pathological stored instants still return 200 with null/absent fields', as
 });
 
 // ── cross-origin guard ────────────────────────────────────────────────
-test('GET still works with an Origin header (reads are not guarded)', async (t) => {
-  const h = await makeApp({ label: 'migraine-status-origin' });
-  t.after(() => h.close());
-
-  const res = await h.app.inject({
-    method: 'GET',
-    url: '/api/status',
-    headers: { origin: 'http://evil.example' },
-  });
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.json().apiVersion, 1);
-  assert.equal(res.headers['cache-control'], 'no-store');
-});

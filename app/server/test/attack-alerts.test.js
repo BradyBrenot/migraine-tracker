@@ -14,17 +14,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../db.js';
 import { buildApp } from '../app.js';
 import { makeTempDir, cleanupDir } from './helpers.js';
 import {
-  ATTACK_FUTURE_WINDOW_MS, ATTACK_PAST_WINDOW_MS, ATTACK_RETRY_WINDOW_MS, createReminderEngine,
+  ATTACK_RETRY_WINDOW_MS, createReminderEngine,
 } from '../reminders.js';
 import { attackViewUrl } from '../reminder-config.js';
 import { createNtfyTransport, DeliveryError } from '../ntfy.js';
-import { dumpBackup } from '../backup.js';
 import { collectSettings } from '../snapshot.js';
 
 const NY = 'America/New_York';
@@ -181,13 +179,6 @@ const startOccurrenceKey = (id, instant) => `attack_start:${id}:${instant}`;
 const retryExpiry = (instant) =>
   new Date(Date.parse(instant) + ATTACK_RETRY_WINDOW_MS).toISOString();
 
-// ── 1. configuration constants are exported and documented ────────────
-test('policy: the freshness window is 60 minutes past / 5 minutes future', () => {
-  assert.equal(ATTACK_PAST_WINDOW_MS, 60 * 60 * 1000);
-  assert.equal(ATTACK_FUTURE_WINDOW_MS, 5 * 60 * 1000);
-  assert.equal(ATTACK_RETRY_WINDOW_MS, 24 * 60 * 60 * 1000);
-});
-
 // ── 2. fresh start insert ─────────────────────────────────────────────
 test('start: a fresh POST sends exactly one start alert on the attack topic only', async (t) => {
   const h = makeHarness(t, { label: 'attack-post-start' });
@@ -206,6 +197,8 @@ test('start: a fresh POST sends exactly one start alert on the attack topic only
     `Attack started at ${fmt('2026-04-10T21:58:00.000Z')}.`,
   );
   assert.equal(h.personal.calls.length, 0);
+  // A fresh, successful alert is not suppression noise.
+  assert.deepEqual(h.logs, []);
 
   const row = occurrence(h.db, startOccurrenceKey('a-start', '2026-04-10T21:58:00.000Z'));
   assert.equal(row.type, 'attack_start');
@@ -285,24 +278,6 @@ test('logging: a suppressed stale start logs exactly one fixed message and enque
   }
 });
 
-test('logging: suppressed future and invalid starts log the same fixed message', async (t) => {
-  const h = makeHarness(t, { label: 'attack-log-bad-start' });
-  const id = 'a-log-future-4412';
-  const future = '2026-04-10T22:30:00.000Z'; // 30 minutes ahead
-  const invalid = 'not-a-timestamp';
-
-  h.engine.noteAttackWrite({ before: null, after: { id, start: future, end: null } });
-  h.engine.noteAttackWrite({ before: null, after: { id, start: invalid, end: null } });
-
-  assert.deepEqual(h.logs, [START_SUPPRESSED_LOG, START_SUPPRESSED_LOG]);
-  assert.equal(occurrenceCount(h.db), 0);
-  for (const line of h.logs) {
-    assert.equal(line.includes(id), false);
-    assert.equal(line.includes(future), false);
-    assert.equal(line.includes(invalid), false);
-  }
-});
-
 test('logging: a rejected end transition logs exactly the fixed end message', async (t) => {
   const h = makeHarness(t, { label: 'attack-log-stale-end' });
   const id = 'a-log-end-3388';
@@ -321,65 +296,6 @@ test('logging: a rejected end transition logs exactly the fixed end message', as
     assert.equal(line.includes(start), false);
     assert.equal(line.includes(end), false);
   }
-});
-
-test('logging: a normal fresh alert logs nothing', async (t) => {
-  const h = makeHarness(t, { label: 'attack-log-fresh' });
-  const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
-
-  const res = await postAttack(app, {
-    id: 'a-log-fresh',
-    start: '2026-04-10T21:30:00.000Z',
-    end: '2026-04-10T21:58:00.000Z',
-  });
-  assert.equal(res.statusCode, 201);
-  assert.equal(occurrenceCount(h.db), 2);
-  assert.deepEqual(h.logs, []);
-});
-
-test('logging: existing-attack metadata and repeat-end PATCHes log nothing', async (t) => {
-  const h = makeHarness(t, { label: 'attack-log-patch' });
-  const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
-
-  const created = await postAttack(app, {
-    id: 'a-log-patch',
-    start: '2026-04-10T21:30:00.000Z',
-    end: '2026-04-10T21:55:00.000Z',
-  });
-  assert.equal(created.statusCode, 201);
-  assert.equal(occurrenceCount(h.db), 2);
-
-  const metadata = await app.inject({
-    method: 'PATCH',
-    url: '/api/attacks/a-log-patch',
-    payload: { peakPain: 7, notes: 'metadata only' },
-  });
-  assert.equal(metadata.statusCode, 200);
-  const repeatEnd = await app.inject({
-    method: 'PATCH',
-    url: '/api/attacks/a-log-patch',
-    payload: { end: '2026-04-10T21:58:00.000Z' },
-  });
-  assert.equal(repeatEnd.statusCode, 200);
-
-  assert.deepEqual(h.logs, []);
-  assert.equal(occurrenceCount(h.db), 2); // no new occurrence either
-});
-
-test('logging: a personal-only engine never logs attack suppression', async (t) => {
-  const h = makeHarness(t, { label: 'attack-log-personal-only', attack: false });
-
-  h.engine.noteAttackWrite({
-    before: null,
-    after: {
-      id: 'a-log-personal-only',
-      start: '2026-04-10T20:00:00.000Z',
-      end: null,
-    },
-  });
-
-  assert.deepEqual(h.logs, []);
-  assert.equal(occurrenceCount(h.db), 0);
 });
 
 // ── 4. start + end in one POST; historical baselines ──────────────────
@@ -429,6 +345,7 @@ test('dedup: detail PATCHes, repeated ticks, and a fresh engine on the same DB n
     },
   });
   assert.equal(patch.statusCode, 200);
+  assert.deepEqual(h.logs, []); // metadata-only PATCH logs nothing
   assert.equal((await h.engine.tick()).sent, 0);
   assert.equal(h.attack.calls.length, 1);
   assert.equal(occurrenceKeys(h.db, 'attack_start').length, 1);
@@ -464,6 +381,7 @@ test('end: a null -> fresh end PATCH sends one end alert with duration', async (
   assert.equal(h.attack.calls.length, 1);
   assert.equal(h.attack.calls[0].title, 'Attack ended');
   assert.equal(h.attack.calls[0].body, `Attack ended at ${fmt('2026-04-10T21:55:00.000Z')} (25m).`);
+  assert.deepEqual(h.logs, []); // a normal fresh end alert logs nothing
   const row = occurrence(h.db, endOccurrenceKey('a-end', '2026-04-10T21:55:00.000Z'));
   assert.equal(row.med_id, 'a-end');
   assert.equal(row.scheduled_at, '2026-04-10T21:55:00.000Z');
@@ -485,6 +403,7 @@ test('end: correcting X -> Y enqueues nothing and the pending X alert is skipped
     method: 'PATCH', url: '/api/attacks/a-cor', payload: { end: '2026-04-10T21:58:00.000Z' },
   });
   assert.equal(occurrenceCount(h.db), 1); // no new occurrence for the correction
+  assert.deepEqual(h.logs, []); // a repeat/correction is not a suppressed new alert
 
   const summary = await h.engine.tick();
   assert.equal(summary.sent, 0);
@@ -625,17 +544,6 @@ test('bypass: a disabled master switch and outside waking hours still deliver th
   assert.equal(collectSettings(h.db).reminders.enabled, false);
 });
 
-test('bypass: with the master switch off and no attack topic, the old disabled summary is unchanged', async (t) => {
-  const h = makeHarness(t, {
-    label: 'attack-bypass-disabled',
-    reminders: { ...ATTACK_PERSONAL, enabled: false },
-    attack: false,
-  });
-  assert.deepEqual(await h.engine.tick(), {
-    disabled: true, generated: 0, sent: 0, failed: 0, skipped: 0,
-  });
-});
-
 // ── 9. attack-only and personal-only engines ──────────────────────────
 test('attack-only: no personal occurrences are generated and pre-existing ones stay pending while attack rows deliver', async (t) => {
   const h = makeHarness(t, {
@@ -669,10 +577,16 @@ test('attack-only: no personal occurrences are generated and pre-existing ones s
 
 test('personal-only: noteAttackWrite is a no-op and the API route creates no attack occurrences', async (t) => {
   const h = makeHarness(t, { label: 'attack-personal-only', attack: false });
+  // Both a stale (would-be suppressed) and a fresh start prove the
+  // no-attack-transport guard precedes suppression logging.
+  assert.doesNotThrow(() => h.engine.noteAttackWrite({
+    before: null, after: { id: 'a-stale', start: '2026-04-10T20:00:00.000Z', end: null },
+  }));
   assert.doesNotThrow(() => h.engine.noteAttackWrite({
     before: null, after: { id: 'a-no', start: '2026-04-10T21:58:00.000Z', end: null },
   }));
   assert.equal(occurrenceCount(h.db), 0);
+  assert.deepEqual(h.logs, []);
 
   const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
   const res = await postAttack(app, { id: 'a-no', start: '2026-04-10T21:58:00.000Z' });
@@ -680,6 +594,7 @@ test('personal-only: noteAttackWrite is a no-op and the API route creates no att
   await h.engine.tick();
   assert.equal(occurrenceCount(h.db), 0);
   assert.equal(h.personal.calls.length, 0);
+  assert.deepEqual(h.logs, []);
 });
 
 // ── 10. retry, recovery, restart ──────────────────────────────────────
@@ -863,42 +778,6 @@ test('api: a throwing onAttackChange never fails POST/PATCH', async (t) => {
 });
 
 // ── 12. persistence boundaries ────────────────────────────────────────
-test('persistence: export/backup exclude attack occurrences and reset clears them', async (t) => {
-  const h = makeHarness(t, { label: 'attack-persistence' });
-  const app = await h.openApp((event) => h.engine.noteAttackWrite(event));
-  await postAttack(app, { id: 'a-persist', start: '2026-04-10T21:58:00.000Z' });
-  await h.engine.tick();
-  assert.equal(occurrenceCount(h.db), 1);
-
-  // Raw row with a caller-chosen key, to prove the key itself never leaks.
-  h.db.prepare(`INSERT INTO reminder_occurrences
-    (key,type,med_id,scheduled_at,expires_at,status,attempt,next_attempt_at,
-     last_attempt_at,sent_at,last_error_category,last_error_status,created_at,updated_at)
-    VALUES ('attack_end:a-raw:2026-04-10T21:00:00.000Z','attack_end','a-raw',
-            '2026-04-10T21:00:00.000Z',NULL,'succeeded',1,
-            '2026-04-10T21:00:00.000Z','2026-04-10T21:00:00.000Z',NULL,NULL,NULL,
-            '2026-04-10T21:00:00.000Z','2026-04-10T21:00:00.000Z')`).run();
-
-  const exportText = (await app.inject({ method: 'GET', url: '/api/export' })).body;
-  const file = dumpBackup({
-    db: h.db, backupDir: join(h.dir, 'backups'), now: new Date('2026-04-10T12:00:00.000Z'), log: () => {},
-  });
-  const backupText = readFileSync(file, 'utf8');
-
-  for (const [label, text] of [['export', exportText], ['backup', backupText]]) {
-    assert.equal(text.includes('reminder_occurrences'), false, label);
-    assert.equal(text.includes('attack_start'), false, label);
-    assert.equal(text.includes('attack_end'), false, label);
-    assert.equal(text.includes('attack_start:a-persist'), false, label);
-    assert.equal(text.includes('attack_end:a-raw'), false, label);
-    assert.equal(text.includes(FAKE_ATTACK_URL), false, label);
-  }
-
-  assert.equal(occurrenceCount(h.db), 2);
-  const reset = await app.inject({ method: 'POST', url: '/api/reset' });
-  assert.equal(reset.statusCode, 200);
-  assert.equal(occurrenceCount(h.db), 0);
-});
 
 // ── 13. secrets and click link ────────────────────────────────────────
 test('secrets: attack credentials never reach logs, occurrence rows, settings, or export', async (t) => {

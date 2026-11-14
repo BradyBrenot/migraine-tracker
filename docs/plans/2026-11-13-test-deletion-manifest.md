@@ -1,0 +1,80 @@
+# Exact test-deletion manifest
+
+Companion to `2026-11-13-removal-first-cleanup.md`. This is a closed list: no additional discretionary pruning. Titles are exact unless a parametrized case ID is shown. A fold-in must happen before its original test is deleted. No replacement scenario is added for a fold-in, so every row reduces the collected scenario count.
+
+## Frontend/shared: 39 scenarios
+
+| Count | File and exact test(s) | Required surviving coverage / action |
+| --- | --- | --- |
+| 20 | `app/src/pwa.test.ts`: the entire file | Delete only after `scripts/validate-pwa.mjs` reaches the parity enumerated in the main plan. The standalone validator remains the single source/artifact check. |
+| 1 | `Home.wellness.test.tsx`: `logs a cardio workout with the tapped effort` | Retain `logs a strength workout with two taps and undoes it from the toast` and `allows one Strength and one Cardio on the same day with separate counts`; the latter explicitly clicks Cardio → Hard and verifies the resulting Cardio record. |
+| 1 | Home: `rejects an equal effort without any write or state change` | Retain `rejects a lower effort without any write or state change`; both take the same no-op branch. |
+| 1 | Home: `keeps the "Start attack now" CTA on a day with no attacks` | Retain `offers Undo for starting an attack and deletes the just-created record`, which finds and clicks the same CTA. |
+| 1 | Home: `counts an attack in tomorrow 00:00-08:00 for today (the 08:00-to-08:00 window)` | Retain `shared/attackstats.test.ts`: `counts an attack in tomorrow 00:00-08:00 for today`, plus `use-today-attack-facts.test.tsx`: `matches the naive per-attack scan across dirty and boundary fixtures`. |
+| 1 | Home: `does not infer an attack day when the attack ended before 08:00 today` | Retain `shared/attackstats.test.ts`: `counts only the start day for a 22:00 -> next-day 06:00 attack`; retain the PartnerHome UI integration `does not infer Off for an ended attack that ended before 08:00 today`. |
+| 1 | Home: `infers Off when a cross-midnight attack reaches 08:00 today` | Retain Home `infers an Off day from an ended attack reaching 08:00 when no record exists` and shared `attackDayKeys` cross-midnight cases. |
+| 1 | Home: `does not infer an attack day when the attack ended exactly at today's start` | Retain `shared/attackstats.test.ts`: `does not count the new day when the attack ends exactly at local midnight` and `attackOverlapsRange` half-open boundary cases. |
+| 1 | Home: `reopening via end-Undo writes no day state, and the later real end leaves the day Off` | Before deletion, fold the complete manual-Well → first end Off → Undo reopen with no day-state write or Well change → later genuine end Off sequence into retained `offers Undo for ending an attack and reopens it through the same queue`. Also retain store `writes no day state for a default or backfilled end`. |
+| 1 | Home: `starts a real attack without creating a day-state row when none exists` | Retain Home `clicking the main Start attack now CTA then 0 logs a real 0-pain attack, not an Off day` (same no-row/no-write assertions) and store `creates no day-state row for a record-less current attack start`. |
+| 1 | Home: `shows Attack with no Change, choices, or day-marked text while an attack is active` | Retain Home `keeps an active attack over an earlier Well record and retains wellness + movement` and `turns a prior Well day Off for the active attack and restores Choice after it ends`. |
+| 1 | `Reports.test.tsx`: `resolves a malformed legacy rule to the catalog window instead of NaN` | Before deletion, fold a partial `{ limit: 15 }` page fixture into retained `labels the rolling parenthetical with the configured window, not a hardcoded 30d`; assert the rendered 30-day fallback and no `NaN`/`undefinedd`. Also retain `usage.test.ts`: `falls back per field for partial and malformed legacy rules`. |
+| 1 | Reports: `resolves mismatched and partial painkiller rules without NaN` | Retain Calendar `resolves mismatched painkiller rules conservatively and explains it` and usage `uses the lowest valid limit and the widest valid window across the three` / `falls back per-med to defaults for malformed or missing fields before aggregating`. |
+| 1 | Reports: `agrees with the Calendar month header through the shared 08:00 rule` | Retain Reports `counts the October start day and keeps the pre-08:00 November tail as a known zero` and Calendar's own month-header assertions. |
+| 1 | `PartnerHome.test.tsx`: `shows Attack while an attack is active even over an explicit Well record` | Retain `shows the active attack instead of an explicit Well record in Today`, which also checks guidance. |
+| 1 | PartnerHome: `renders 0/10 pain and attack-linked meds together` | Retain `renders an active attack with duration and 0/10 pain without mutation controls` and `shows medications linked to the active attack inside the attack card`. |
+| 1 | `shared/status.test.ts`: `attributes a 01:00-02:00 attack today to yesterday` | Retain `shared/attackstats.test.ts`: `attributes same-day early-morning attacks to the previous day`; retain status `counts distinct attack days and started attacks over the exact windows` for buildStatus wiring. |
+| 1 | Shared status: `counts both adjacent days for an attack crossing 08:00` | Retain attackstats `counts both days when a morning attack crosses 08:00` and status `counts distinct attack days and started attacks over the exact windows`. |
+| 1 | Shared status: `counts only the previous day for an attack ending exactly at 08:00` | Retain attackstats `is half-open at 08:00: an exact 08:00 end counts the previous day, an exact 08:00 instant starts the new day` and status `counts distinct attack days and started attacks over the exact windows`. |
+| 1 | `usage.test.ts`: `matches the array helpers across unsorted, dirty, future and duplicate data` | Before deleting the array implementations and this oracle, fold its unique direct expectations (future inclusion, `NaN`/infinite windows, malformed timestamps, duplicates) into retained `keeps one index valid across timezone changes` and `preserves the inclusive cutoff and duplicate-dose counts`. Convert older array-helper tests to indexed expected-result tests; no new scenario. |
+
+## Server: 25 scenarios
+
+| Count | File and exact test(s) | Required surviving coverage / action |
+| --- | --- | --- |
+| 1 | `status.test.js`: `empty database: no_data, no attacks, unknown inventory` | Fold its empty-document assertions into retained `GET /api/status: JSON shape, apiVersion, and no-store caching`, then delete the standalone case. |
+| 1 | Status: `multiple ongoing attacks pick the canonical earliest start` | Retain `shared/status.test.ts`: `picks the earliest ongoing attack by canonical order, then id`; retain server `POST an ongoing attack reports activeAttack and lastAttack` for route/mapper wiring. |
+| 1 | Status: `legacy explicit attack day: state attack with activeAttack null` | Retain shared status `keeps a legacy explicit attack day as state attack with activeAttack null`; retain server `PUT a day state makes today explicit`. |
+| 1 | Status: `GET still works with an Origin header (reads are not guarded)` | Retain API `same-origin and origin-less mutations allowed; reads ignore Origin` and the status shape test's `no-store` assertion. |
+| 3 | `workouts-daystates.test.js`: `fresh database reaches the current schema with workouts and day_states`; `legacy v0 database upgrades to the current schema without data loss and gains both tables`; `v1 database upgrades to the current schema without data loss and gains both tables` | First fold workout defaults into `migrations.test.js` fresh-schema coverage and exact table set + v0/v1 acquisition of `workouts`/`day_states` into `populated v0/v1/v2 databases upgrade to v4...`. Then delete all three duplicates and now-unused imports/helpers. |
+| 1 | `reminders.test.js`: `preventive: never logged and no planned date never reminds` | Retain shared reminders `returns none when never logged and no valid planned date exists` and server `preventive: automatic due...`. |
+| 1 | Reminders: `preventive: the latest valid dose wins and invalid timestamps are ignored` | Retain shared `ignores invalid med timestamps and chooses the latest valid dose` / `returns none when every dose timestamp is invalid`, and server automatic-due wiring. |
+| 1 | Reminders: `waking: 20:59 is inside and 21:00 is outside the default window` | Retain shared `treats 09:00 as inside and 21:00 as outside (half-open)` and server `waking: persistent preventive and low-stock rows wait outside 09:00-21:00 and send at the next 09:00`. |
+| 1 | Reminders: `check-in: any explicit day-state (well/off/attack) suppresses the prompt` | Retain shared `suppresses only an exact matching day record, whatever its status`; retain server `retry: a disappeared condition turns the pending occurrence into a skip and never retries` (check-in branch). |
+| 1 | Reminders: `exercise: mobility sessions never satisfy strength/cardio goals` | Retain shared `counts mobility separately and never lets it satisfy strength or cardio` and server `exercise: a behind Sunday week sends at exerciseTime and met goals suppress it`. |
+| 1 | Reminders: `exercise: duplicate same-day goal-kind workouts never meet the goals or suppress the prompt` | Retain shared `counts duplicate same-day goal-kind rows once so they cannot meet goals` and the server behind/met-goals wiring test. |
+| 1 | Reminders: `exercise: explicit and attack-inferred Attack days suppress the prompt` | Retain shared `lets an explicit attack suppress even when the goals are met` and `infers an attack from an overlapping attack when no day state exists`; retain server `exercise: an attack active at now suppresses the prompt despite an earlier Well/Off record`. |
+| 1 | Reminders: `exercise: an occurrence past its grace window is skipped as expired` | Retain server `check-in: beyond the grace window the occurrence is skipped as expired and never sends` (same generic expiry path) and exercise scheduling/rollover coverage. |
+| 1 | Reminders: `exercise: an explicit Off day sends gentle wording; Off plus met goals suppresses` | Retain `exercise: an attack active at now...` part (d) for Off gentle wording and `exercise: a behind Sunday week...` for met-goal suppression. |
+| 1 | Reminders: `stock: unknown stock never alerts and stock above the threshold does not either` | Retain shared `reports unknown before any applicable baseline and never low` / `is ok above the threshold`; retain server non-Nurtec scoping, which starts above threshold and creates no occurrence. |
+| 1 | Reminders: `stock: POST /api/reset clears internal reminder tables so a re-seeded low episode may alert again` | Retain reminders-config `persistence: export/backup exclude reminder tables and reset deletes them`; retain stock low/rearm coverage. |
+| 1 | `attack-alerts.test.js`: `policy: the freshness window is 60 minutes past / 5 minutes future` | Retain the inclusive/outside freshness test and 24-hour retry-bound test; they prove the constants behaviorally. |
+| 1 | Attack alerts: `logging: suppressed future and invalid starts log the same fixed message` | Retain `freshness: an unparseable start is never enqueued`, the freshness boundary matrix, and `logging: a suppressed stale start logs exactly one fixed message and enqueues nothing`. |
+| 1 | Attack alerts: `logging: a normal fresh alert logs nothing` | Before deletion, assert empty `h.logs` in both `start: a fresh POST sends exactly one start alert on the attack topic only` and `end: a null -> fresh end PATCH sends one end alert with duration`; start+end coverage remains. |
+| 1 | Attack alerts: `logging: existing-attack metadata and repeat-end PATCHes log nothing` | Before deletion, assert empty `h.logs` after the metadata path in `dedup: detail PATCHes, repeated ticks, and a fresh engine on the same DB never resend` and after the repeat/correction path in `end: correcting X -> Y enqueues nothing and the pending X alert is skipped at send time`. |
+| 1 | Attack alerts: `logging: a personal-only engine never logs attack suppression` | Before deletion, exercise a stale start as well as a fresh start in `personal-only: noteAttackWrite is a no-op and the API route creates no attack occurrences` and assert empty `h.logs`, proving the no-transport guard precedes suppression logging. |
+| 1 | Attack alerts: `bypass: with the master switch off and no attack topic, the old disabled summary is unchanged` | Retain reminders `disabled: the master switch returns {disabled:true} and never calls a transport`; retain attack master-gate/bypass cases. |
+| 1 | Attack alerts: `persistence: export/backup exclude attack occurrences and reset clears them` | Retain reminders-config `persistence: export/backup exclude reminder tables and reset deletes them`; retain attack `secrets: attack credentials never reach logs, occurrence rows, settings, or export`. |
+
+## Home Assistant: 11 scenarios
+
+Producer-side TypeScript tests are not accepted as coverage for Python consumer defenses. All parsing, overflow, timezone, malformed-today, clamping, event, request-method, and secret-redaction cases not listed here stay.
+
+| Count | File and exact test/case | Required surviving coverage / action |
+| --- | --- | --- |
+| 1 | `test_smoke.py::test_harness_bootstraps` | Delete the file; every real HA test proves the harness boots. |
+| 1 | `test_binary_sensor.py::test_binary_sensor_unique_ids_and_device_association` | Retain `test_entity_metadata.py::test_entity_unique_ids_and_device_links` (exact 11-ID set and shared device). Remove orphaned imports/constants. |
+| 1 | `test_sensor.py::test_sensor_unique_ids` | Same centralized entity metadata survivor. Remove the orphaned registry import. |
+| 1 | `test_entity_metadata.py::test_entity_names_do_not_repeat_the_device_name` | Retain `test_entity_names_and_enum_states_are_translated` (exact expected names) and `test_entities_use_translated_friendly_names` (friendly names/IDs and no repeated slug). |
+| 1 | `test_binary_sensor.py::test_legacy_attack_day_is_not_an_active_attack` | Retain parametrized `test_active_sensor_off_without_active_attack[legacy_attack_day]` and `test_sensor_values_from_docs_examples[legacy_attack_day]`. |
+| 1 | `test_sensor.py::test_low_stock_quantity_is_reported` | Retain `test_sensor_values_from_docs_examples[active_attack]` for integer quantity mapping and `test_nurtec_low_stock_sensor` for the low flag. |
+| 1 | `test_sensor.py::test_negative_stock_quantity_is_preserved` | Retain `test_nurtec_negative_stock_sensor`, which already asserts `sensor.nurtec_tablets == "-1"`. |
+| 1 | `test_sensor.py::test_history_nulls_stay_null_while_counts_stay_zero` | Retain `test_sensor_values_from_docs_examples[empty_db]`, whose `EXPECTED_STATES` asserts every one of these values. |
+| 1 | `test_sensor.py::test_finished_attack_uses_last_attack_start` | Retain `test_sensor_values_from_docs_examples[finished_well]` and `test_last_attack_started_is_a_timezone_aware_datetime`. |
+| 1 | `test_forward_compatibility.py::test_unknown_fields_do_not_change_entity_values_on_setup` | Fold its four history/negative-stock assertions into retained `test_unknown_fields_survive_flow_validation_polling_and_entities`, then delete the duplicate. |
+| 1 | `test_sensor.py::test_missing_or_malformed_today_day_is_unknown[null-day]` | Delete only this `pytest.param`; retain `[no-today-section]` (same non-string/missing-day branch) and `[malformed-day]` (ValueError branch). |
+
+**Total: 75 collected scenarios (39 frontend/shared + 25 server + 11 HA).** If a listed survivor is itself renamed or removed, the deletion is blocked until the manifest is updated and re-reviewed. If inspection finds a unique assertion in a candidate, fold it into the named survivor first or keep the candidate.
+
+Implementation note (2026-11-13): all 75 rows completed with the named fold-ins
+in place; every survivor listed above remains. Actual post-change totals:
+frontend 726, server 203, HA 213.

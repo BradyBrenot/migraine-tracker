@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { MedEvent, TrackerState } from '@/types';
 import { localDayKey } from '../../shared/datetime.ts';
 import {
-  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast, daysSinceLastFromIndex,
-  isValidLimit, isValidWindowDays, limitState, medUnionDaysInWindow,
-  medUnionDaysInWindowFromIndex, painkillerBreakdown, painkillerBreakdownFromIndex,
+  PAINKILLER_DEFAULT_RULE, PAINKILLER_MED_IDS, daysSinceLast,
+  isValidLimit, isValidWindowDays, limitState,
+  medUnionDaysInWindowFromIndex, painkillerBreakdownFromIndex,
   painkillerRulesDiffer, resolveRule, resolveSharedPainkillerRule,
-  usageDaysInWindow, usageDaysInWindowFromIndex,
+  usageDaysInWindowFromIndex,
 } from './usage';
 import { buildMedIndex } from './medIndex.ts';
 
@@ -25,25 +25,26 @@ function dose(ts: string, medId = 'nurtec', id = ts): MedEvent {
   };
 }
 
-describe('usageDaysInWindow', () => {
+describe('usageDaysInWindowFromIndex', () => {
   it('buckets doses by the configured zone day, not the UTC/system day', () => {
     // Both instants share the UTC day 2026-05-31, but in Pacific/Kiritimati
     // (UTC+14) they are May 31 14:30 and Jun 1 02:30 — two adjacent local days.
     const meds = [dose('2026-05-31T00:30:00.000Z'), dose('2026-05-31T12:30:00.000Z')];
+    const index = buildMedIndex(meds);
     const now = Date.parse('2026-06-01T00:00:00.000Z');
 
     expect(localDayKey(Date.parse('2026-05-31T00:30:00.000Z'), 'Pacific/Kiritimati')).toBe('2026-05-31');
     expect(localDayKey(Date.parse('2026-05-31T12:30:00.000Z'), 'Pacific/Kiritimati')).toBe('2026-06-01');
 
-    expect(usageDaysInWindow(meds, 'nurtec', 30, now, 'Pacific/Kiritimati')).toBe(2);
+    expect(usageDaysInWindowFromIndex(index, 'nurtec', 30, now, 'Pacific/Kiritimati')).toBe(2);
     // The same doses are one UTC day, proving the zone — not the UTC date — wins.
-    expect(usageDaysInWindow(meds, 'nurtec', 30, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(index, 'nurtec', 30, now, 'UTC')).toBe(1);
   });
 
   it('filters by med id and returns 0 for an empty window', () => {
     const now = Date.parse('2026-06-01T00:00:00.000Z');
-    const meds = [dose('2026-05-31T12:00:00.000Z', 'tylenol')];
-    expect(usageDaysInWindow(meds, 'nurtec', 30, now, 'UTC')).toBe(0);
+    const index = buildMedIndex([dose('2026-05-31T12:00:00.000Z', 'tylenol')]);
+    expect(usageDaysInWindowFromIndex(index, 'nurtec', 30, now, 'UTC')).toBe(0);
   });
 
   it('keeps the rolling cutoff: exact boundary counts, one ms earlier does not', () => {
@@ -60,9 +61,9 @@ describe('usageDaysInWindow', () => {
     const atCutoff = dose(cutoff.toISOString(), 'nurtec', 'at-cutoff');
     const beforeCutoff = dose(justBefore.toISOString(), 'nurtec', 'before-cutoff');
 
-    expect(usageDaysInWindow([atCutoff], 'nurtec', windowDays, now, 'UTC')).toBe(1);
-    expect(usageDaysInWindow([beforeCutoff], 'nurtec', windowDays, now, 'UTC')).toBe(0);
-    expect(usageDaysInWindow([atCutoff, beforeCutoff], 'nurtec', windowDays, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(buildMedIndex([atCutoff]), 'nurtec', windowDays, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(buildMedIndex([beforeCutoff]), 'nurtec', windowDays, now, 'UTC')).toBe(0);
+    expect(usageDaysInWindowFromIndex(buildMedIndex([atCutoff, beforeCutoff]), 'nurtec', windowDays, now, 'UTC')).toBe(1);
   });
 });
 
@@ -240,7 +241,7 @@ describe('painkiller day union', () => {
       dose('2026-06-09T08:00:00.000Z', 'tylenol', 't1'),
       dose('2026-06-09T20:00:00.000Z', 'tylenol', 't2'),
     ];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(1);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex(meds), PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(1);
   });
 
   it('counts different painkillers on the same day as one MoH day', () => {
@@ -249,11 +250,12 @@ describe('painkiller day union', () => {
       dose('2026-06-09T12:00:00.000Z', 'ibuprofen', 'i1'),
       dose('2026-06-09T22:00:00.000Z', 'naproxen', 'n1'),
     ];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(1);
+    const index = buildMedIndex(meds);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(1);
     // The per-med view is unchanged: one day each.
-    expect(usageDaysInWindow(meds, 'tylenol', 30, now, 'UTC')).toBe(1);
-    expect(usageDaysInWindow(meds, 'ibuprofen', 30, now, 'UTC')).toBe(1);
-    expect(usageDaysInWindow(meds, 'naproxen', 30, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(index, 'tylenol', 30, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(index, 'ibuprofen', 30, now, 'UTC')).toBe(1);
+    expect(usageDaysInWindowFromIndex(index, 'naproxen', 30, now, 'UTC')).toBe(1);
   });
 
   it('adds distinct days across meds', () => {
@@ -262,7 +264,7 @@ describe('painkiller day union', () => {
       dose('2026-06-09T08:00:00.000Z', 'ibuprofen', 'i1'),
       dose('2026-06-09T18:00:00.000Z', 'naproxen', 'n1'),
     ];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(2);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex(meds), PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(2);
   });
 
   it('excludes Nurtec and other non-painkillers from the union', () => {
@@ -270,14 +272,14 @@ describe('painkiller day union', () => {
       dose('2026-06-09T08:00:00.000Z', 'nurtec', 'n1'),
       dose('2026-06-09T09:00:00.000Z', 'emgality', 'e1'),
     ];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex(meds), PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
   });
 
   it('applies the same rolling cutoff (inclusive) as the per-med count', () => {
     const atCutoff = dose(new Date(now - 2 * DAY).toISOString(), 'tylenol', 'cutoff');
     const beforeCutoff = dose(new Date(now - 2 * DAY - 1).toISOString(), 'ibuprofen', 'before');
-    expect(medUnionDaysInWindow([atCutoff], PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(1);
-    expect(medUnionDaysInWindow([beforeCutoff], PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(0);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex([atCutoff]), PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(1);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex([beforeCutoff]), PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(0);
   });
 
   it('buckets the union by the configured zone, not UTC', () => {
@@ -285,19 +287,21 @@ describe('painkiller day union', () => {
       dose('2026-05-31T00:30:00.000Z', 'tylenol', 't1'),
       dose('2026-05-31T12:30:00.000Z', 'ibuprofen', 'i1'),
     ];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, Date.parse('2026-06-01T00:00:00.000Z'), 'Pacific/Kiritimati')).toBe(2);
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, Date.parse('2026-06-01T00:00:00.000Z'), 'UTC')).toBe(1);
+    const index = buildMedIndex(meds);
+    const at = Date.parse('2026-06-01T00:00:00.000Z');
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati')).toBe(2);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'UTC')).toBe(1);
   });
 
   it('ignores unparseable timestamps and unusable windows', () => {
-    const meds = [dose('not-a-date', 'tylenol', 'bad')];
-    expect(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
-    expect(medUnionDaysInWindow([], PAINKILLER_MED_IDS, 0, now, 'UTC')).toBe(0);
-    expect(medUnionDaysInWindow([], PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
+    const index = buildMedIndex([dose('not-a-date', 'tylenol', 'bad')]);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
+    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 0, now, 'UTC')).toBe(0);
+    expect(medUnionDaysInWindowFromIndex(buildMedIndex([]), PAINKILLER_MED_IDS, 30, now, 'UTC')).toBe(0);
   });
 });
 
-describe('painkillerBreakdown', () => {
+describe('painkillerBreakdownFromIndex', () => {
   const now = Date.parse('2026-06-10T12:00:00.000Z');
 
   it('reports days and doses per used painkiller', () => {
@@ -306,90 +310,82 @@ describe('painkillerBreakdown', () => {
       dose('2026-06-09T20:00:00.000Z', 'tylenol', 't2'),
       dose('2026-06-08T09:00:00.000Z', 'naproxen', 'n1'),
     ];
-    expect(painkillerBreakdown(meds, 30, now, 'UTC')).toEqual([
+    expect(painkillerBreakdownFromIndex(buildMedIndex(meds), 30, now, 'UTC')).toEqual([
       { medId: 'tylenol', days: 1, doses: 2 },
       { medId: 'naproxen', days: 1, doses: 1 },
     ]);
   });
 
   it('omits unused meds and ignores invalid timestamps', () => {
-    expect(painkillerBreakdown([dose('nope', 'ibuprofen', 'bad')], 30, now, 'UTC')).toEqual([]);
+    const index = buildMedIndex([dose('nope', 'ibuprofen', 'bad')]);
+    expect(painkillerBreakdownFromIndex(index, 30, now, 'UTC')).toEqual([]);
   });
 });
 
 describe('med index variants', () => {
   const now = Date.parse('2026-06-10T12:00:00.000Z');
-  const ZONES = ['UTC', 'America/New_York', 'Pacific/Kiritimati', 'Australia/Lord_Howe'];
-
-  function fixtureMeds(): MedEvent[] {
-    let seed = 12345;
-    const rand = () => {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return seed / 0x100000000;
-    };
-    const ids = ['nurtec', ...PAINKILLER_MED_IDS, 'emgality', 'custom'];
-    const meds: MedEvent[] = [];
-    for (let i = 0; i < 200; i++) {
-      const id = ids[Math.floor(rand() * ids.length)];
-      if (i % 37 === 0) {
-        meds.push(dose('not-a-date', id, `bad-${i}`));
-        continue;
-      }
-      // Spread across 100 days around now, including future instants.
-      const ts = new Date(now + Math.floor((rand() - 0.5) * 200 * DAY_MS)).toISOString();
-      meds.push(dose(ts, id, `m-${i}`));
-    }
-    return meds;
-  }
-
-  it('matches the array helpers across unsorted, dirty, future and duplicate data', () => {
-    const meds = fixtureMeds();
-    const index = buildMedIndex(meds);
-
-    for (const timeZone of ZONES) {
-      for (const windowDays of [0, 1, 30, Number.NaN, Number.POSITIVE_INFINITY]) {
-        expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, windowDays, now, timeZone))
-          .toBe(medUnionDaysInWindow(meds, PAINKILLER_MED_IDS, windowDays, now, timeZone));
-        expect(usageDaysInWindowFromIndex(index, 'nurtec', windowDays, now, timeZone))
-          .toBe(usageDaysInWindow(meds, 'nurtec', windowDays, now, timeZone));
-        expect(painkillerBreakdownFromIndex(index, windowDays, now, timeZone))
-          .toEqual(painkillerBreakdown(meds, windowDays, now, timeZone));
-      }
-
-      expect(daysSinceLastFromIndex(index, 'nurtec', now, timeZone))
-        .toBe(daysSinceLast(meds, 'nurtec', now, timeZone));
-      expect(daysSinceLastFromIndex(index, 'custom', now, timeZone))
-        .toBe(daysSinceLast(meds, 'custom', now, timeZone));
-    }
-  });
+  const DAY = 86400000;
 
   it('keeps one index valid across timezone changes', () => {
+    // One index, four zones, a malformed legacy row and a future instant: the
+    // index is built once and queried repeatedly, and `now` does not cap it.
     const meds = [
       dose('2026-05-31T00:30:00.000Z', 'tylenol', 't1'),
       dose('2026-05-31T12:30:00.000Z', 'ibuprofen', 'i1'),
+      dose('not-a-date', 'tylenol', 'bad'),
+      dose('2026-06-02T12:00:00.000Z', 'tylenol', 'future'),
     ];
     const index = buildMedIndex(meds);
     const at = Date.parse('2026-06-01T00:00:00.000Z');
 
-    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati'))
-      .toBe(2);
-    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'UTC'))
-      .toBe(1);
-    expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati'))
-      .toBe(2);
+    // Pacific/Kiritimati splits the two May 31 UTC instants into two local
+    // days; New York keeps May 30/May 31 for the first two.
+    const expectedByZone: Record<string, [number, number]> = {
+      UTC: [2, 2],
+      'America/New_York': [3, 3],
+      'Pacific/Kiritimati': [3, 3],
+      'Australia/Lord_Howe': [2, 2],
+    };
+    for (const [timeZone, [within30, within1]] of Object.entries(expectedByZone)) {
+      expect(
+        medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, timeZone),
+        `${timeZone} 30d`,
+      ).toBe(within30);
+      expect(
+        medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 1, at, timeZone),
+        `${timeZone} 1d`,
+      ).toBe(within1);
+    }
+
+    // The future dose is included (UTC: May 31 + Jun 2), and the malformed row
+    // contributes nothing; querying again with the same index is stable.
+    expect(usageDaysInWindowFromIndex(index, 'tylenol', 30, at, 'UTC')).toBe(2);
+    expect(
+      medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 30, at, 'Pacific/Kiritimati'),
+    ).toBe(3);
   });
 
   it('preserves the inclusive cutoff and duplicate-dose counts', () => {
+    const cutoffIso = new Date(now - 2 * DAY).toISOString();
     const meds = [
-      dose(new Date(now - 2 * DAY_MS).toISOString(), 'tylenol', 'cutoff'),
-      dose(new Date(now - 2 * DAY_MS - 1).toISOString(), 'tylenol', 'before'),
-      dose(new Date(now - 2 * DAY_MS).toISOString(), 'tylenol', 'dupe'),
+      dose(cutoffIso, 'tylenol', 'cutoff'),
+      dose(new Date(now - 2 * DAY - 1).toISOString(), 'tylenol', 'before'),
+      dose(cutoffIso, 'tylenol', 'dupe'),
+      dose('not-a-date', 'tylenol', 'bad'),
     ];
     const index = buildMedIndex(meds);
     expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, 2, now, 'UTC')).toBe(1);
+    // Duplicate instants are preserved as separate doses on the one day.
     expect(painkillerBreakdownFromIndex(index, 2, now, 'UTC')).toEqual([
       { medId: 'tylenol', days: 1, doses: 2 },
     ]);
+
+    // Zero and non-finite windows are unusable and produce no usage at all.
+    for (const windowDays of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(medUnionDaysInWindowFromIndex(index, PAINKILLER_MED_IDS, windowDays, now, 'UTC'))
+        .toBe(0);
+      expect(painkillerBreakdownFromIndex(index, windowDays, now, 'UTC')).toEqual([]);
+    }
   });
 });
 

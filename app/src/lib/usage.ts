@@ -115,91 +115,12 @@ export function painkillerMismatchNote(readOnly: boolean, rule: UsageRule): stri
 }
 
 /**
- * Distinct calendar days on which a med was used within the last `windowDays`
- * (a rolling window counted back from `now`).
- *
- * The rolling cutoff is deliberately unchanged: `now - windowDays * 86400000`
- * with inclusive `>=`, so overuse limits stay fixed-duration. Days are
- * bucketed with the shared local-day key in the configured IANA zone (falling
- * back to the system zone when omitted), never the UTC slice, so a dose taken
- * just before local midnight counts for the day the user experienced.
+ * Per-med day/dose counts for the shared painkiller card.
  */
-export function usageDaysInWindow(
-  meds: MedEvent[],
-  medId: string,
-  windowDays: number,
-  now: number,
-  timeZone?: string,
-): number {
-  return medUnionDaysInWindow(meds, [medId], windowDays, now, timeZone);
-}
-
-/**
- * Distinct configured-zone days on which ANY of `medIds` was used inside the
- * rolling window — the aggregate "painkiller days" metric.
- *
- * Two doses of different painkillers on one day are ONE medication-overuse
- * day, no matter how many tablets were taken. Individual `MedEvent` records and
- * their per-med counts are untouched; only this view unions them.
- */
-export function medUnionDaysInWindow(
-  meds: MedEvent[],
-  medIds: readonly string[],
-  windowDays: number,
-  now: number,
-  timeZone?: string,
-): number {
-  if (!Number.isFinite(windowDays) || windowDays <= 0) return 0;
-  const ids = new Set(medIds);
-  if (ids.size === 0) return 0;
-  const cutoff = now - windowDays * 86400000;
-  const days = new Set<string>();
-  for (const m of meds) {
-    if (!ids.has(m.medId)) continue;
-    const t = Date.parse(m.ts);
-    // Legacy/imported rows may carry an unparseable ts; ignore them.
-    if (!Number.isFinite(t) || t < cutoff) continue;
-    days.add(localDayKey(t, timeZone));
-  }
-  return days.size;
-}
-
-/** Per-med day/dose counts for the shared painkiller card. */
 export interface PainkillerBreakdownEntry {
   medId: string;
   days: number;
   doses: number;
-}
-
-/**
- * Per-med breakdown behind the aggregate painkiller number, newest data only.
- * Used for the compact "which meds" line and the accessible card name.
- */
-export function painkillerBreakdown(
-  meds: MedEvent[],
-  windowDays: number,
-  now: number,
-  timeZone?: string,
-): PainkillerBreakdownEntry[] {
-  if (!Number.isFinite(windowDays) || windowDays <= 0) return [];
-  const cutoff = now - windowDays * 86400000;
-  const byMed = new Map<string, { days: Set<string>; doses: number }>();
-  for (const m of meds) {
-    if (!PAINKILLER_MED_IDS.includes(m.medId as (typeof PAINKILLER_MED_IDS)[number])) continue;
-    const t = Date.parse(m.ts);
-    if (!Number.isFinite(t) || t < cutoff) continue;
-    const entry = byMed.get(m.medId) ?? { days: new Set<string>(), doses: 0 };
-    entry.days.add(localDayKey(t, timeZone));
-    entry.doses += 1;
-    byMed.set(m.medId, entry);
-  }
-  return PAINKILLER_MED_IDS
-    .filter((medId) => byMed.has(medId))
-    .map((medId) => ({
-      medId,
-      days: byMed.get(medId)!.days.size,
-      doses: byMed.get(medId)!.doses,
-    }));
 }
 
 /**
@@ -292,15 +213,4 @@ export function painkillerBreakdownFromIndex(
     if (doses > 0) entries.push({ medId, days: days.size, doses });
   }
   return entries;
-}
-
-export function daysSinceLastFromIndex(
-  index: MedIndex,
-  medId: string,
-  now: number,
-  timeZone?: string,
-): number | null {
-  const latest = latestMedInstant(index, medId);
-  if (latest === null) return null;
-  return diffDayKeys(localDayKey(now, timeZone), localDayKey(latest, timeZone));
 }

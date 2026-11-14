@@ -12,9 +12,8 @@ A frontend-only demo is published at
 
 ## Deployment
 
-The slop bot has written DEPLOY.md. It's awful to read because AI writing is insufferable, but essentially
-
-Docker Compose with contents:
+The full deployment runbook is [DEPLOY.md](DEPLOY.md). The Compose service and
+environment variables are:
 
 ```yaml
 services:

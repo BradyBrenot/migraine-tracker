@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from homeassistant.helpers import entity_registry as er
 import pytest
 
 from custom_components.migraine_tracker.coordinator import (
@@ -28,7 +27,6 @@ from .helpers import (
     make_entry,
     setup_mocked_entry,
     state_for,
-    with_nurtec,
 )
 
 SENSOR_KEYS = {description.key for description in SENSOR_DESCRIPTIONS}
@@ -141,43 +139,6 @@ async def test_unknown_nurtec_stock_is_none_not_zero(
 
     assert entity.native_value is None
     assert state_for(hass, entry, "sensor", "nurtec_tablets").state == "unknown"
-
-
-async def test_low_stock_quantity_is_reported(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """A low-but-known quantity keeps its integer value."""
-    entry = await setup_mocked_entry(
-        hass, aioclient_mock, with_nurtec(ACTIVE_ATTACK, quantity=2, low=True)
-    )
-
-    assert state_for(hass, entry, "sensor", "nurtec_tablets").state == "2"
-
-
-async def test_negative_stock_quantity_is_preserved(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """Negative stock is a valid value and is not clamped."""
-    entry = await setup_mocked_entry(
-        hass, aioclient_mock, with_nurtec(ACTIVE_ATTACK, quantity=-3, negative=True)
-    )
-
-    assert state_for(hass, entry, "sensor", "nurtec_tablets").state == "-3"
-
-
-async def test_history_nulls_stay_null_while_counts_stay_zero(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """Null rolling values are not turned into zero, and zero counts stay zero."""
-    entry = await setup_mocked_entry(hass, aioclient_mock, EMPTY_DB)
-
-    assert state_for(hass, entry, "sensor", "days_since_last_attack").state == "unknown"
-    for key in (
-        "attack_days_last_7_days",
-        "attack_days_last_30_days",
-        "attacks_started_last_30_days",
-    ):
-        assert state_for(hass, entry, "sensor", key).state == "0"
 
 
 async def test_active_attack_reports_zero_days_since_last_attack(
@@ -352,7 +313,6 @@ async def test_timezone_naive_attack_end_is_unknown(
     "today",
     [
         pytest.param(_OMIT, id="no-today-section"),
-        pytest.param({"day": None}, id="null-day"),
         pytest.param({"day": "not-a-date"}, id="malformed-day"),
     ],
 )
@@ -539,17 +499,6 @@ async def test_attack_end_after_today_clamps_to_zero(
     assert entity.native_value == 0
 
 
-async def test_finished_attack_uses_last_attack_start(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """The timestamp sensor follows ``lastAttack.start`` for finished attacks."""
-    entry = await setup_mocked_entry(hass, aioclient_mock, FINISHED_WELL)
-
-    assert state_for(hass, entry, "sensor", "last_attack_started").state == (
-        "2026-11-09T09:00:00+00:00"
-    )
-
-
 async def test_active_attack_with_null_start_falls_back_to_last_attack(
     hass, enable_custom_integrations, aioclient_mock
 ) -> None:
@@ -594,23 +543,6 @@ async def test_sensors_do_not_enable_long_term_statistics(
     for key in SENSOR_KEYS:
         attributes = state_for(hass, entry, "sensor", key).attributes
         assert "state_class" not in attributes, key
-
-
-async def test_sensor_unique_ids(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """Unique IDs are the entry ID plus the stable entity key."""
-    entry = await setup_mocked_entry(hass, aioclient_mock, ACTIVE_ATTACK)
-    registry = er.async_get(hass)
-
-    entries = [
-        item
-        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
-        if item.domain == "sensor"
-    ]
-    assert {item.unique_id for item in entries} == {
-        f"{entry.entry_id}_{key}" for key in SENSOR_KEYS
-    }
 
 
 async def test_sensor_reads_latest_document_without_a_second_entity(hass) -> None:

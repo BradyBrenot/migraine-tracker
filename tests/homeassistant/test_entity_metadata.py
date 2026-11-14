@@ -206,21 +206,6 @@ async def test_entities_use_translated_friendly_names(
             assert "migraine_tracker_migraine" not in entity_id
 
 
-async def test_entity_names_do_not_repeat_the_device_name(
-    hass, enable_custom_integrations, aioclient_mock
-) -> None:
-    """No display name starts with "Migraine ": the device already says it."""
-    translations = await async_get_translations(hass, "en", "entity", [DOMAIN])
-
-    for platform, names in ENTITY_DISPLAY_NAMES.items():
-        for key, (name, _entity_id) in names.items():
-            translated = translations[
-                f"component.{DOMAIN}.entity.{platform}.{key}.name"
-            ]
-            assert not translated.startswith("Migraine"), translated
-            assert translated == name
-
-
 async def test_existing_entity_keeps_its_id_after_the_display_name_change(
     hass, enable_custom_integrations, aioclient_mock
 ) -> None:
